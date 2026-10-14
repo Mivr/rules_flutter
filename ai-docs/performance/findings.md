@@ -266,3 +266,24 @@ Raw data: `results/p12_compiled_tools.json` (same setup as above).
   tools the benchmark uses: `kernel_filter`, `compile_shader`,
   `generate_asset_manifest`, `bundle_app` and `web_template`.
 - Test runfiles still carry the SDK: plan 1.1.
+
+## Shaders once per platform (plan 1.3, `14e5844`)
+
+Shaders a dependency declares (the SDK's `ink_sparkle` / `stretch_effect`, a
+`flutter_library`'s `shaders` and `pkg_shaders`) are compiled by an aspect on
+`deps`, on the declaring target, once per platform: one aspect for
+`flutter_test` (tester), one for the web bundle, one for the native apps (which
+reads the platform from the target constraints, as the app rule does). Each
+compiled file records its platform, and a consumer only takes those that match
+its own; a target's own `shaders`, and every shader of a target with
+`require_sksl_shaders = True`, still compile at the target. Bundle paths are
+unchanged. Raw data: `results/p13_shaders_once.json`.
+
+| Clean build                   | 1.2                              | 1.3                           |
+| ----------------------------- | -------------------------------- | ----------------------------- |
+| Shader compiles               | 64 (60 tester, 2 web, 2 Linux)   | **6** (2 each)                |
+| Shader compile time (summed)  | 125 s                            | **38 s**                      |
+| Sandboxed actions             | 144                              | **86**                        |
+
+The count no longer grows with the number of tests and apps: it is the
+number of distinct shaders times the platforms built.

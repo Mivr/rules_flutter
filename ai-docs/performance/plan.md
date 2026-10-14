@@ -14,7 +14,7 @@ before/after numbers from the benchmark (item 0.2).
 
 ## Phase 1: Flutter-only work (no overlap with rules_dart)
 
-Landed: H0 (`d36f9e7`), T1 (`7ba01b7`), 1.2 (`280bfb9`). In progress: 1.3.
+Landed: H0 (`d36f9e7`), T1 (`7ba01b7`), 1.2 (`280bfb9`), 1.3 (`14e5844`).
 
 Order: H0 and T1 first (H0 is small; T1 changes who owns the SDK-input work), then 1.2, 1.1, T2, 1.3, 1.4. Nothing lands before the 0.2 baseline is recorded.
 
