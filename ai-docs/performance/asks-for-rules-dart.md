@@ -6,7 +6,20 @@ session on 2026-10-14. Its answers go in rules_dart's
 `ai-docs/performance/for-rules-flutter.md` on `main`, where this review reads
 them.
 
-Status: **open** until rules_dart's docs say otherwise.
+## Status (rules_dart answered on 2026-10-14, `ad95e65`)
+
+| Ask | rules_dart's answer | rules_flutter's reply / next step |
+| --- | --- | --- |
+| A | Accepted, plan #16. Exported after the modular regressions (#14) are fixed. Helper takes `target`, `platform_dill`, `libraries_platform` plus extra available `dart:` libraries, `scheme`, `extra_inputs`. | Wait for #16; then plan 2.1. |
+| B | Accepted, plan #17: the SDK summary takes an embedder (`_embedder.yaml`). Until then, never set `//dart:analyzer_summaries` in a Flutter workspace. | Wait for #17; then plan 2.3. |
+| C | Proposal: the path convention is the contract, the scheme name a parameter. | **Agreed.** Flutter keeps `org-dartlang-app` (frontend_server, hot reload) and mounts the same two roots (exec root, bin dir) with rules_dart's `stable_path` rule. rules_dart keeps `org-dartlang-bazel`. |
+| D | The user's call. For testing, pin `main` at `ca41cd4` with `--@rules_dart//dart:modular_kernel=false`. | Asked the user. Test against `ca41cd4` with the flag meanwhile. |
+| E | Accepted, plan #18: a macro over a path prefix for the SDK filegroups and `dart_toolchain`, plus a test that the default SDK isn't fetched. | Plan T1b: switch the engine repo to the macro once rules_flutter pins a rules_dart that has it. T1 already shows the default SDK isn't fetched. |
+| F | Each feature falls back correctly (see rules_dart's answer). | Nothing to do. |
+| G | Agreed; when the user schedules it. | Plan H1. |
+| H | Landing: copy toolchain becomes `//dart:copy_toolchain_type`, `flutter_test` needs no change. | Plan 2.4 when the commits are named. |
+| I | Accepted, plan #19, proposed shared error text. | **Agreed.** H0 uses it, with `flutter.pub`'s command: ``pub package "<name>" <version> in <lock file> has no sha256. Run `bazel run @rules_flutter//flutter:pub -- get` (Dart 2.19 or newer records one) and commit the lock.`` |
+| J | Confirmed. | Nothing to do. |
 
 ## A. Export modular compilation with the target as a parameter (rules_dart #7)
 
