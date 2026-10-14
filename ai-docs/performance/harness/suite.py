@@ -11,7 +11,7 @@ With none given, all four run. Writes $RULES_FLUTTER_BENCH_DIR/results/<label>.j
 Adapted from rules_dart's harness suite.py. Workspaces are generated fresh under
 the bench root; `bazel clean` only ever runs inside those.
 """
-import argparse, json, os, re, subprocess, sys, time, statistics, datetime
+import argparse, datetime, json, os, re, shutil, statistics, subprocess, sys, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -76,21 +76,30 @@ def build(ws, bazel_args, name):
     return {"wall_s": round(dt, 2), "sandboxed": sandboxed(out), "actions": summarize(p)}
 
 
-def gen(name, n, f):
-    ws = f"{S}/{name}"
-    cmd = [sys.executable, os.path.join(HERE, "gen_bench.py"), ws, str(n), str(f), rules]
-    if rules_dart:
-        cmd += ["--rules-dart", rules_dart]
-    subprocess.run(cmd, check=True)
-    return ws
-
-
-WS = {}
+WS = {}  # workspace name -> path, for every workspace this run generated
+OB_ROOT = os.path.join(S, "ob", label)
 
 
 def ws_for(name, n, f):
+    """Generates the workspace once per run, with its own output base for this label.
+
+    The output base is emptied first, so each label starts with nothing fetched. The
+    workspace is registered before generation, so the final `bazel shutdown` covers
+    it even if generation fails.
+    """
     if name not in WS:
-        WS[name] = gen(name, n, f)
+        ws = f"{S}/{name}"
+        ob = os.path.join(OB_ROOT, name)
+        if os.path.exists(ob):
+            subprocess.run(["chmod", "-R", "u+w", ob], check=True)
+            shutil.rmtree(ob)
+        WS[name] = ws
+        res["output_base"][name] = ob
+        cmd = [sys.executable, os.path.join(HERE, "gen_bench.py"), ws, str(n), str(f), rules,
+               "--output-base", ob]
+        if rules_dart:
+            cmd += ["--rules-dart", rules_dart]
+        subprocess.run(cmd, check=True)
     return WS[name]
 
 
@@ -216,60 +225,67 @@ res = {
     "files_per_package": sz["files"],
     "bazel": bazel_version(),
     "date": datetime.datetime.now().isoformat(timespec="seconds"),
+    "output_base": {},
     "scenarios": {},
 }
 if rules_dart:
     res["rules_dart_rev"] = git_rev(rules_dart)
 R = res["scenarios"]
+try:
 
-if want("analysis"):
-    ws = ws_for("bench_analysis", sz["analysis_pkgs"], sz["analysis_files"])
-    sh("bazel build //... --nobuild", ws)  # warm the analysis cache
-    ts = []
-    for i in range(3):
-        # A changed --define changes the configuration, so each run re-analyses everything.
-        dt, _ = sh(f"bazel build //... --nobuild --define=bench={label}-{i}-{time.time_ns()}", ws)
-        ts.append(round(dt, 2))
-    R[f"reanalysis_{sz['analysis_pkgs']}pkg_s"] = round(statistics.median(ts), 2)
-    R[f"reanalysis_{sz['analysis_pkgs']}pkg_runs_s"] = ts
+    if want("analysis"):
+        ws = ws_for("bench_analysis", sz["analysis_pkgs"], sz["analysis_files"])
+        sh("bazel build //... --nobuild", ws)  # warm the analysis cache
+        ts = []
+        for i in range(3):
+            # A changed --define changes the configuration, so each run re-analyses everything.
+            dt, _ = sh(f"bazel build //... --nobuild --define=bench={label}-{i}-{time.time_ns()}", ws)
+            ts.append(round(dt, 2))
+        R[f"reanalysis_{sz['analysis_pkgs']}pkg_s"] = round(statistics.median(ts), 2)
+        R[f"reanalysis_{sz['analysis_pkgs']}pkg_runs_s"] = ts
 
-if want("build"):
-    ws = ws_for("bench", sz["pkgs"], sz["files"])
-    sh("bazel clean", ws)
-    R["clean_build"] = build(ws, "build //...", "clean_build")
-    R["fetch_footprint"] = fetch_footprint(ws)
-    bumper.bump(os.path.join(ws, LEAF))
-    R["body_edit_build"] = build(ws, "build //...", "body_edit_build")
-    api_edit(ws, True)
-    R["api_edit_build"] = build(ws, "build //...", "api_edit_build")
-    api_edit(ws, False)
-    sh("bazel build //...", ws)  # back to the body-edited state, nothing timed
-    R["null_build"] = build(ws, "build //...", "null_build")
-    R["null_build_s"] = R["null_build"]["wall_s"]
+    if want("build"):
+        ws = ws_for("bench", sz["pkgs"], sz["files"])
+        sh("bazel clean", ws)
+        R["clean_build"] = build(ws, "build //...", "clean_build")
+        R["fetch_footprint"] = fetch_footprint(ws)
+        bumper.bump(os.path.join(ws, LEAF))
+        R["body_edit_build"] = build(ws, "build //...", "body_edit_build")
+        api_edit(ws, True)
+        R["api_edit_build"] = build(ws, "build //...", "api_edit_build")
+        api_edit(ws, False)
+        sh("bazel build //...", ws)  # back to the body-edited state, nothing timed
+        R["null_build"] = build(ws, "build //...", "null_build")
+        R["null_build_s"] = R["null_build"]["wall_s"]
 
-if want("test"):
-    ws = ws_for("bench", sz["pkgs"], sz["files"])
-    sh("bazel build //...", ws)
-    r = build(ws, "test //... --nocache_test_results", "test")
-    tr = r["actions"].get("TestRunner", {"n": 1, "cpu_s": 0})
-    r["per_test_s"] = round(tr["cpu_s"] / max(tr["n"], 1), 3)
-    R["test_run"] = r
-    R["test_runfiles"] = runfiles(ws, TEST_PKG)
-    R["kernel_inputs"] = kernel_inputs(ws, TEST_TARGET)
+    if want("test"):
+        ws = ws_for("bench", sz["pkgs"], sz["files"])
+        sh("bazel build //...", ws)
+        r = build(ws, "test //... --nocache_test_results", "test")
+        tr = r["actions"].get("TestRunner", {"n": 1, "cpu_s": 0})
+        r["per_test_s"] = round(tr["cpu_s"] / max(tr["n"], 1), 3)
+        R["test_run"] = r
+        R["test_runfiles"] = runfiles(ws, TEST_PKG)
+        R["kernel_inputs"] = kernel_inputs(ws, TEST_TARGET)
 
-if want("lint"):
-    ws = ws_for("bench", sz["pkgs"], sz["files"])
-    sh("bazel clean", ws)
-    R["lint_clean"] = build(ws, "build --config=lint //...", "lint_clean")
-    bumper.bump(os.path.join(ws, LEAF))
-    R["lint_body_edit"] = build(ws, "build --config=lint //...", "lint_body_edit")
+    if want("lint"):
+        ws = ws_for("bench", sz["pkgs"], sz["files"])
+        sh("bazel clean", ws)
+        R["lint_clean"] = build(ws, "build --config=lint //...", "lint_clean")
+        bumper.bump(os.path.join(ws, LEAF))
+        R["lint_body_edit"] = build(ws, "build --config=lint //...", "lint_body_edit")
 
-out = f"{S}/results/{label}.json"
-with open(out, "w") as f:
-    json.dump(res, f, indent=1)
-if args.publish:
-    pub_dir = os.path.join(rules, "ai-docs", "performance", "results")
-    os.makedirs(pub_dir, exist_ok=True)
-    with open(os.path.join(pub_dir, f"{label}.json"), "w") as f:
+    out = f"{S}/results/{label}.json"
+    with open(out, "w") as f:
         json.dump(res, f, indent=1)
-print(json.dumps(res, indent=1))
+    if args.publish:
+        pub_dir = os.path.join(rules, "ai-docs", "performance", "results")
+        os.makedirs(pub_dir, exist_ok=True)
+        with open(os.path.join(pub_dir, f"{label}.json"), "w") as f:
+            json.dump(res, f, indent=1)
+    print(json.dumps(res, indent=1))
+finally:
+    # Stop the server of every output base this run used, even after a failure.
+    for ws in WS.values():
+        if os.path.isdir(ws):
+            subprocess.run(["bazel", "shutdown"], cwd=ws, capture_output=True)

@@ -210,9 +210,12 @@ void main() {{
 '''
 
 
-def generate(out, n_pkgs, n_files, rules, rules_dart=None):
+def generate(out, n_pkgs, n_files, rules, rules_dart=None, output_base=None):
     shutil.rmtree(out, ignore_errors=True)
     os.makedirs(out)
+    if output_base:
+        # Read by every bazel call in this workspace, including the fetch below.
+        w(out, ".bazelrc.user", f"startup --output_base={output_base}\n")
     last = n_pkgs - 1
     w(out, "MODULE.bazel", module_bazel(rules, rules_dart is not None))
     # hello_world's lock: web_example's has no flutter_test entry, which the tests need.
@@ -277,11 +280,13 @@ def main():
     ap.add_argument("rules_flutter")
     ap.add_argument("--rules-dart", default=None)
     ap.add_argument("--no-format", action="store_true")
+    ap.add_argument("--output-base", default=None,
+                    help="Bazel output base for this workspace, written to .bazelrc.user")
     a = ap.parse_args()
     rules = os.path.abspath(a.rules_flutter)
     rules_dart = os.path.abspath(a.rules_dart) if a.rules_dart else None
     out = os.path.abspath(a.out)
-    generate(out, a.packages, a.files_per_package, rules, rules_dart)
+    generate(out, a.packages, a.files_per_package, rules, rules_dart, a.output_base)
     if not a.no_format:
         format_workspace(out)
     print("generated", out)

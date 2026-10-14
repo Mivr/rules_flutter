@@ -51,8 +51,21 @@ Against a local rules_dart, add `--rules-dart <rules_dart checkout>`. The
 generated `.bazelrc` then gets `common --override_module=rules_dart=<path>`.
 
 Every generated workspace's `.bazelrc` sets `startup --host_jvm_args=-Xmx4g`
-and `common --jobs=8`, and `--lockfile_mode=off`. Run `bazel shutdown` in each
-bench workspace when you are finished with it.
+and `common --jobs=8`, and `--lockfile_mode=off`.
+
+**Output bases.** Each workspace gets its own Bazel output base, under
+`<bench root>/ob/<label>/<workspace>/` (`ob/<label>/bench/`, `ob/<label>/bench_analysis/`).
+`gen_bench.py` writes the path to the workspace's `.bazelrc.user`, so every bazel
+call there uses it, including the fetch. A label always starts from an empty output
+base: the suite deletes an earlier one with the same label first. This is what makes
+`fetch_footprint` report only what this run fetched. The shared repository cache
+keeps the re-fetch cheap. The suite runs `bazel shutdown` in every workspace it
+used, in a `finally`, so no server outlives the run. The output base path of each
+workspace is in the result JSON's `output_base` field.
+
+Each output base is about 3-4 GB (the Flutter and Dart SDKs and the build outputs).
+Delete `ob/<label>/` when that label is no longer needed. Shut down its server first,
+with `bazel shutdown` in the workspace.
 
 ## Generated workspace
 
