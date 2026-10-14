@@ -29,6 +29,7 @@ surface small).
 
 load("@rules_dart//dart/pub:pub_lock_package.bzl", "derive_language_version", "make_dart_library_build_content")
 load("@rules_dart//dart/pub:yaml_parser.bzl", "parse_pubspec_deps", "parse_pubspec_sdk_constraint")
+load("//flutter/private:artifact_urls.bzl", "require_sha256")
 load("//flutter/private:flutter_pubspec.bzl", "parse_flutter_assets_block", "parse_flutter_plugin_block")
 
 # Apple source extensions we sweep into the per-platform plugin library.
@@ -1509,7 +1510,7 @@ def _flutter_pub_package_impl(ctx):
     ctx.download(
         url = url,
         output = "_archive.tar.gz",
-        sha256 = ctx.attr.sha256 if ctx.attr.sha256 else "",
+        sha256 = require_sha256(ctx.attr.sha256, url),
     )
     extract = ctx.execute(["tar", "-xzf", "_archive.tar.gz"])
     if extract.return_code != 0:
@@ -1818,7 +1819,7 @@ flutter_pub_package = repository_rule(
             mandatory = True,
         ),
         "sha256": attr.string(
-            doc = "SHA256 hash of the package archive.",
+            doc = "SHA256 hash of the package archive. Taken from the hosted lock entry; an empty value fails the fetch.",
             default = "",
         ),
         "base_url": attr.string(

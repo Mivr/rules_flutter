@@ -8,7 +8,7 @@ For iOS, the gen_snapshot is bundled inside the iOS engine artifact
 engine repo's gen_snapshot_arm64 instead of downloading a separate one.
 """
 
-load(":artifact_urls.bzl", "engine_artifact_url", "gen_snapshot_cross_artifact_path")
+load(":artifact_urls.bzl", "engine_artifact_url", "gen_snapshot_cross_artifact_path", "require_sha256")
 load(":engine_helpers.bzl", "dart_binary_name", "dartaotruntime_binary_name", "gen_snapshot_host_platform", "platform_to_arch", "platform_to_os")
 
 def _flutter_cross_compilation_repo_impl(repository_ctx):
@@ -26,9 +26,10 @@ def _flutter_cross_compilation_repo_impl(repository_ctx):
         # Android and similar: download a target-specific gen_snapshot.
         artifact_host = gen_snapshot_host_platform(host_platform)
         artifact_path = gen_snapshot_cross_artifact_path(target_platform, "release", artifact_host)
+        url = engine_artifact_url(engine_revision, artifact_path)
         repository_ctx.download_and_extract(
-            url = engine_artifact_url(engine_revision, artifact_path),
-            sha256 = repository_ctx.attr.gen_snapshot_sha256 if repository_ctx.attr.gen_snapshot_sha256 else "",
+            url = url,
+            sha256 = require_sha256(repository_ctx.attr.gen_snapshot_sha256, url),
         )
         gen_snapshot_label = ":gen_snapshot"
 

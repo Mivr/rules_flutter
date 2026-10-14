@@ -17,7 +17,7 @@ load("//flutter/private:flutter_macos_engine_repo.bzl", "flutter_macos_engine_re
 load("//flutter/private:flutter_sky_engine_repo.bzl", "flutter_sky_engine_repo")
 load("//flutter/private:flutter_web_sdk_repo.bzl", "flutter_web_sdk_repo")
 load("//flutter/private:toolchains_repo.bzl", "CROSS_COMPILATION_PAIRS", "DESKTOP_CROSS_PAIRS", "HOST_PLATFORMS", "flutter_toolchains_repo")
-load("//flutter/private:versions.bzl", "ARTIFACT_CHECKSUMS", "FLUTTER_VERSIONS", "LINUX_SYSROOT_CHECKSUMS", "flutter_source_sha256")
+load("//flutter/private:versions.bzl", "FLUTTER_VERSIONS", "LINUX_SYSROOT_CHECKSUMS", "flutter_artifact_sha256", "flutter_source_sha256")
 
 def _flutter_engine_artifacts_impl(repository_ctx):
     """Downloads the Flutter engine host artifacts and patched SDK for a given platform."""
@@ -25,13 +25,12 @@ def _flutter_engine_artifacts_impl(repository_ctx):
     platform = repository_ctx.attr.platform
     meta = FLUTTER_VERSIONS[flutter_version]
     engine_revision = meta.engine_revision
-    checksums = ARTIFACT_CHECKSUMS.get(flutter_version, {})
 
     # 1. Download the Flutter-bundled Dart SDK for this host.
     dart_sdk_path = dart_sdk_artifact_path(platform)
     repository_ctx.download_and_extract(
         url = engine_artifact_url(engine_revision, dart_sdk_path),
-        sha256 = checksums.get(dart_sdk_path, ""),
+        sha256 = flutter_artifact_sha256(flutter_version, dart_sdk_path),
         stripPrefix = "dart-sdk",
         output = "dart-sdk",
     )
@@ -40,7 +39,7 @@ def _flutter_engine_artifacts_impl(repository_ctx):
     host_tools_path = host_artifacts_path(platform)
     repository_ctx.download_and_extract(
         url = engine_artifact_url(engine_revision, host_tools_path),
-        sha256 = checksums.get(host_tools_path, ""),
+        sha256 = flutter_artifact_sha256(flutter_version, host_tools_path),
         output = "host-tools",
     )
 
@@ -54,21 +53,21 @@ def _flutter_engine_artifacts_impl(repository_ctx):
         release_tools_path = host_artifacts_path(platform, mode = "release")
         repository_ctx.download_and_extract(
             url = engine_artifact_url(engine_revision, release_tools_path),
-            sha256 = checksums.get(release_tools_path, ""),
+            sha256 = flutter_artifact_sha256(flutter_version, release_tools_path),
             output = "host-tools-release",
         )
 
     # 4. Download the patched SDK (debug platform kernel dills).
     repository_ctx.download_and_extract(
         url = engine_artifact_url(engine_revision, "flutter_patched_sdk.zip"),
-        sha256 = checksums.get("flutter_patched_sdk.zip", ""),
+        sha256 = flutter_artifact_sha256(flutter_version, "flutter_patched_sdk.zip"),
         output = "patched-sdk",
     )
 
     # 5. Download the product patched SDK (release platform kernel dills).
     repository_ctx.download_and_extract(
         url = engine_artifact_url(engine_revision, "flutter_patched_sdk_product.zip"),
-        sha256 = checksums.get("flutter_patched_sdk_product.zip", ""),
+        sha256 = flutter_artifact_sha256(flutter_version, "flutter_patched_sdk_product.zip"),
         output = "patched-sdk-product",
     )
 
@@ -86,7 +85,7 @@ def _flutter_engine_artifacts_impl(repository_ctx):
     if engine_release_path:
         repository_ctx.download_and_extract(
             url = engine_artifact_url(engine_revision, engine_release_path),
-            sha256 = checksums.get(engine_release_path, ""),
+            sha256 = flutter_artifact_sha256(flutter_version, engine_release_path),
             output = "engine",
         )
 
@@ -102,7 +101,7 @@ def _flutter_engine_artifacts_impl(repository_ctx):
         if engine_debug_path:
             repository_ctx.download_and_extract(
                 url = engine_artifact_url(engine_revision, engine_debug_path),
-                sha256 = checksums.get(engine_debug_path, ""),
+                sha256 = flutter_artifact_sha256(flutter_version, engine_debug_path),
                 output = "engine-debug",
             )
 
@@ -118,7 +117,7 @@ def _flutter_engine_artifacts_impl(repository_ctx):
         cpp_wrapper_path = "{platform}/flutter-cpp-client-wrapper.zip".format(platform = platform)
         repository_ctx.download_and_extract(
             url = engine_artifact_url(engine_revision, cpp_wrapper_path),
-            sha256 = checksums.get(cpp_wrapper_path, ""),
+            sha256 = flutter_artifact_sha256(flutter_version, cpp_wrapper_path),
             output = "cpp-client-wrapper",
         )
 
@@ -126,7 +125,7 @@ def _flutter_engine_artifacts_impl(repository_ctx):
     font_subset_path = "{platform}/font-subset.zip".format(platform = platform)
     repository_ctx.download_and_extract(
         url = engine_artifact_url(engine_revision, font_subset_path),
-        sha256 = checksums.get(font_subset_path, ""),
+        sha256 = flutter_artifact_sha256(flutter_version, font_subset_path),
         output = "font-subset-tools",
     )
 
@@ -134,7 +133,7 @@ def _flutter_engine_artifacts_impl(repository_ctx):
     material_fonts_url = meta.material_fonts_url
     repository_ctx.download_and_extract(
         url = "https://storage.googleapis.com/" + material_fonts_url,
-        sha256 = checksums.get("material_fonts.zip", ""),
+        sha256 = flutter_artifact_sha256(flutter_version, "material_fonts.zip"),
         output = "material-fonts",
     )
 
@@ -277,7 +276,6 @@ def flutter_register_toolchains(name, **kwargs):
     """
     flutter_version = kwargs["flutter_version"]
     meta = FLUTTER_VERSIONS[flutter_version]
-    checksums = ARTIFACT_CHECKSUMS.get(flutter_version, {})
 
     # FLUTTER_ROOT-shaped tree behind `@rules_flutter//flutter:pub`. Lazily
     # fetched: nothing in a normal build references it.
@@ -314,7 +312,7 @@ def flutter_register_toolchains(name, **kwargs):
             else:
                 artifact_host = gen_snapshot_host_platform(host_platform)
                 gen_snapshot_path = gen_snapshot_cross_artifact_path(target_platform, "release", artifact_host)
-                gen_snapshot_sha256 = checksums.get(gen_snapshot_path, "")
+                gen_snapshot_sha256 = flutter_artifact_sha256(flutter_version, gen_snapshot_path)
 
             flutter_cross_compilation_repo(
                 name = name + "_cross_" + host_platform + "_" + target_platform,
@@ -370,7 +368,7 @@ def flutter_register_toolchains(name, **kwargs):
                 engine_revision = meta.engine_revision,
                 target_os = target_os,
                 target_arch = engine_arch,
-                sha256 = checksums.get(engine_path, ""),
+                sha256 = flutter_artifact_sha256(flutter_version, engine_path),
             )
 
             # Debug engine (JIT — used with -c dbg).
@@ -383,7 +381,7 @@ def flutter_register_toolchains(name, **kwargs):
                     target_os = target_os,
                     target_arch = engine_arch,
                     mode = "debug",
-                    sha256 = checksums.get(engine_debug_path, ""),
+                    sha256 = flutter_artifact_sha256(flutter_version, engine_debug_path),
                 )
 
     # Desktop cross-platform toolchain repos.
@@ -415,7 +413,11 @@ def flutter_register_toolchains(name, **kwargs):
     flutter_web_sdk_repo(
         name = name + "_web_sdk",
         engine_revision = meta.engine_revision,
-        sha256 = checksums.get("flutter-web-sdk.zip", ""),
+        sha256 = flutter_artifact_sha256(flutter_version, "flutter-web-sdk.zip"),
+        dart_sdk_sha256s = {
+            host: flutter_artifact_sha256(flutter_version, dart_sdk_artifact_path(host))
+            for host in HOST_PLATFORMS
+        },
     )
 
     # sky_engine (lazy — only fetched when Flutter code is analyzed). Nothing
@@ -425,7 +427,7 @@ def flutter_register_toolchains(name, **kwargs):
     flutter_sky_engine_repo(
         name = name + "_sky_engine",
         engine_revision = meta.engine_revision,
-        sha256 = checksums.get("sky_engine.zip", ""),
+        sha256 = flutter_artifact_sha256(flutter_version, "sky_engine.zip"),
     )
 
     # Android engine repos (lazy — one per ABI, only downloaded when Android targets are built).
@@ -447,8 +449,8 @@ def flutter_register_toolchains(name, **kwargs):
                 name = name + "_android_engine_" + android_arch,
                 engine_revision = meta.engine_revision,
                 android_arch = android_arch,
-                release_sha256 = checksums.get(android_engine_artifact_path(android_arch, "release"), ""),
-                debug_sha256 = checksums.get(android_engine_artifact_path(android_arch, "debug"), ""),
+                release_sha256 = flutter_artifact_sha256(flutter_version, android_engine_artifact_path(android_arch, "release")),
+                debug_sha256 = flutter_artifact_sha256(flutter_version, android_engine_artifact_path(android_arch, "debug")),
             )
 
     # iOS engine repo (lazy — only downloaded when iOS targets are built).
@@ -459,8 +461,8 @@ def flutter_register_toolchains(name, **kwargs):
     flutter_ios_engine_repo(
         name = name + "_ios_engine",
         engine_revision = meta.engine_revision,
-        release_sha256 = checksums.get(ios_engine_artifact_path("release"), ""),
-        debug_sha256 = checksums.get(ios_engine_artifact_path("debug"), ""),
+        release_sha256 = flutter_artifact_sha256(flutter_version, ios_engine_artifact_path("release")),
+        debug_sha256 = flutter_artifact_sha256(flutter_version, ios_engine_artifact_path("debug")),
     )
 
     # macOS engine alias repo — stable name that delegates to the host

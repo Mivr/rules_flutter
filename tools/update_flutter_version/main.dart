@@ -8,64 +8,19 @@
 ///
 /// What it does:
 ///   1. Looks up the engine revision from the Flutter tag
-///   2. Downloads each artifact and computes SHA-256
+///   2. Downloads each engine artifact the rules fetch (see artifacts.dart)
+///      and computes SHA-256. Exits non-zero if any artifact fails, after
+///      printing the snippet with MISSING in its place.
 ///   3. Prints the Starlark snippet to add to versions.bzl
 library;
 
 import 'dart:convert';
 import 'dart:io';
 
+import 'artifacts.dart';
 import 'shader_flags.dart';
 
 const gcsBase = 'https://storage.googleapis.com/flutter_infra_release/flutter';
-
-const artifacts = [
-  // Patched Dart SDK for Flutter (debug + product).
-  'flutter_patched_sdk.zip',
-  'flutter_patched_sdk_product.zip',
-  // Dart SDK sources for the analyzer. The patched SDKs above serve the
-  // compiler, which reads kernel dills; the analyzer reads sources, and finds
-  // them through this package's lib/_embedder.yaml.
-  'sky_engine.zip',
-  // Host Dart SDK (the Flutter-bundled Dart SDK per host platform).
-  'dart-sdk-darwin-arm64.zip',
-  'dart-sdk-darwin-x64.zip',
-  'dart-sdk-linux-x64.zip',
-  'dart-sdk-linux-arm64.zip',
-  'dart-sdk-windows-x64.zip',
-  // Host tools (frontend_server, gen_snapshot, icudtl.dat).
-  'darwin-arm64/artifacts.zip',
-  'darwin-x64/artifacts.zip',
-  'linux-x64/artifacts.zip',
-  'linux-arm64/artifacts.zip',
-  'windows-x64/artifacts.zip',
-  // Release host tools (product-mode gen_snapshot for AOT builds).
-  // Only macOS publishes separate release host tools archives. On Linux and
-  // Windows the release gen_snapshot is bundled in the desktop engine archive.
-  'darwin-arm64-release/artifacts.zip',
-  'darwin-x64-release/artifacts.zip',
-  // Font-subset tools (const_finder + font-subset binary for icon tree shaking).
-  'darwin-arm64/font-subset.zip',
-  'darwin-x64/font-subset.zip',
-  'linux-x64/font-subset.zip',
-  'linux-arm64/font-subset.zip',
-  'windows-x64/font-subset.zip',
-  // Flutter web SDK.
-  'flutter-web-sdk.zip',
-  // Desktop engine runtime libraries (release mode).
-  'darwin-x64-release/FlutterMacOS.framework.zip',
-  'linux-x64-release/linux-x64-flutter-gtk.zip',
-  'windows-x64-release/windows-x64-flutter.zip',
-  // Desktop engine runtime libraries (debug mode — JIT, needed for -c dbg).
-  'darwin-x64/FlutterMacOS.framework.zip',
-  'linux-x64-debug/linux-x64-flutter-gtk.zip',
-  'windows-x64-debug/windows-x64-flutter.zip',
-  // iOS engine (Flutter.xcframework — release for device, debug for simulator).
-  'ios-release/artifacts.zip',
-  'ios/artifacts.zip',
-  // C++ client wrapper (Windows only — provides flutter/plugin_registry.h).
-  'windows-x64/flutter-cpp-client-wrapper.zip',
-];
 
 Future<void> main(List<String> args) async {
   if (args.isEmpty) {
@@ -126,9 +81,10 @@ Future<void> main(List<String> args) async {
   print('');
 
   final checksums = <String, String>{};
+  final failures = <String>[];
   final client = HttpClient();
 
-  for (final artifact in artifacts) {
+  for (final artifact in allEngineArtifacts()) {
     final url = '$gcsBase/$engineRev/$artifact';
     stdout.write('  $artifact ... ');
 
@@ -138,6 +94,7 @@ Future<void> main(List<String> args) async {
       print(sha);
     } catch (e) {
       print('FAILED ($e)');
+      failures.add(artifact);
     }
   }
 
@@ -156,6 +113,7 @@ Future<void> main(List<String> args) async {
       print(sha);
     } catch (e) {
       print('FAILED ($e)');
+      failures.add('flutter-$version.tar.gz');
     }
   }
 
@@ -169,6 +127,7 @@ Future<void> main(List<String> args) async {
       print(sha);
     } catch (e) {
       print('FAILED ($e)');
+      failures.add('material_fonts.zip');
     }
   }
 
@@ -232,6 +191,20 @@ Future<void> main(List<String> args) async {
 
   _checkShaderFlags(version, flutterRepo, workspaceDir);
 
+  if (failures.isNotEmpty) {
+    stderr.writeln('');
+    stderr.writeln(
+      'ERROR: ${failures.length} artifact(s) could not be downloaded and hashed:',
+    );
+    for (final artifact in failures) {
+      stderr.writeln('  $artifact');
+    }
+    stderr.writeln(
+      'Their entries above read MISSING. Fix the download and re-run.',
+    );
+    exitCode = 1;
+  }
+
   // Print Starlark snippet.
   print('');
   print('=== Add to FLUTTER_VERSIONS in flutter/private/versions.bzl ===');
@@ -247,59 +220,12 @@ Future<void> main(List<String> args) async {
   print('=== Add to ARTIFACT_CHECKSUMS in flutter/private/versions.bzl ===');
   print('');
   print('    "$version": {');
-  print('        # Patched Dart SDK for Flutter (debug + product)');
-  _printChecksum(checksums, 'flutter_patched_sdk.zip');
-  _printChecksum(checksums, 'flutter_patched_sdk_product.zip');
-  print(
-    '        # Dart SDK sources for the analyzer (dart:ui and friends, via lib/_embedder.yaml)',
-  );
-  _printChecksum(checksums, 'sky_engine.zip');
-  print(
-    '        # Host Dart SDK (the Flutter-bundled Dart SDK per host platform)',
-  );
-  _printChecksum(checksums, 'dart-sdk-darwin-arm64.zip');
-  _printChecksum(checksums, 'dart-sdk-darwin-x64.zip');
-  _printChecksum(checksums, 'dart-sdk-linux-x64.zip');
-  _printChecksum(checksums, 'dart-sdk-linux-arm64.zip');
-  _printChecksum(checksums, 'dart-sdk-windows-x64.zip');
-  print('        # Host tools (frontend_server, gen_snapshot, icudtl.dat)');
-  _printChecksum(checksums, 'darwin-arm64/artifacts.zip');
-  _printChecksum(checksums, 'darwin-x64/artifacts.zip');
-  _printChecksum(checksums, 'linux-x64/artifacts.zip');
-  _printChecksum(checksums, 'linux-arm64/artifacts.zip');
-  _printChecksum(checksums, 'windows-x64/artifacts.zip');
-  print(
-    '        # Release host tools (macOS only — product-mode gen_snapshot for AOT builds)',
-  );
-  _printChecksum(checksums, 'darwin-arm64-release/artifacts.zip');
-  _printChecksum(checksums, 'darwin-x64-release/artifacts.zip');
-  print(
-    '        # Font-subset tools (const_finder + font-subset binary for icon tree shaking)',
-  );
-  _printChecksum(checksums, 'darwin-arm64/font-subset.zip');
-  _printChecksum(checksums, 'darwin-x64/font-subset.zip');
-  _printChecksum(checksums, 'linux-x64/font-subset.zip');
-  _printChecksum(checksums, 'linux-arm64/font-subset.zip');
-  _printChecksum(checksums, 'windows-x64/font-subset.zip');
-  print('        # Flutter web SDK');
-  _printChecksum(checksums, 'flutter-web-sdk.zip');
-  print('        # Desktop engine runtime libraries (release mode)');
-  _printChecksum(checksums, 'darwin-x64-release/FlutterMacOS.framework.zip');
-  _printChecksum(checksums, 'linux-x64-release/linux-x64-flutter-gtk.zip');
-  _printChecksum(checksums, 'windows-x64-release/windows-x64-flutter.zip');
-  print(
-    '        # Desktop engine runtime libraries (debug mode — JIT, needed for -c dbg)',
-  );
-  _printChecksum(checksums, 'darwin-x64/FlutterMacOS.framework.zip');
-  _printChecksum(checksums, 'linux-x64-debug/linux-x64-flutter-gtk.zip');
-  _printChecksum(checksums, 'windows-x64-debug/windows-x64-flutter.zip');
-  print(
-    '        # iOS engine (Flutter.xcframework — release for device, debug for simulator)',
-  );
-  _printChecksum(checksums, 'ios-release/artifacts.zip');
-  _printChecksum(checksums, 'ios/artifacts.zip');
-  print('        # C++ client wrapper (Windows — flutter/plugin_registry.h)');
-  _printChecksum(checksums, 'windows-x64/flutter-cpp-client-wrapper.zip');
+  for (final group in engineArtifactGroups()) {
+    print('        # ${group.comment}');
+    for (final artifact in group.paths) {
+      _printChecksum(checksums, artifact);
+    }
+  }
   print(
     '        # Material design fonts (MaterialIcons-Regular.otf, Roboto family)',
   );

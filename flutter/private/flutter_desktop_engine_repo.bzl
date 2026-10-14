@@ -7,7 +7,7 @@ so it's only fetched when a cross-platform desktop build is actually used.
 One repo per unique target platform, shared across hosts.
 """
 
-load(":artifact_urls.bzl", "desktop_engine_artifact_path", "engine_artifact_url")
+load(":artifact_urls.bzl", "desktop_engine_artifact_path", "engine_artifact_url", "require_sha256")
 load(":engine_helpers.bzl", "engine_filegroup_for_os", "extract_macos_inner_framework")
 
 def _flutter_desktop_engine_repo_impl(repository_ctx):
@@ -20,9 +20,10 @@ def _flutter_desktop_engine_repo_impl(repository_ctx):
     if not artifact_path:
         fail("No desktop engine artifact for {}-{}-{}".format(target_os, target_arch, mode))
 
+    url = engine_artifact_url(engine_revision, artifact_path)
     repository_ctx.download_and_extract(
-        url = engine_artifact_url(engine_revision, artifact_path),
-        sha256 = repository_ctx.attr.sha256 if repository_ctx.attr.sha256 else "",
+        url = url,
+        sha256 = require_sha256(repository_ctx.attr.sha256, url),
         output = "engine",
     )
 

@@ -19,7 +19,11 @@ around the check. Pinning also lets Bazel's content-addressed repository cache
 serve every one of those fetches from a single download; an unpinned fetch can
 never be deduplicated that way.
 
-ARTIFACT_CHECKSUMS maps version → artifact_path → sha256.
+ARTIFACT_CHECKSUMS maps version → artifact_path → sha256. It covers every
+engine artifact the repository rules download for a version. Read it only
+through `flutter_artifact_sha256()` below, which refuses a missing entry, so no
+download can be unverified. `bazel run //tools/update_flutter_version -- <v>`
+computes the entries for a version.
 """
 
 load("//flutter/private:artifact_urls.bzl", "flutter_source_tarball_url")
@@ -102,11 +106,41 @@ def flutter_source_sha256(flutter_version):
         ))
     return sha256
 
+def flutter_artifact_sha256(flutter_version, artifact_path):
+    """Returns the recorded sha256 of one engine artifact.
+
+    Every download of an engine artifact goes through this function, so a
+    missing entry fails the fetch with a message naming the artifact, instead
+    of letting Bazel accept whatever bytes the server returns.
+
+    Args:
+        flutter_version: Flutter release tag (e.g. "3.47.5"). Must be a key of
+            FLUTTER_VERSIONS.
+        artifact_path: Path relative to the engine revision directory, as
+            built by a helper in //flutter/private:artifact_urls.bzl
+            (e.g. "android-arm64-release/artifacts.zip").
+
+    Returns:
+        The 64-character hex sha256 string.
+    """
+    sha256 = ARTIFACT_CHECKSUMS.get(flutter_version, {}).get(artifact_path, "")
+    if not sha256:
+        fail((
+            "No sha256 recorded for {path} in Flutter {v}, so the download " +
+            "cannot be verified and will not be fetched.\n" +
+            "Add it to ARTIFACT_CHECKSUMS in flutter/private/versions.bzl " +
+            "under \"{v}\". `bazel run //tools/update_flutter_version -- {v}` " +
+            "downloads each artifact and prints its sha256."
+        ).format(
+            path = artifact_path,
+            v = flutter_version,
+        ))
+    return sha256
+
 # Checksums for engine artifacts, keyed by version then artifact path.
 # Artifact paths are relative to:
 #   https://storage.googleapis.com/flutter_infra_release/flutter/{engine_revision}/
-# Artifacts not listed here will be downloaded without verification.
-# Run `bazel run //tools/update_flutter_version -- <version>` to populate all checksums.
+# Read through flutter_artifact_sha256(); there is no unverified fallback.
 ARTIFACT_CHECKSUMS = {
     "3.41.2": {
         # Patched Dart SDK for Flutter (debug + product)
@@ -140,14 +174,30 @@ ARTIFACT_CHECKSUMS = {
         # Desktop engine runtime libraries (release mode)
         "darwin-x64-release/FlutterMacOS.framework.zip": "d3e7fbfe522cea597abb3110a9ecd1d380bfaa8939c32dc477172f540216feb1",
         "linux-x64-release/linux-x64-flutter-gtk.zip": "7a2e0b8d3bb5f79385ab4eb4ace79b278740a6159ac1acdac7e23217ff679852",
+        "linux-arm64-release/linux-arm64-flutter-gtk.zip": "7d7cb2e70425638f33de80adbd9715a5bb25841e84f0b697ebe9d6dd7611a71c",
         "windows-x64-release/windows-x64-flutter.zip": "99ced94840ab9887054356a213e275dcf9dd6331edf40bf863463cfc8b6576a0",
         # Desktop engine runtime libraries (debug mode — JIT, needed for -c dbg)
         "darwin-x64/FlutterMacOS.framework.zip": "47d14b07f673ad703b28bc96eb0efb20bbbf7a645e1e0a62e2516ca9545f47f4",
         "linux-x64-debug/linux-x64-flutter-gtk.zip": "0c2f047c09f386043201b175e4ba03f1cbb59b5a731a5f60b44d91ce8d4b5b46",
+        "linux-arm64-debug/linux-arm64-flutter-gtk.zip": "a4a4cc7485224548f4d9b46e000e7645d66c76294623f67747192baab1ecf909",
         "windows-x64-debug/windows-x64-flutter.zip": "d654c8bb32a8e8e59faee2fabe76109b6cb2bd4e7f62c41848ac41fc8fe06491",
+        # C++ client wrapper (Windows — flutter/plugin_registry.h)
+        "windows-x64/flutter-cpp-client-wrapper.zip": "0e8e12838935e734fd991efc6d9d466a727d213182e80f126a2e51ba5e43c58e",
         # iOS engine (Flutter.xcframework — release for device, debug for simulator)
         "ios-release/artifacts.zip": "86667d04a9ab172da940debf82c878144e66ffa5fe47a1f854b0267cce47dbee",
         "ios/artifacts.zip": "a0883f9232e203c5dfc6808bcab9abc2a57d98354244e3f6c3b03f715971913a",
+        # Android engine (flutter.jar — release and debug, per ABI)
+        "android-arm64-release/artifacts.zip": "796f17e3766ae5af051ec69b9343dec5125365155ba5cac9e825303910bffd41",
+        "android-arm64/artifacts.zip": "19b5f17ade16428414e3a5e56d7f96618cb23e6bda81b3a10b38a678417c09f5",
+        "android-x64-release/artifacts.zip": "17482b43e6e60fe8c439c872472e2ad24bb350bb37ececc0bf7af5a953c24a98",
+        "android-x64/artifacts.zip": "9b3a4eafc2331482641846ea194098edb843f3c21d5314166da832fc4ba86505",
+        # Android gen_snapshot cross-compilers (release, per host)
+        "android-arm64-release/darwin-x64.zip": "e82037c7c553a305e4c4b879bba81a10e24670cd86f55b40923a2bad961bf722",
+        "android-arm64-release/linux-x64.zip": "1b30d3e79f8cc1cd925b51fd1b3417585d0b34c0faf93fd94f1a3108883f93db",
+        "android-arm64-release/windows-x64.zip": "a76e36c4bb3b231dee0eeaa25ca060d9ca023619467f6c53a8ef16257e281369",
+        "android-x64-release/darwin-x64.zip": "f44e394986fb7d9370d112f365187e5881fed811661b848f874fe43322849a19",
+        "android-x64-release/linux-x64.zip": "5c6b64d33a209eab3d4c79c07a545e4b9f972099807d81ada1420210420eb959",
+        "android-x64-release/windows-x64.zip": "3fa4e61d539d9ae82a17b58c46cc9fc7c22c44277bdc145145f3abfcf94a32dd",
         # Material design fonts (MaterialIcons-Regular.otf, Roboto family)
         "material_fonts.zip": "e56fa8e9bb4589fde964be3de451f3e5b251e4a1eafb1dc98d94add034dd5a86",
     },
@@ -183,16 +233,30 @@ ARTIFACT_CHECKSUMS = {
         # Desktop engine runtime libraries (release mode)
         "darwin-x64-release/FlutterMacOS.framework.zip": "16b3049848433717d3adda2a36b34fe5b9afb8eb709743c167c91145001a34d2",
         "linux-x64-release/linux-x64-flutter-gtk.zip": "20278f9f71b74a7809e4eefc07462f51fd25b29597241462dc44943a6461b732",
+        "linux-arm64-release/linux-arm64-flutter-gtk.zip": "a90141bc83ac4302c49ec4a57d5fabf722bfdeb050cb221065ac89cdaacef622",
         "windows-x64-release/windows-x64-flutter.zip": "a8b1bc20284a7a9fa7c1872881c33924e18fd306707543dd8dfe2683c4cf9955",
         # Desktop engine runtime libraries (debug mode — JIT, needed for -c dbg)
         "darwin-x64/FlutterMacOS.framework.zip": "57b4b7785c3d593ea3b7f0b54887e5b74b424c38fedf5d5d64abe4de797df95b",
         "linux-x64-debug/linux-x64-flutter-gtk.zip": "a20d0900864bfc0ae496fe1ca5e38c86a84dfa7d9571558983a4f41b785bd6c4",
+        "linux-arm64-debug/linux-arm64-flutter-gtk.zip": "5a637608d5e54ac94cc7040ef2c8946ef38bd42d81ec3c808ae6cea687f4869b",
         "windows-x64-debug/windows-x64-flutter.zip": "e1061d2931761a2a735fe292d05904c1057d3011242948d48bb35abf6d5bbf69",
+        # C++ client wrapper (Windows — flutter/plugin_registry.h)
+        "windows-x64/flutter-cpp-client-wrapper.zip": "96ac4ff7108d6bb0a56723486b19d9bff328acf16657c85a0dd7bf4a6d831b84",
         # iOS engine (Flutter.xcframework — release for device, debug for simulator)
         "ios-release/artifacts.zip": "82746372ff1bcf576eff0f53f1b6416aca54a8891e2b13c1d01a8fb1ba1fab7e",
         "ios/artifacts.zip": "aa3af6c94e17b1b762c89c002babfb6c836200b208385c94996a4a161683a2ed",
-        # C++ client wrapper (Windows — flutter/plugin_registry.h)
-        "windows-x64/flutter-cpp-client-wrapper.zip": "96ac4ff7108d6bb0a56723486b19d9bff328acf16657c85a0dd7bf4a6d831b84",
+        # Android engine (flutter.jar — release and debug, per ABI)
+        "android-arm64-release/artifacts.zip": "a1023e80b11fd0db166151fff75db89e304472d88150abee3569e085a68b3bdb",
+        "android-arm64/artifacts.zip": "519502c09c5d8e2672e14673eb10b2b96b1299eaae229b5a3f108879ccf0f158",
+        "android-x64-release/artifacts.zip": "0df7725eba921b17a6025bc5fe7c23716923a3677f7f058ec955863e233715ff",
+        "android-x64/artifacts.zip": "3bedf290977e67b641dac65bc1ef8ab5d3f62626ad9c8e1d8b497c0ecb94a1f7",
+        # Android gen_snapshot cross-compilers (release, per host)
+        "android-arm64-release/darwin-x64.zip": "c168efa8b46db26fb448361883c970faf0813410cacdc269cce92612e49d125b",
+        "android-arm64-release/linux-x64.zip": "626ae17941f296f44afc594e66444c0fd8b8ecae54f286ceada445b172a1c21b",
+        "android-arm64-release/windows-x64.zip": "ae2a91f531086fd7ff41a59c3db864354204749e5940828ac680f92a5081e727",
+        "android-x64-release/darwin-x64.zip": "1fcafd36da1529f234634f472810364f38cf66105392d52b27266c5c92f567e6",
+        "android-x64-release/linux-x64.zip": "1d9121edfd2f5833eda9802a27909d8008695095b94562e0db9cb20e9337ad7e",
+        "android-x64-release/windows-x64.zip": "e7336f70690bf40aecad9f8f1ef5a2f7b91473a87e11672421418cfca0f3d50c",
         # Material design fonts (MaterialIcons-Regular.otf, Roboto family)
         "material_fonts.zip": "e56fa8e9bb4589fde964be3de451f3e5b251e4a1eafb1dc98d94add034dd5a86",
     },
@@ -228,16 +292,30 @@ ARTIFACT_CHECKSUMS = {
         # Desktop engine runtime libraries (release mode)
         "darwin-x64-release/FlutterMacOS.framework.zip": "414badb810f2fabf5afd32c3dbd1c08060cf0e272a2a660705ab213b8b9c29a5",
         "linux-x64-release/linux-x64-flutter-gtk.zip": "649fff2f7c97b6255c91e66e23a0e18d6e185c95464e2adbded2ae2e02b74348",
+        "linux-arm64-release/linux-arm64-flutter-gtk.zip": "fd32cdb5a9331412138564958aff62e2662ebd618c2bff2988757fed70c20858",
         "windows-x64-release/windows-x64-flutter.zip": "03c60d234ebc1a8d8fd85705f780827c2f4a0a93ecdaa8c1cf1465867afff8ff",
         # Desktop engine runtime libraries (debug mode — JIT, needed for -c dbg)
         "darwin-x64/FlutterMacOS.framework.zip": "dcbf4761724952da409e2f27dba950169de1c0424262bbd049d2400f931d0eea",
         "linux-x64-debug/linux-x64-flutter-gtk.zip": "f24957d2d0ffec95c30cbf4f9d6f9fb5e7e2fb2689bbebba56b6233918dc8264",
+        "linux-arm64-debug/linux-arm64-flutter-gtk.zip": "76e6d37367f7f4ddecc4e28f7e71e53430abf4546333e067d00e4a3fbf51c5c5",
         "windows-x64-debug/windows-x64-flutter.zip": "836474f4708f03642b3b3ca16acde792d7c7176ec8739918470ee186bf526683",
+        # C++ client wrapper (Windows — flutter/plugin_registry.h)
+        "windows-x64/flutter-cpp-client-wrapper.zip": "9538c7dc3ddc20aa224382990680407343d566b1b497f83a2b323b518a522168",
         # iOS engine (Flutter.xcframework — release for device, debug for simulator)
         "ios-release/artifacts.zip": "5f8694a3a218aa07129f0acbb2276d7e9d9ff1fc73dd65fcd8b78a9988bf4eb1",
         "ios/artifacts.zip": "911dd68a4297aa074092aea8076b2260364d7de00b9dbb3e3a6250829a073a4d",
-        # C++ client wrapper (Windows — flutter/plugin_registry.h)
-        "windows-x64/flutter-cpp-client-wrapper.zip": "9538c7dc3ddc20aa224382990680407343d566b1b497f83a2b323b518a522168",
+        # Android engine (flutter.jar — release and debug, per ABI)
+        "android-arm64-release/artifacts.zip": "2f9573081075ef6eec6f41c510b83051a592946637c5360ef7f498c321ca3d75",
+        "android-arm64/artifacts.zip": "ab30f62ad3e504ff3f90ad8b9375a36dfaeb515dd931b968c7ea89bbf35a5d33",
+        "android-x64-release/artifacts.zip": "08a1960676f9fd5b65d9246ca498000aafae670f65910c61a7fc445230c0d5de",
+        "android-x64/artifacts.zip": "fabdded4b99b9a8dc13e4b0cd689e056ce4ca5cc2fc720ebdce46540f4f61d93",
+        # Android gen_snapshot cross-compilers (release, per host)
+        "android-arm64-release/darwin-x64.zip": "89e99a9362ea39ee4dcaa47efef6bb55c7c2101507b3ab925b5b12b093064b5f",
+        "android-arm64-release/linux-x64.zip": "8ada43a61478eb161858383d9aff34539e4793e2c96c478ee21ca238d3ac7a65",
+        "android-arm64-release/windows-x64.zip": "707eb3038037f43fea61b62d395f96673b5e155f5385635a67ce315f94d9acf8",
+        "android-x64-release/darwin-x64.zip": "299db5798c359c1f6cf3ff438a09e8a573871e5c35363f1ccdc45e018230e9c4",
+        "android-x64-release/linux-x64.zip": "63500eb4b868f18dcb97cf1d97fcaa7e49527d139da1c75499954d49ea7102b2",
+        "android-x64-release/windows-x64.zip": "e7762f38c5dd9ad036fd6910f416d622cb7567a758890210b0304cba0f876997",
         # Material design fonts (MaterialIcons-Regular.otf, Roboto family)
         "material_fonts.zip": "e56fa8e9bb4589fde964be3de451f3e5b251e4a1eafb1dc98d94add034dd5a86",
     },
@@ -273,16 +351,30 @@ ARTIFACT_CHECKSUMS = {
         # Desktop engine runtime libraries (release mode)
         "darwin-x64-release/FlutterMacOS.framework.zip": "0ac3deba340076c65db5ba548505a149272dd34c5c85c22542821aa8bf53165c",
         "linux-x64-release/linux-x64-flutter-gtk.zip": "00d3565cc1a6b7dfb90f06ac29dff25cd63be54aec36d9f419f28c748a82c016",
+        "linux-arm64-release/linux-arm64-flutter-gtk.zip": "dd5b1b948d927448f0f7ff4ecb4827c526aad6771fad793fdf24ca0ac185ee34",
         "windows-x64-release/windows-x64-flutter.zip": "acb8d655a08c3e8f686efbcd00d2f27343b6cef11c016d84373ad2ed01b46c98",
         # Desktop engine runtime libraries (debug mode — JIT, needed for -c dbg)
         "darwin-x64/FlutterMacOS.framework.zip": "1cf787ccf4c02929574720e1f80e007e780b55b78578fcf9ae36224ee9bdd7de",
         "linux-x64-debug/linux-x64-flutter-gtk.zip": "1617575ec5b6ec19ac3d63b530ee403e3525a439bddb80b1505f62fce36cb823",
+        "linux-arm64-debug/linux-arm64-flutter-gtk.zip": "6a88f1c87f9fd0a2994a1a6de332d70225494974b1a63dcea3188bb7a8d20961",
         "windows-x64-debug/windows-x64-flutter.zip": "bb819021bed98065375903cb42677c5c7f02bdc4e4d5c2dbc5cf66e54bd75beb",
+        # C++ client wrapper (Windows — flutter/plugin_registry.h)
+        "windows-x64/flutter-cpp-client-wrapper.zip": "18dc95fa2945026baaca267b250ac522857834d81a963c75f21d000e161033d8",
         # iOS engine (Flutter.xcframework — release for device, debug for simulator)
         "ios-release/artifacts.zip": "c9c49bf00a4e5695c3c2ee8021f7258d81dabe34836d694be360916d7358066e",
         "ios/artifacts.zip": "e820e25d0c3052201e0e4f7a29b257758029288ae1031b5931344ec4ed3493b7",
-        # C++ client wrapper (Windows — flutter/plugin_registry.h)
-        "windows-x64/flutter-cpp-client-wrapper.zip": "18dc95fa2945026baaca267b250ac522857834d81a963c75f21d000e161033d8",
+        # Android engine (flutter.jar — release and debug, per ABI)
+        "android-arm64-release/artifacts.zip": "1e4ee65120068b4638766e0442d026c4a427c22edc4f79d629cf82be9a91bea1",
+        "android-arm64/artifacts.zip": "42febe1c4b5816c82ac55e5ca39afa1168fc69ff538cbe9f9a50c81c8825de7e",
+        "android-x64-release/artifacts.zip": "25c0a5ce10e32c599058d63b3a370d32660fe0d559b41a040857faf898e2c972",
+        "android-x64/artifacts.zip": "3dd8e64756e0ce3cc5867ba3d9a861cf0fe194a94e063bf9054ed62248510045",
+        # Android gen_snapshot cross-compilers (release, per host)
+        "android-arm64-release/darwin-x64.zip": "a3733c2b3b6dec0f036bf3eb3e6ff208aaff520b650a2095516757f63ef63929",
+        "android-arm64-release/linux-x64.zip": "2cd02e89ba8612c704ec8d1b66ac3eff9028fed5b4d8c285fd526db8d70d71bb",
+        "android-arm64-release/windows-x64.zip": "5b140d7a4b7249d3a980c97ac4418357946ca200107156f6121d2eb9418a3d6f",
+        "android-x64-release/darwin-x64.zip": "a94c9d7df4f55a04901058643ff68385c0ca2a349b99a8243f67a0debd4145b5",
+        "android-x64-release/linux-x64.zip": "92adb0c79935c6c13417558eba13c8d29be464871c591e612ab6dfdf4e7e6815",
+        "android-x64-release/windows-x64.zip": "85e7d866d1fe62bed0b419ebe93b35446c4514ac8c2b9e45a1c585b7b47e2465",
         # Material design fonts (MaterialIcons-Regular.otf, Roboto family)
         "material_fonts.zip": "e56fa8e9bb4589fde964be3de451f3e5b251e4a1eafb1dc98d94add034dd5a86",
     },
@@ -318,16 +410,30 @@ ARTIFACT_CHECKSUMS = {
         # Desktop engine runtime libraries (release mode)
         "darwin-x64-release/FlutterMacOS.framework.zip": "967d6f5aab4a3eaebe8c960f38a4d04c92e7290babc20687aaa2e661be7511a8",
         "linux-x64-release/linux-x64-flutter-gtk.zip": "def37ea8d8ae3559b1dceb25707b2ed953277130b99230bb3e36b32a0dbe6bd9",
+        "linux-arm64-release/linux-arm64-flutter-gtk.zip": "997e5ec4aad66fa2e49a2464e2a9973fced6a68e6f0621448e5ec3d9eb719bc2",
         "windows-x64-release/windows-x64-flutter.zip": "14f0f21dd952ef36708e5504eb1a4d7a17edc743aeed2f8fdc5dd07b0e41f333",
         # Desktop engine runtime libraries (debug mode — JIT, needed for -c dbg)
         "darwin-x64/FlutterMacOS.framework.zip": "32f1882c5a5e66debf23cb5caa6cb50fae377be4889c8088d2f1ee23b7654121",
         "linux-x64-debug/linux-x64-flutter-gtk.zip": "0e4b1a8c3c453e87666c3a750a2826aff067dd7184628a67e91963de92a43ecb",
+        "linux-arm64-debug/linux-arm64-flutter-gtk.zip": "ed177066a97e895981d1a3e8115fa01b0d9779a328c8acc777ebc0a699b0f1aa",
         "windows-x64-debug/windows-x64-flutter.zip": "17ecaa158637145884813f4d306cb575360dfbbf656092939fe8a03b1f9d3ed4",
+        # C++ client wrapper (Windows — flutter/plugin_registry.h)
+        "windows-x64/flutter-cpp-client-wrapper.zip": "ecb61316a0da7c3f8e55bdaadc9c2b07333c72259a3b2de32762c2e123825f0e",
         # iOS engine (Flutter.xcframework — release for device, debug for simulator)
         "ios-release/artifacts.zip": "7f1dcf0011c16c1e82fbbdfcf6eb6ce45bc32269109febdbc811e952afc573e0",
         "ios/artifacts.zip": "436bd866a3e080e3e71d72debb382e3d642a48688d1a4279213a80fa713634bf",
-        # C++ client wrapper (Windows — flutter/plugin_registry.h)
-        "windows-x64/flutter-cpp-client-wrapper.zip": "ecb61316a0da7c3f8e55bdaadc9c2b07333c72259a3b2de32762c2e123825f0e",
+        # Android engine (flutter.jar — release and debug, per ABI)
+        "android-arm64-release/artifacts.zip": "1077ce5324a1fe1daca42817fc524baa45bf85ab54685829bc273d53683b65cb",
+        "android-arm64/artifacts.zip": "a459ba50d42056ede5446565cb7b82072383774e735c058f80cd422bfb2c11bf",
+        "android-x64-release/artifacts.zip": "4d480838a7195a56f44129650212a980ab6ac0a6ecb27294e580dd93a5a44a68",
+        "android-x64/artifacts.zip": "98f7aa3a9988ddc11f5529d59e36ba564384c42a07298fc27c833a56fd591ad5",
+        # Android gen_snapshot cross-compilers (release, per host)
+        "android-arm64-release/darwin-x64.zip": "dae6f51b3eacc529c354a1c87f854c675c332b809f78ded076f619c5d5ab564a",
+        "android-arm64-release/linux-x64.zip": "996de771db712a7261a285b8a01d4dfb6fd49db5dc0ea2706b616718264f28bb",
+        "android-arm64-release/windows-x64.zip": "a8861dac39c6b71b7224d3ddef54d25d63585a9c7d62b604aad1607f33a85f02",
+        "android-x64-release/darwin-x64.zip": "15f10bd10a9c05a69d2df5eb45904212272da9266721dbcbc33f8637f9432c4e",
+        "android-x64-release/linux-x64.zip": "5da57e0c8c5ebbc27e1c5e2b374ae0fd6445bde1b0fc345d1a2297103ba795ab",
+        "android-x64-release/windows-x64.zip": "74ebc1b59d81f92d92de0d76ecf0f93f933a93b93a4108442d828619ec7375bc",
         # Material design fonts (MaterialIcons-Regular.otf, Roboto family)
         "material_fonts.zip": "e56fa8e9bb4589fde964be3de451f3e5b251e4a1eafb1dc98d94add034dd5a86",
     },
@@ -363,16 +469,30 @@ ARTIFACT_CHECKSUMS = {
         # Desktop engine runtime libraries (release mode)
         "darwin-x64-release/FlutterMacOS.framework.zip": "d2a4e969c8b8649a6c84cbeaacf6a439bec5ca620d53280053a0fae4b7ce1d6e",
         "linux-x64-release/linux-x64-flutter-gtk.zip": "3b357f3df3549c69535d92e8e300a66e1057876dc8fed45a8aae7cf7681b7ec4",
+        "linux-arm64-release/linux-arm64-flutter-gtk.zip": "48844b927dfcd2d471f581b28f648ecb0b18969533658c43dad9281486cc501a",
         "windows-x64-release/windows-x64-flutter.zip": "81974f74f1c2b4d1a571bc4c6a7c036301a13f540278f2359a75a38e14330c98",
         # Desktop engine runtime libraries (debug mode — JIT, needed for -c dbg)
         "darwin-x64/FlutterMacOS.framework.zip": "4ce93d61b8ebd4f76f2cb4b95f6fc8c68915aa4bf0023981182bd5a2694af876",
         "linux-x64-debug/linux-x64-flutter-gtk.zip": "e324b676106db415bec41d211caeb7a5137d061704f7af83264f382b4e2ff354",
+        "linux-arm64-debug/linux-arm64-flutter-gtk.zip": "2362f5ea27b35990e5d75822fd9a95da0b24d626cb6c7e8c20700d4c1ef4442d",
         "windows-x64-debug/windows-x64-flutter.zip": "60d3821fc90f871ad6848ee8020b9c0cf5a1a8aad1ba3d1707caedbf6ae5ff8a",
+        # C++ client wrapper (Windows — flutter/plugin_registry.h)
+        "windows-x64/flutter-cpp-client-wrapper.zip": "aaa3355ffaaf2a8f6e9eacc04ee0c8b6e1363ea75b0b52532deeebdbe42817e5",
         # iOS engine (Flutter.xcframework — release for device, debug for simulator)
         "ios-release/artifacts.zip": "c8deec7126fcdfa93d94a20d2aa7fdfe7d4644eea9ae38ccc396a03dbcb25bc0",
         "ios/artifacts.zip": "049f9b7fa1809700dedfe1eb8909bfdbf9494cd0f4c5e380eff56afa7d6f93b3",
-        # C++ client wrapper (Windows — flutter/plugin_registry.h)
-        "windows-x64/flutter-cpp-client-wrapper.zip": "aaa3355ffaaf2a8f6e9eacc04ee0c8b6e1363ea75b0b52532deeebdbe42817e5",
+        # Android engine (flutter.jar — release and debug, per ABI)
+        "android-arm64-release/artifacts.zip": "2944cfc25f6ae7870f96f59c2bf6b581186b38e5d3c6bc2729875a0b81b6e430",
+        "android-arm64/artifacts.zip": "8f39e6d36f4d26c23d8264fb425853940bd365ca476f8023e25feb391f51a46c",
+        "android-x64-release/artifacts.zip": "a8016e7aad56d07ddaf204e93e2f7690bed63cfc6c241e87fbd4f4878a272cd5",
+        "android-x64/artifacts.zip": "43022e1f307d5af50505e352b12875dfefab8081a3ed77572b455ffa2b0804c1",
+        # Android gen_snapshot cross-compilers (release, per host)
+        "android-arm64-release/darwin-x64.zip": "3393a03b5a2cbd4454af0a265c377e0cf8c23eddbbe3cfadc22b3758db2fac98",
+        "android-arm64-release/linux-x64.zip": "4442f4c6cdda45ef489b56758bce232c9b008d991e5e5b7463cf8c1c14217c9a",
+        "android-arm64-release/windows-x64.zip": "f40f37b1eb97e30126f3f4923dc6843679ec6312cf2f15885e5ef5f8508ebbf0",
+        "android-x64-release/darwin-x64.zip": "af5b72cb5ea09743089e636c143a66b0799f14a1a50eb5ea29dd046e4fd8e374",
+        "android-x64-release/linux-x64.zip": "df76d64a0f57ca5fcc58e0621776b2f9cfb134879bf16bf26f68040d43d7c359",
+        "android-x64-release/windows-x64.zip": "fa3f8acd2f194f04827cd017b57806688d1f61a9bd53563670b1e798d752a97e",
         # Material design fonts (MaterialIcons-Regular.otf, Roboto family)
         "material_fonts.zip": "e56fa8e9bb4589fde964be3de451f3e5b251e4a1eafb1dc98d94add034dd5a86",
     },
@@ -408,16 +528,30 @@ ARTIFACT_CHECKSUMS = {
         # Desktop engine runtime libraries (release mode)
         "darwin-x64-release/FlutterMacOS.framework.zip": "ba47b10ff58c7dbf20550471ee1e7e2bfb60f8bfdbce77b9d41db03b66933bed",
         "linux-x64-release/linux-x64-flutter-gtk.zip": "5a6d8366cee62f088cce88d0ca88cb784149667749d94917cce0b5d19b5b5a12",
+        "linux-arm64-release/linux-arm64-flutter-gtk.zip": "38e04570518c923507cecc7cf987c0c073e7dad2b1e3dcaff7e615e990b757c5",
         "windows-x64-release/windows-x64-flutter.zip": "6bb419a7641d7030557dab9baa207779f7cb267fd5245a5ec4e4f1cb58c3df88",
         # Desktop engine runtime libraries (debug mode — JIT, needed for -c dbg)
         "darwin-x64/FlutterMacOS.framework.zip": "db875bd28b9005242d72a4d4371002f7f5348a741dc1bb33d406a8cb49f58380",
         "linux-x64-debug/linux-x64-flutter-gtk.zip": "2d292648be8ddad16c3d040798b616e403715dcd38388d7ebcea5513ee4f080a",
+        "linux-arm64-debug/linux-arm64-flutter-gtk.zip": "9f981f550ef8b2a4d0fb7303927324c4ddac2de81ed9af827dfd07a1d189c219",
         "windows-x64-debug/windows-x64-flutter.zip": "014af1a13f8b9bf8fbba396d491b9b9a71ea05086afde70db9fcca2faaa300de",
+        # C++ client wrapper (Windows — flutter/plugin_registry.h)
+        "windows-x64/flutter-cpp-client-wrapper.zip": "340bcde89e11d0b8fe7e3433295f8c540436e8485f3864b7c24e39cd5bf52485",
         # iOS engine (Flutter.xcframework — release for device, debug for simulator)
         "ios-release/artifacts.zip": "d2f31932154b7fa5153ee17e7be3f82d8b09ea04d5cffc902a01f93b2b5dccde",
         "ios/artifacts.zip": "121d2056bb0fb1d8157ea68cdb423e4eeaa3b43cc0601ee584aac96039cc8685",
-        # C++ client wrapper (Windows — flutter/plugin_registry.h)
-        "windows-x64/flutter-cpp-client-wrapper.zip": "340bcde89e11d0b8fe7e3433295f8c540436e8485f3864b7c24e39cd5bf52485",
+        # Android engine (flutter.jar — release and debug, per ABI)
+        "android-arm64-release/artifacts.zip": "9a06079232a2732ed5e1c8ca172dc48ab4386b5d32170e08827c524339973383",
+        "android-arm64/artifacts.zip": "943d10ccf28e5e9d9463d4bac22c65b22ba2370cd99d1a5c45151735f7217ff4",
+        "android-x64-release/artifacts.zip": "88a35a2f3344adb7897010de7d12e29c4980c22da50ee0c3c3f861f07dd4d1f6",
+        "android-x64/artifacts.zip": "980d92e84a5d6c86d653529f2f65bd452e8388dda6b7b8751ab59d8dfd9ebac3",
+        # Android gen_snapshot cross-compilers (release, per host)
+        "android-arm64-release/darwin-x64.zip": "515285b3432112c63709d8c5d319736f54b8d83f07e96f57904eb4690eae52c9",
+        "android-arm64-release/linux-x64.zip": "e42d365840bcb8997e941ccbba62c03463262b91645970a2cdb9849ca49037a7",
+        "android-arm64-release/windows-x64.zip": "9368059541388e47a216d979ef78f70d8385b3b1de180865115bc57ed15e0d6a",
+        "android-x64-release/darwin-x64.zip": "02f43a4ec7259557b4c987d0389ea5c0ca62dd024cfc58320a2b25deb4687550",
+        "android-x64-release/linux-x64.zip": "3d813596f57a90555fb15b8ccf313851e2f8b100fdf0bc0b3ba7e7b0766657b1",
+        "android-x64-release/windows-x64.zip": "310978cbb5bde9dd32648a655305c293787aba647e49c5ebf533335abce7bbab",
         # Material design fonts (MaterialIcons-Regular.otf, Roboto family)
         "material_fonts.zip": "e56fa8e9bb4589fde964be3de451f3e5b251e4a1eafb1dc98d94add034dd5a86",
     },
@@ -453,16 +587,30 @@ ARTIFACT_CHECKSUMS = {
         # Desktop engine runtime libraries (release mode)
         "darwin-x64-release/FlutterMacOS.framework.zip": "4e42d364d02ac332a25716bf6acdcf010e2eb835cc9814a259c9e0eb0f266acd",
         "linux-x64-release/linux-x64-flutter-gtk.zip": "0eb63193a51e085b6cc6a96fbf8e8e7933cd2e767e29349fa4fc0b6942d9795a",
+        "linux-arm64-release/linux-arm64-flutter-gtk.zip": "35c4e90e7318ebc8ca6d9e8c15d6f0fee6f42cefb96f746d7372c6ba2b831c48",
         "windows-x64-release/windows-x64-flutter.zip": "b96c6762e6a51c06bb520eaedd8791973ff0b41587743174840e80bd645feb1b",
         # Desktop engine runtime libraries (debug mode — JIT, needed for -c dbg)
         "darwin-x64/FlutterMacOS.framework.zip": "c1d1578988a80e21857ae77547b218338cfbe6184db1ceed9cecdc5e605090a4",
         "linux-x64-debug/linux-x64-flutter-gtk.zip": "2a522fd7d5c12a54165f1e48001fcb331649a24a21083510fe6734699346d7e2",
+        "linux-arm64-debug/linux-arm64-flutter-gtk.zip": "3bc51f15607618bcd940d4fd08271f8e96669e6a74d1971d187509d93e68b41b",
         "windows-x64-debug/windows-x64-flutter.zip": "504cf624589f5fbc38a241f6a46669f7166a5f8d54037b2caab9d4a9e8ff0d47",
+        # C++ client wrapper (Windows — flutter/plugin_registry.h)
+        "windows-x64/flutter-cpp-client-wrapper.zip": "fad8bcc0ec88e935577d15ed8f6ab36e4d7255a6d45db21441876755522a5185",
         # iOS engine (Flutter.xcframework — release for device, debug for simulator)
         "ios-release/artifacts.zip": "6e950779c094f09e438700bd670f201a7029ee6b1af9a94d1fd713547394766a",
         "ios/artifacts.zip": "9cb05aeaeb8fdd989757f825edda25f99b26aec5fdd243acd6cb21f6002d302c",
-        # C++ client wrapper (Windows — flutter/plugin_registry.h)
-        "windows-x64/flutter-cpp-client-wrapper.zip": "fad8bcc0ec88e935577d15ed8f6ab36e4d7255a6d45db21441876755522a5185",
+        # Android engine (flutter.jar — release and debug, per ABI)
+        "android-arm64-release/artifacts.zip": "cae28fd96fff507214f528522c816189d58650b576ff9db11fd1f0c7f7f4534b",
+        "android-arm64/artifacts.zip": "d9898023814e9218a0c1ddad3a291d8b66e32a62c0dde846f85e2ef760650978",
+        "android-x64-release/artifacts.zip": "e48f57117a1381cec9ae6fbb1bbbb1507240ff8a58a7c43bf88d4996804db5ee",
+        "android-x64/artifacts.zip": "5bdc072b32551ae3db78d255aadf1d4f41d16249212d4a1633e63de441a00154",
+        # Android gen_snapshot cross-compilers (release, per host)
+        "android-arm64-release/darwin-x64.zip": "891090c4f2fcadd6aaaa62e9ce87fad30424c5d07e7ec8d3f7ff96ca3d8a4d31",
+        "android-arm64-release/linux-x64.zip": "81552a7261fe2ccda7bd29b1b7f6444567353cac7c4a9260c1d4b045beaf0b4f",
+        "android-arm64-release/windows-x64.zip": "604828bd3353e5b832fbb08f59fadf0e36f0b208db76cc3f2d4f4fb4165fb009",
+        "android-x64-release/darwin-x64.zip": "5015d957d5339c7320a7daad750672175dfa8b5064038e5b473a577ab59e1ed9",
+        "android-x64-release/linux-x64.zip": "511b44dab9675a9cb6fdbe710d953c2691b18e3b20d309f0c649a2133bb61195",
+        "android-x64-release/windows-x64.zip": "e5f25e8592438eee41d81006e77eb92c9cf997a038a606dc29adf6c82cd746a2",
         # Material design fonts (MaterialIcons-Regular.otf, Roboto family)
         "material_fonts.zip": "e56fa8e9bb4589fde964be3de451f3e5b251e4a1eafb1dc98d94add034dd5a86",
     },

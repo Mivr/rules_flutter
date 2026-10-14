@@ -10,23 +10,25 @@ instead of having to enumerate a separate `@flutter_ios_engine_debug` repo.
 This is lazy — only fetched when an iOS build target is used.
 """
 
-load(":artifact_urls.bzl", "engine_artifact_url", "ios_engine_artifact_path")
+load(":artifact_urls.bzl", "engine_artifact_url", "ios_engine_artifact_path", "require_sha256")
 
 def _flutter_ios_engine_repo_impl(repository_ctx):
     engine_revision = repository_ctx.attr.engine_revision
 
     # Release engine (AOT, device) at the repo root. The release archive also
     # carries the iOS gen_snapshot used by the macos->ios cross-compile toolchain.
+    release_url = engine_artifact_url(engine_revision, ios_engine_artifact_path("release"))
     repository_ctx.download_and_extract(
-        url = engine_artifact_url(engine_revision, ios_engine_artifact_path("release")),
-        sha256 = repository_ctx.attr.release_sha256,
+        url = release_url,
+        sha256 = require_sha256(repository_ctx.attr.release_sha256, release_url),
     )
 
     # Debug engine (JIT, simulator) under debug/ — its Flutter.xcframework would
     # otherwise collide with the release one at the repo root.
+    debug_url = engine_artifact_url(engine_revision, ios_engine_artifact_path("debug"))
     repository_ctx.download_and_extract(
-        url = engine_artifact_url(engine_revision, ios_engine_artifact_path("debug")),
-        sha256 = repository_ctx.attr.debug_sha256,
+        url = debug_url,
+        sha256 = require_sha256(repository_ctx.attr.debug_sha256, debug_url),
         output = "debug",
     )
 
