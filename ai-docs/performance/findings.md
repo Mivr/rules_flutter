@@ -166,3 +166,35 @@ Against rules_dart `main` at `95089ce`, through `--override_module` with
 - **The 0.7.2 attributes.** `dart_toolchain` in 0.7.2 takes `dart`,
   `sdk_root`, `version`, `target_os` and `target_arch`. `compile_files` and
   `runtime_files` exist only on rules_dart `main` (`b3c8dc3`).
+
+## e2e against rules_dart `main` (plan 0.1, 2026-10-14)
+
+- **What ran.** rules_dart `87e6772` (`--override_module`, run B) against the
+  published 0.7.2 (run A), with `--nocache_test_results` on B.
+- **Workspaces.** The CI Linux pair (`hello_world`, `codegen`), plus `smoke`,
+  `dual_hub`, `plugin_example`, `ffi_example`, `ffi_plugin_example` and
+  `web_example`.
+- **Android stand-ins.** `hello_world` and `plugin_example` need an Android
+  NDK and SDK that this host lacks. They ran with the NDK repository stubbed
+  (`--override_repository=...androidndk=<empty repo>`); their Android targets
+  then fail to load, the same way in A and B.
+- **No regressions.** Every workspace has identical results in A and B:
+  - `codegen`: 10 pass;
+  - `smoke` and `dual_hub`: 1 pass each;
+  - `ffi_example`: 4 pass;
+  - `ffi_plugin_example`: 3 pass;
+  - `web_example`: 12 pass;
+  - `hello_world`: 14 pass, Android targets environmental;
+  - `plugin_example`: 2 pass, Android environmental, plus bug B1 in both runs.
+- **What B actually exercised** (from its `--profile`):
+  - Re-ran: `DartAnalyze`, `DartFormat`, `DartCompile` and every `TestRunner`.
+  - Cache hits: every `FlutterKernelCompile`, `FlutterShaderCompile` and
+    `FlutterAssetBundle`. rules_dart `main` doesn't change their action keys,
+    so bumping rules_dart is safe for Flutter's compile path, and its
+    analysis/format/test changes pass on Flutter targets.
+- **Rough per-action costs on `codegen`** (32-way parallel, so contended):
+  - `TestRunner`: 17.8 s mean over 10 Flutter tests;
+  - `DartAnalyze`: 8.3 s mean;
+  - `DartFormat`: 5.9 s mean;
+  - `CopyToDirectory`: 1.9 s mean.
+  The benchmark (0.2) will measure these properly.

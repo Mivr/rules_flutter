@@ -8,7 +8,7 @@ before/after numbers from the benchmark (item 0.2).
 
 | #   | Item                                                                                                                                                                                                                                                                                | State |
 | --- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----- |
-| 0.1 | Run the Linux e2e workspaces against rules_dart `main` (`--override_module`). The root suite is green against it, but most real Flutter compiles are in `e2e/`.                                                                                                                     | To do |
+| 0.1 | Run the Linux e2e workspaces against rules_dart `main` (`--override_module`). The root suite is green against it, but most real Flutter compiles are in `e2e/`.                                                                                                                     | Done 2026-10-14: no regressions (`findings.md`) |
 | 0.2 | Flutter benchmark, built on rules_dart's harness (same scenarios, same JSON shape). A synthetic workspace: N `flutter_library` packages in a chain, one widget `flutter_test` per package, one Linux and one web app. Scenarios: re-analysis, clean build, leaf body edit, leaf API edit, null build, test run, test runfiles size, clean lint, lint after edit. Record the baseline on current `main`. | To do |
 | 0.3 | Decide the toolchain shape (item T below).                                                                                                                                                                                                                                          | Done: T adopted |
 
@@ -41,3 +41,9 @@ Order: H0 and T1 first (H0 is small; T1 changes who owns the SDK-input work), th
 | -- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------- |
 | H1 | Bazel 9.3.0: bump `.bazelversion` (root and every `e2e/*`) and refresh every `MODULE.bazel.lock`, in step with rules_dart.                                  | Ready; not scheduled (ask G)  |
 | H2 | Bazel 10: recheck at 10.0 final. 10.0.0rc1 fails in C toolchain auto-configuration (see `findings.md`).                                                    | Parked                        |
+
+## Bugs found along the way
+
+| #  | Bug                                                                                                                                                                                                                                                                               | State |
+| -- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----- |
+| B1 | `e2e/plugin_example` `//:linux_bundle_build_test` fails to compile its runner on Linux: `linux/runner/my_application.cc:143:17: error: 'APPLICATION_ID' was not declared in this scope`. Same with the published and the newer rules_dart. CI runs plugin_example on macOS only, so CI never sees it. `flutter create`'s CMake defines `APPLICATION_ID`; the Bazel runner compile presumably doesn't. | To investigate |
