@@ -240,3 +240,29 @@ two extra are rules_dart's `BUILD.bazel` and `REPO.bazel`; the analysis server
 snapshot is identical), so no action can be faster or slower under T1. Judge
 changes on this host by action counts, input sizes and fetch footprint; wall
 time needs a quiet machine or interleaved A/B runs.
+
+## Compiled build-step tools (plan 1.2, `280bfb9`)
+
+The build-step scripts ran as `dart script.dart` because, before T1, a
+`dart_binary` compiled with rules_dart's Dart rather than Flutter's; no
+technical reason was recorded. They are now `dart_binary(compile_mode = "exe")`
+targets in `flutter/private/tools`, used with `cfg = "exec"`, and actions run
+them directly. Only the asset bundle still takes `dart` and the SDK files, and
+only with icon tree shaking on, because `const_finder` is a Dart snapshot.
+Raw data: `results/p12_compiled_tools.json` (same setup as above).
+
+| Metric                                 | T1             | 1.2              |
+| -------------------------------------- | -------------- | ---------------- |
+| Kernel inputs of one test              | 2312 / 692 MB  | **1269 / 69 MB** |
+| Clean build: sandboxed actions         | 139            | 144              |
+| Clean build: kernel compiles           | 33             | 33               |
+| Clean build: compile CPU (tool builds) | 2.8 s          | 39.4 s           |
+| Test runfiles                          | 1062 / 752 MB  | 1062 / 752 MB    |
+
+- The kernel compile's inputs are now its program's sources plus the engine's
+  `dartaotruntime`, frontend_server and platform dill. Sandbox setup and
+  remote-execution input uploads shrink 10x by size per compile.
+- The five extra actions (and ~37 s of CPU, once per output base) build the
+  tools the benchmark uses: `kernel_filter`, `compile_shader`,
+  `generate_asset_manifest`, `bundle_app` and `web_template`.
+- Test runfiles still carry the SDK: plan 1.1.
