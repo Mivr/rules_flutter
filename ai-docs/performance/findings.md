@@ -198,3 +198,45 @@ Against rules_dart `main` at `95089ce`, through `--override_module` with
   - `DartFormat`: 5.9 s mean;
   - `CopyToDirectory`: 1.9 s mean.
   The benchmark (0.2) will measure these properly.
+
+## Benchmark baseline and T1 (plan 0.2, 2026-10-14)
+
+Full size (30 packages x 20 files, one widget test each, kernel + web + Linux
+app; analysis variant 80 x 30), Bazel 9.2.0, `RULES_FLUTTER_BENCH_JOBS=4` on
+an 8 GiB container. Raw data: `results/baseline_main.json` (rules at main
+before H0/B1/T1; neither H0 nor B1 changes an action) and
+`results/t1_one_dart.json` (main + T1). Times are summed action durations.
+
+| Metric                                         | baseline       | T1             |
+| ---------------------------------------------- | -------------- | -------------- |
+| Fetched SDK repos                              | 2450 MB        | **1808 MB**    |
+| rules_dart's Dart SDK fetched                  | yes            | **no**         |
+| Clean build: kernel compiles / shader compiles | 33 / 64        | 33 / 64        |
+| Leaf body edit: kernel compiles re-run         | 33 of 33       | 33 of 33       |
+| Kernel inputs of one test                      | 2312 / 692 MB  | 2312 / 692 MB  |
+| Test runfiles                                  | 1062 / 752 MB  | 1062 / 752 MB  |
+| Lint after a body edit: analyze/format/copy    | 61 / 61 / 61   | 61 / 61 / 61   |
+| Lint clean: copy actions                       | 998            | 998            |
+
+Where the time goes (baseline):
+
+- Lint dominates: clean lint is ~528 s wall; DartAnalyze 61 x ~12 s,
+  DartFormat 61 x ~4.6 s, 998 CopyToDirectory. A one-line leaf edit re-runs
+  every analyze, format and copy action. rules_dart `main` fixes the format
+  and copy parts (`6d99c78`, `95089ce`); it reaches Flutter with the
+  rules_dart bump (ask D).
+- A leaf edit re-runs all 33 Flutter kernel compiles (~15 s each), because
+  every test and app compiles its whole program: plan 2.1.
+- 64 shader compiles in a clean build (two SDK shaders per test plus the
+  app's), byte-identical across consumers: plan 1.3.
+- Every kernel compile and every test carries the whole SDK: plan 1.1, T1b.
+
+**Wall times on this host are noise, not signal.** The host is shared (load
+average 9-12 from other workspaces). Between the two runs,
+FlutterKernelCompile, whose inputs T1 does not change, moved +24% in the
+body-edit scenario, and CopyToDirectory, a rules_dart action T1 does not touch,
+moved 3x. T1's SDK is byte-identical to rules_dart's (1047 vs 1049 files; the
+two extra are rules_dart's `BUILD.bazel` and `REPO.bazel`; the analysis server
+snapshot is identical), so no action can be faster or slower under T1. Judge
+changes on this host by action counts, input sizes and fetch footprint; wall
+time needs a quiet machine or interleaved A/B runs.
