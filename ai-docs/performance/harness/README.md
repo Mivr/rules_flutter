@@ -51,7 +51,9 @@ Against a local rules_dart, add `--rules-dart <rules_dart checkout>`. The
 generated `.bazelrc` then gets `common --override_module=rules_dart=<path>`.
 
 Every generated workspace's `.bazelrc` sets `startup --host_jvm_args=-Xmx4g`
-and `common --jobs=8`, and `--lockfile_mode=off`.
+and `common --jobs=8`, and `--lockfile_mode=off`. On a memory-capped host, set
+`RULES_FLUTTER_BENCH_JOBS` to lower the job count. The result JSON records it as
+`jobs`; compare only results with the same value.
 
 **Output bases.** Each workspace gets its own Bazel output base, under
 `<bench root>/ob/<label>/<workspace>/` (`ob/<label>/bench/`, `ob/<label>/bench_analysis/`).

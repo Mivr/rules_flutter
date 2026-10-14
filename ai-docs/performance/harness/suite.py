@@ -224,6 +224,7 @@ res = {
     "packages": sz["pkgs"],
     "files_per_package": sz["files"],
     "bazel": bazel_version(),
+    "jobs": int(os.environ.get("RULES_FLUTTER_BENCH_JOBS", "8")),
     "date": datetime.datetime.now().isoformat(timespec="seconds"),
     "output_base": {},
     "scenarios": {},
