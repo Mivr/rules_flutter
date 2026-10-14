@@ -465,9 +465,7 @@ def flutter_compile_kernel(ctx, flutter_sdk_info, aot = None, platform_dill = No
     flutter_kernel_compile_action(
         ctx = ctx,
         dartaotruntime = flutter_sdk_info.dartaotruntime,
-        dart = flutter_sdk_info.dart,
-        kernel_filter_tool = ctx.file._kernel_filter_tool,
-        flutter_sdk_files = flutter_sdk_info.tool_files,
+        kernel_filter_tool = ctx.executable._kernel_filter_tool,
         frontend_server = flutter_sdk_info.frontend_server,
         platform_dill = platform_dill,
         main = entrypoint_info.file,
@@ -625,9 +623,7 @@ def flutter_compile_shaders(ctx, flutter_sdk_info, target_platform):
             is_web = target_platform == "web",
             includes = job.includes,
             # What compiles a shader whose SkSL stage fails without it.
-            dart = flutter_sdk_info.dart,
-            dart_files = flutter_sdk_info.tool_files,
-            compile_tool = ctx.file._shader_compile_tool,
+            compile_tool = ctx.executable._shader_compile_tool,
             require_sksl = getattr(ctx.attr, "require_sksl_shaders", False),
         )
         compiled[job.bundle_path] = output
@@ -1049,8 +1045,9 @@ def merge_dart_defines(ctx):
 # not by every kernel compile.
 KERNEL_COMPILE_ATTRS = {
     "_kernel_filter_tool": attr.label(
-        default = Label("//flutter/private/tools:kernel_filter.dart"),
-        allow_single_file = True,
+        default = Label("//flutter/private/tools:kernel_filter"),
+        executable = True,
+        cfg = "exec",
     ),
     "main": attr.label(
         doc = "The main .dart entry point.",
@@ -1156,8 +1153,9 @@ FLUTTER_APPLICATION_ATTRS = KERNEL_COMPILE_ATTRS | {
         default = False,
     ),
     "_shader_compile_tool": attr.label(
-        default = Label("//flutter/private/tools:compile_shader.dart"),
-        allow_single_file = True,
+        default = Label("//flutter/private/tools:compile_shader"),
+        executable = True,
+        cfg = "exec",
     ),
     "link_hook_assets": attr.string_list(
         doc = "Data assets the packages' link hooks emit, each " +
@@ -1187,7 +1185,8 @@ FLUTTER_APPLICATION_ATTRS = KERNEL_COMPILE_ATTRS | {
               "Platform-specific bundle rules set appropriate defaults.",
     ),
     "_asset_bundle_tool": attr.label(
-        default = Label("//flutter/private/tools:generate_asset_manifest.dart"),
-        allow_single_file = True,
+        default = Label("//flutter/private/tools:generate_asset_manifest"),
+        executable = True,
+        cfg = "exec",
     ),
 } | AGENT_EXTENSIONS_ATTR

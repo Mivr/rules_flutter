@@ -37,7 +37,7 @@ def _merge_action_test_impl(ctx):
     input_basenames = [f.basename for f in action.inputs.to_list()]
     asserts.true(
         env,
-        "merge_android_manifests.dart" in input_basenames,
+        "merge_android_manifests" in input_basenames or "merge_android_manifests.exe" in input_basenames,
         "the merger tool must be an action input",
     )
 

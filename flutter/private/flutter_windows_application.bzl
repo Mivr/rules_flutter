@@ -356,18 +356,16 @@ def _flutter_windows_bundle_impl(ctx):
     config_file = ctx.actions.declare_file(ctx.label.name + "_bundle_config.json")
     ctx.actions.write(config_file, json.encode(config))
 
-    inputs = [ctx.file._bundle_tool, config_file, flutter_assets, icu_data, runner_binary] + extra_inputs + native_libs + engine_files
+    inputs = [config_file, flutter_assets, icu_data, runner_binary] + extra_inputs + native_libs + engine_files
 
     ctx.actions.run(
-        executable = flutter_sdk_info.dart,
+        executable = ctx.executable._bundle_tool,
         arguments = [
-            ctx.file._bundle_tool.path,
             "--config",
             config_file.path,
         ],
         inputs = depset(
             direct = inputs,
-            transitive = [flutter_sdk_info.tool_files],
         ),
         outputs = [bundle_dir],
         mnemonic = "FlutterWindowsBundle",
@@ -392,8 +390,9 @@ flutter_windows_bundle_rule = rule(
             doc = "Name of the application binary and bundle directory (defaults to target name).",
         ),
         "_bundle_tool": attr.label(
-            default = Label("//flutter/private/tools:bundle_app.dart"),
-            allow_single_file = True,
+            default = Label("//flutter/private/tools:bundle_app"),
+            executable = True,
+            cfg = "exec",
         ),
     },
     toolchains = [

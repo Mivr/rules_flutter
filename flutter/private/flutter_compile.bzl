@@ -10,9 +10,7 @@ load("//flutter/private:app_entrypoint.bzl", "APP_SCHEME")
 def flutter_kernel_compile_action(
         ctx,
         dartaotruntime,
-        dart,
         kernel_filter_tool,
-        flutter_sdk_files,
         frontend_server,
         platform_dill,
         main,
@@ -36,11 +34,7 @@ def flutter_kernel_compile_action(
     Args:
         ctx: The rule context.
         dartaotruntime: The dartaotruntime executable File (from FlutterSdkInfo).
-        dart: The Dart executable File that runs [kernel_filter_tool].
-        kernel_filter_tool: `kernel_filter.dart`, which runs the
-            frontend_server and drops its batch-protocol lines from the
-            output so a successful compile prints nothing.
-        flutter_sdk_files: All Flutter SDK files needed (for action inputs).
+        kernel_filter_tool: The compiled `kernel_filter` executable File.
         frontend_server: The frontend_server_aot.dart.snapshot File.
         platform_dill: The platform_strong.dill File (debug or product).
         main: The entrypoint .dart source File. Always an action input and
@@ -89,7 +83,6 @@ def flutter_kernel_compile_action(
             JIT compile writes an empty file.
     """
     args = ctx.actions.args()
-    args.add(kernel_filter_tool)
     args.add("--")
     args.add(dartaotruntime)
     args.add(frontend_server)
@@ -166,11 +159,10 @@ def flutter_kernel_compile_action(
         outputs.append(recorded_uses)
 
     ctx.actions.run(
-        executable = dart,
+        executable = kernel_filter_tool,
         arguments = [args],
         inputs = depset(
-            direct = direct_inputs + [kernel_filter_tool, dartaotruntime],
-            transitive = [flutter_sdk_files],
+            direct = direct_inputs + [dartaotruntime],
         ),
         outputs = outputs,
         mnemonic = "FlutterKernelCompile",

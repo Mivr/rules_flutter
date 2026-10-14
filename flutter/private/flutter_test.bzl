@@ -336,9 +336,7 @@ def _flutter_test_impl(ctx):
     flutter_kernel_compile_action(
         ctx = ctx,
         dartaotruntime = flutter_sdk_info.dartaotruntime,
-        dart = flutter_sdk_info.dart,
-        kernel_filter_tool = ctx.file._kernel_filter_tool,
-        flutter_sdk_files = flutter_sdk_info.tool_files,
+        kernel_filter_tool = ctx.executable._kernel_filter_tool,
         frontend_server = flutter_sdk_info.frontend_server,
         platform_dill = flutter_sdk_info.platform_kernel_dill,
         main = bootstrap,

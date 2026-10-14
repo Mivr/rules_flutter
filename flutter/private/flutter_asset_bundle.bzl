@@ -10,7 +10,7 @@ Produces a `flutter_assets/` tree artifact containing:
 load("//flutter:providers.bzl", "FlutterInfo")
 load("//flutter/private:flutter_library.bzl", "aggregate_pub_contributions")
 
-_TOOL = Label("//flutter/private/tools:generate_asset_manifest.dart")
+_TOOL = Label("//flutter/private/tools:generate_asset_manifest")
 
 # Regex-like DPR directory patterns we detect in Starlark.
 # A directory named like "2x", "1.5x", "3.0x" indicates a resolution variant.
@@ -119,7 +119,7 @@ def flutter_asset_bundle_action(
     """
     if output_dir == None:
         fail("flutter_asset_bundle_action: `output_dir` is required — declare it with ctx.actions.declare_directory().")
-    tool = ctx.file._asset_bundle_tool
+    tool = ctx.executable._asset_bundle_tool
 
     # Build asset paths and copy map relative to the output directory.
     asset_paths = []
@@ -150,6 +150,7 @@ def flutter_asset_bundle_action(
 
     # Icon tree shaking config.
     extra_inputs = []
+    transitive_inputs = []
     if const_finder and font_subset and kernel_dill:
         config["icon_tree_shaking"] = {
             "dart": dart.path,
@@ -157,24 +158,25 @@ def flutter_asset_bundle_action(
             "font_subset": font_subset.path,
             "kernel_dill": kernel_dill.path,
         }
-        extra_inputs.extend([const_finder, font_subset, kernel_dill])
+        extra_inputs.extend([dart, const_finder, font_subset, kernel_dill])
+        if flutter_sdk_files:
+            transitive_inputs.append(flutter_sdk_files)
 
     config_content = json.encode(config)
     config_file = ctx.actions.declare_file(ctx.label.name + ".asset_bundle_config.json")
     ctx.actions.write(config_file, config_content)
 
     ctx.actions.run(
-        executable = dart,
+        executable = tool,
         arguments = [
-            tool.path,
             "--config",
             config_file.path,
             "--output-dir",
             output_dir.path,
         ],
         inputs = depset(
-            direct = [tool, config_file] + assets + extra_files + license_files + extra_inputs,
-            transitive = [flutter_sdk_files],
+            direct = [config_file] + assets + extra_files + license_files + extra_inputs,
+            transitive = transitive_inputs,
         ),
         outputs = [output_dir],
         mnemonic = "FlutterAssetBundle",
@@ -223,7 +225,8 @@ flutter_asset_bundle = rule(
         ),
         "_asset_bundle_tool": attr.label(
             default = _TOOL,
-            allow_single_file = True,
+            executable = True,
+            cfg = "exec",
         ),
     },
     toolchains = [

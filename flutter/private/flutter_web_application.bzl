@@ -536,9 +536,7 @@ def _flutter_web_bundle_impl(ctx):
         flutter_kernel_compile_action(
             ctx = ctx,
             dartaotruntime = flutter_sdk_info.dartaotruntime,
-            dart = flutter_sdk_info.dart,
-            kernel_filter_tool = ctx.file._kernel_filter_tool,
-            flutter_sdk_files = flutter_sdk_info.tool_files,
+            kernel_filter_tool = ctx.executable._kernel_filter_tool,
             frontend_server = flutter_sdk_info.frontend_server,
             platform_dill = flutter_sdk_info.platform_kernel_dill_product,
             main = ctx.file.main,
@@ -761,15 +759,13 @@ def _flutter_web_bundle_impl(ctx):
     ctx.actions.write(template_config_file, json.encode(template_config))
 
     ctx.actions.run(
-        executable = flutter_sdk_info.dart,
+        executable = ctx.executable._web_template_tool,
         arguments = [
-            ctx.file._web_template_tool.path,
             "--config",
             template_config_file.path,
         ],
         inputs = depset(
-            direct = template_inputs + [template_config_file, ctx.file._web_template_tool],
-            transitive = [flutter_sdk_info.tool_files],
+            direct = template_inputs + [template_config_file],
         ),
         outputs = [index_html, bootstrap_js] + ([dev_bootstrap_js] if dev_bootstrap_js else []),
         mnemonic = "FlutterWebTemplate",
@@ -903,15 +899,13 @@ def _flutter_web_bundle_impl(ctx):
         all_inputs.append(service_worker_file)
 
     ctx.actions.run(
-        executable = flutter_sdk_info.dart,
+        executable = ctx.executable._bundle_tool,
         arguments = [
-            ctx.file._bundle_tool.path,
             "--config",
             bundle_config_file.path,
         ],
         inputs = depset(
-            direct = all_inputs + [ctx.file._bundle_tool],
-            transitive = [flutter_sdk_info.tool_files],
+            direct = all_inputs,
         ),
         outputs = [output_dir] + ([dump_info_file] if dump_info_file else []),
         mnemonic = "FlutterWebBundle",
@@ -1492,12 +1486,14 @@ build knows which served file is a native module.
             default = Label("@flutter_web_sdk//:web_sdk"),
         ),
         "_bundle_tool": attr.label(
-            default = Label("//flutter/private/tools:bundle_app.dart"),
-            allow_single_file = [".dart"],
+            default = Label("//flutter/private/tools:bundle_app"),
+            executable = True,
+            cfg = "exec",
         ),
         "_web_template_tool": attr.label(
-            default = Label("//flutter/private/tools:web_template.dart"),
-            allow_single_file = [".dart"],
+            default = Label("//flutter/private/tools:web_template"),
+            executable = True,
+            cfg = "exec",
         ),
     }) | AGENT_EXTENSIONS_ATTR,
     toolchains = ["@rules_flutter//flutter:toolchain_type"] + COPY_TO_DIRECTORY_TOOLCHAINS,
