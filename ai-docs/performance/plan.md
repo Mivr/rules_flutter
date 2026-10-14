@@ -1,0 +1,39 @@
+# Plan and status
+
+Owner of everything here: the rules_flutter review. Items that need something
+from rules_dart name the ask (`asks-for-rules-dart.md`). Every change lands with
+before/after numbers from the benchmark (item 0.2).
+
+## Phase 0: footing (agreed with the user, 2026-10-14)
+
+| #   | Item                                                                                                                                                                                                                                                                                | State |
+| --- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----- |
+| 0.1 | Run the Linux e2e workspaces against rules_dart `main` (`--override_module`). The root suite is green against it, but most real Flutter compiles are in `e2e/`.                                                                                                                     | To do |
+| 0.2 | Flutter benchmark, built on rules_dart's harness (same scenarios, same JSON shape). A synthetic workspace: N `flutter_library` packages in a chain, one widget `flutter_test` per package, one Linux and one web app. Scenarios: re-analysis, clean build, leaf body edit, leaf API edit, null build, test run, test runfiles size, clean lint, lint after edit. Record the baseline on current `main`. | To do |
+| 0.3 | Decide the toolchain shape (item T below).                                                                                                                                                                                                                                          | Waiting on the user |
+
+## Phase 1: Flutter-only work (no overlap with rules_dart)
+
+| #   | Item                                                                                                                                                                                                                                                                                                                                                                                                          | Depends on   |
+| --- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------ |
+| T   | **One Dart SDK.** Recommended, pending the user's decision. Register the Flutter-bundled `dart-sdk/` as a rules_dart `dart_toolchain` for both `toolchain_type` and `exec_tools_toolchain_type`, in `@flutter_toolchains`, which every Flutter root module already registers. Flutter's rules then take Dart from `DartSdkInfo`. `FlutterSdkInfo` keeps only the engine: `gen_snapshot`, `flutter_tester`, `impellerc`, the patched platform dills and the rest. Analysis, format checks, codegen, `dart_test` and Flutter compiles then all use one Dart, the rules_dart SDK is never downloaded in a Flutter workspace, and every rules_dart SDK optimisation applies to Flutter. | Ask E, F     |
+| 1.1 | **Engine inputs and test runfiles.** Each Flutter action takes only the engine files it opens. `flutter_test` runfiles carry `flutter_tester`, ICU, the kernel and the assets, not the SDK. With T, the Dart part comes from `DartSdkInfo.compile_files`/`runtime_files`. Without T, Flutter has to keep its own subsets, a duplicate of rules_dart's `b3c8dc3`.                                                       | T, ideally   |
+| 1.2 | **Compiled build-step tools.** `kernel_filter`, `compile_shader`, `generate_asset_manifest`, `bundle_app`, the mergers and `web_template` become exec-configured `dart_binary` (`compile_mode = "exe"`), as `flutter_test_runner` already is. First find out why they were deliberately left as scripts.                                                                                                         | —            |
+| 1.3 | **SDK and package shaders once per platform.** Compile shaders where they are declared, through an aspect keyed by the target platform, instead of under every consuming test's or app's output path.                                                                                                                                                                                                         | —            |
+| 1.4 | **`flutter_test` analysis.** One pass over the package closure instead of three. Only if a Starlark profile shows it matters.                                                                                                                                                                                                                                                                                 | 0.2          |
+
+## Phase 2: adopt rules_dart's mechanisms once they land
+
+| #   | Item                                                                                                                                                                                                                                                 | Depends on                   |
+| --- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------- |
+| 2.1 | **Modular compilation for `flutter_test`** (debug apps later). Per-library modules compiled with `--target flutter` against `flutter_patched_sdk/vm_outline_strong.dill`; the test compiles an entry module and links. Removes the per-test recompile of `package:flutter`. Release and profile stay whole-program. | Ask A; rules_dart plan #7    |
+| 2.2 | **Stable source URIs in `FlutterKernelCompile`**, so outputs are byte-identical across machines and downstream actions hit a shared remote cache.                                                                                                       | Ask C; rules_dart plan #9    |
+| 2.3 | **Analyzer summaries for Flutter targets.**                                                                                                                                                                                                          | Ask B; rules_dart plan #8    |
+| 2.4 | **Drop rules_flutter's `bazel_lib` dependency** once rules_dart no longer needs `copy_to_directory`.                                                                                                                                                  | Ask H; rules_dart plan #11   |
+
+## Housekeeping
+
+| #  | Item                                                                                                                                                       | State                         |
+| -- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------- |
+| H1 | Bazel 9.3.0: bump `.bazelversion` (root and every `e2e/*`) and refresh every `MODULE.bazel.lock`, in step with rules_dart.                                  | Ready; not scheduled (ask G)  |
+| H2 | Bazel 10: recheck at 10.0 final. 10.0.0rc1 fails in C toolchain auto-configuration (see `findings.md`).                                                    | Parked                        |

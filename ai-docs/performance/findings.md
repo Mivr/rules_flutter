@@ -1,0 +1,135 @@
+# Findings
+
+Facts established by measurement or by reading the code. Each one says how it
+was established, so it can be rechecked when Flutter, Dart or Bazel moves.
+Unless stated otherwise: rules_flutter `51b22bb`, Flutter 3.47.6 (bundled Dart
+3.13.5), Bazel 9.2.0, Linux x64.
+
+## Baseline: root workspace
+
+`bazel test //... --jobs=16`, run clean against the published rules_dart 0.7.2:
+
+- 338 tests pass, 2 iOS tests skip, 464 targets analysed.
+- 360 s wall time, of which about 112 s is first-time downloads.
+- Critical path 59.7 s.
+- 14,287 processes.
+
+Against rules_dart `main` at `95089ce`, through `--override_module` with
+`--lockfile_mode=off`, the suite stays green:
+
+- The 85 tests that re-ran, all `dart_test`s in `//tools/dev_tool` and
+  `//flutter/private/tools` plus the two analyze fixtures, pass.
+- The other 253 results were cached. Their inputs did not change, so that is
+  sound.
+- The e2e workspaces were not run, and they hold nearly all real Flutter
+  compiles (plan 0.1).
+
+## Where a Flutter target's cost goes (read from the code)
+
+- **Every `flutter_test` and application compiles its whole program.**
+  - `flutter_compile_kernel` (`flutter/private/common.bzl`) and
+    `_flutter_test_impl` (`flutter/private/flutter_test.bzl`) hand
+    frontend_server every transitive source.
+  - `package:flutter` alone is 695 `.dart` files (24 MB), compiled again for
+    every test.
+  - Nothing is shared between targets.
+- **Every Flutter action takes the whole SDK.**
+  - `FlutterSdkInfo.tool_files` (`flutter/toolchain.bzl`) is all of `dart-sdk/`
+    plus the patched SDK: 1,049 files, 654 MB.
+  - It is an input of every `FlutterKernelCompile`, `FlutterShaderCompile` and
+    `FlutterAssetBundle` action, and part of every `flutter_test`'s runfiles.
+  - The kernel compile itself reads `dartaotruntime` (5.7 MB), the
+    frontend_server snapshot (17 MB) and a platform dill.
+- **Build-step scripts are JIT-compiled on every action.**
+  - `kernel_filter.dart`, `compile_shader.dart`, `generate_asset_manifest.dart`,
+    `bundle_app.dart`, the manifest and plist mergers and `web_template.dart`
+    are run as `dart <script>.dart` straight from source
+    (`flutter/private/tools/BUILD.bazel` says so).
+  - Only `flutter_test_runner` and `pub_runner` are compiled (`compile_mode =
+    "exe"`).
+- **Every test repeats the same shader and asset work.**
+  - Each `flutter_test` compiles `package:flutter`'s two shaders
+    (`ink_sparkle.frag`, `stretch_effect.frag`) under its own output path, so N
+    tests run 2N identical compiles.
+  - Each compile goes through the `compile_shader.dart` wrapper with the whole
+    SDK as input, because the `tester` stage list has SkSL plus Vulkan.
+  - Each test also builds its own `flutter_assets/` tree.
+- **Analysis repeats work.** `_flutter_test_impl` flattens
+  `DartInfo.transitive_packages` three times (`_can_bootstrap`,
+  `_has_flutter_test`, `check_unreplaced_hooks`), as well as the transitive
+  sources. This is not profiled yet.
+
+## Two Dart SDKs in every Flutter workspace
+
+- rules_dart's `MODULE.bazel` registers its default toolchain (Dart 3.13.5) for
+  every consumer: `register_toolchains("@dart_toolchains//:all")`, not a dev
+  dependency.
+- rules_flutter's engine repository (`flutter_engine_artifacts`,
+  `flutter/repositories.bzl`) ships the Flutter-bundled Dart SDK under
+  `dart-sdk/`.
+- Both were fetched in the baseline run, 642 MB each:
+  `rules_dart++dart+dart_linux-x64` and `+flutter+flutter_linux-x64/dart-sdk`.
+- Who uses which:
+  - **Flutter's Dart** (`FlutterSdkInfo.dart`/`dartaotruntime`/`tool_files`):
+    the kernel compile, shader and asset-bundle steps, and every script in
+    `flutter/private/tools`.
+  - **rules_dart's Dart** (`@rules_dart//dart:toolchain_type` and
+    `:exec_tools_toolchain_type`):
+    - the `dart_analyze` aspect over Flutter targets (analysis, format check,
+      fix);
+    - `dart_codegen`;
+    - every `dart_test` and `dart_binary`, including rules_flutter's own
+      `flutter_test_runner`;
+    - `flutter_application`'s link hooks (`flutter_application.bzl:205`).
+- Nothing ties the two versions together. They are both 3.13.5 today because
+  rules_dart's default and Flutter 3.47.6's bundled Dart happen to match.
+  `flutter/private/versions.bzl` lists 17 Flutter releases and records no Dart
+  version for any of them.
+- The layouts match. `dart-sdk/` in the Flutter engine repository has the same
+  `bin/`, `lib/` and `version` layout as the root of rules_dart's SDK
+  repository. rules_dart's `dart_toolchain`, `compile_files` and
+  `runtime_files` declarations would apply to it unchanged, with a path prefix.
+- The separate toolchain has no recorded rationale. `flutter/toolchain.bzl`
+  dates from the initial scaffolding (`e5fbb95`) and mirrors the shape of
+  rules_dart's `dart/toolchain.bzl`.
+- What is genuinely Flutter's and not Dart's varies by target platform:
+  - `gen_snapshot` (per target), the engine library, `flutter_tester`;
+  - `impellerc` and `shader_lib`, `font-subset` and `const_finder`;
+  - the patched platform dills that carry `dart:ui`;
+  - the ICU data, the isolate snapshots, the Material font, the Linux sysroot.
+
+## Modular compilation is possible with Flutter's own SDK
+
+- Flutter's bundled `dart-sdk/bin/snapshots/` includes
+  `kernel_worker_aot.dart.snapshot`. Its `--help` lists `--target` with `vm,
+  flutter, flutter_runner, dart2js, dart2js_summary, dart2wasm, ddc`, and
+  `--input-linked`, `--multi-root` and `--multi-root-scheme`.
+- `patched-sdk/flutter_patched_sdk/` holds `platform_strong.dill` and
+  `vm_outline_strong.dill`, the Flutter platform as a full kernel and as an
+  outline.
+- rules_dart's modules (their plan #7) can't be reused for Flutter as they
+  are. They are compiled for `--target vm` against the standalone Dart
+  platform, while Flutter code needs `--target flutter` against a platform
+  that has `dart:ui`. Conditional imports on `dart.library.ui` also resolve
+  differently.
+
+## Tooling
+
+- `bazel analyze-profile` no longer exists. Bazel 9.2.0, 9.3.0 and 10.0.0rc1
+  all answer `'analyze-profile' is not a known command`.
+- The `--profile` JSON trace is still written. rules_dart's
+  `harness/prof.py` summarises it per mnemonic. Use `--noslim_profile`.
+
+## Bazel versions (root `bazel test //...`, selected by `USE_BAZEL_VERSION`)
+
+- **9.3.0**: 338 pass, 2 skipped, 353 s, with `--lockfile_mode=off`.
+  - With the repository default `--lockfile_mode=error`, Bazel stops with
+    `Missing checksum for registry file
+    https://bcr.bazel.build/modules/apple_support/2.5.2/MODULE.bazel`.
+  - Bumping needs the lockfile refresh `.bazelrc` describes.
+- **10.0.0rc1**: analysis fails in C toolchain auto-configuration, not in
+  these rules. Not diagnosed.
+  - First `Cannot find gcc or CC`, although `gcc` is on PATH and 9.3.0 finds
+    it.
+  - With `--repo_env=CC=/usr/bin/gcc`, it fails with `key "ar" not found in
+    dictionary`.
