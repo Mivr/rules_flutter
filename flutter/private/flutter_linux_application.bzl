@@ -130,6 +130,9 @@ def _c_string_literal(value):
 def linux_runner_defines(gtk_app_id, window_title):
     """The local defines the built-in Linux runner reads.
 
+    `APPLICATION_ID` carries the same id for a `linux/runner/` from
+    `flutter create`, whose CMake build defines it under that name.
+
     Args:
       gtk_app_id: GTK application identifier.
       window_title: Title of the runner's window.
@@ -139,6 +142,7 @@ def linux_runner_defines(gtk_app_id, window_title):
     """
     return [
         "GTK_APP_ID=" + _c_string_literal(gtk_app_id),
+        "APPLICATION_ID=" + _c_string_literal(gtk_app_id),
         "WINDOW_TITLE=" + _c_string_literal(window_title),
     ]
 
