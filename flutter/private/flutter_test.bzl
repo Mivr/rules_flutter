@@ -57,12 +57,14 @@ load(
 load(
     "//flutter/private:common.bzl",
     "FLUTTER_APPLICATION_ATTRS",
+    "FLUTTER_DEPS_DOC",
     "PLATFORM_CONSTRAINT_ATTRS",
     "check_unreplaced_hooks",
     "declare_flutter_assets_dir",
     "detect_target_platform",
     "flutter_build_assets",
     "flutter_compile_shaders",
+    "flutter_tester_shader_aspect",
     "host_target_arch",
     "merge_dart_defines",
 )
@@ -520,6 +522,11 @@ _TEST_ATTRS = {
         "_asset_bundle_tool",
     )
 }
+_TEST_ATTRS["deps"] = attr.label_list(
+    doc = FLUTTER_DEPS_DOC,
+    providers = [DartInfo],
+    aspects = [flutter_tester_shader_aspect],
+)
 
 # Standard `data` attr — files made available at test runtime via
 # runfiles. Tests resolve them through `package:runfiles` /

@@ -8,12 +8,12 @@ flutter_application, flutter_android_bundle, and flutter_ios_application.
 load("@bazel_skylib//rules:common_settings.bzl", "BuildSettingInfo")
 load("@rules_dart//dart:providers.bzl", "DartInfo")
 load("@rules_dart//dart:utils.bzl", "collect_packages", "collect_transitive_srcs", "derive_lib_root", "generate_dev_package_config")
-load("//flutter:providers.bzl", "FlutterInfo", "FlutterNativeLibraryInfo")
+load("//flutter:providers.bzl", "FlutterCompiledShadersInfo", "FlutterInfo", "FlutterNativeLibraryInfo")
 load("//flutter/private:app_entrypoint.bzl", "APP_SCHEME", "app_main_location", "app_scheme_location", "app_scheme_sources", "compile_package_config", "resolve_kernel_entrypoint", "synthesize_app_package", "with_root")
 load("//flutter/private:flutter_asset_bundle.bzl", "flutter_asset_bundle_action")
 load("//flutter/private:flutter_compile.bzl", "flutter_kernel_compile_action")
 load("//flutter/private:flutter_info.bzl", "dedup_plugins")
-load("//flutter/private:flutter_library.bzl", "aggregate_pub_contributions")
+load("//flutter/private:flutter_library.bzl", "aggregate_pub_contributions", "build_pub_contributions")
 load("//flutter/private:flutter_shader_compile.bzl", "flutter_shader_compile_action")
 load("//flutter/private:native_sources.bzl", "native_sources_aspect")
 load("//flutter/private:plugin_registrant.bzl", "generate_dart_plugin_registrant", "generate_dev_plugin_registrants")
@@ -595,6 +595,12 @@ def flutter_compile_shaders(ctx, flutter_sdk_info, target_platform):
     FlutterInfo.shader_srcs) and its packages' (FlutterInfo.pub_shaders); see
     `_shader_jobs` for where each is bundled.
 
+    Shaders from dependencies are compiled once per platform via the shader
+    aspect on the owning target and collected from FlutterCompiledShadersInfo.
+    Any shader not supplied by deps (including the target's own `shaders` attr)
+    is compiled here. If `require_sksl_shaders` is True, all shaders are
+    compiled here with `require_sksl = True`.
+
     Args:
         ctx: Rule context (must have shaders attr and deps attr).
         flutter_sdk_info: FlutterSdkInfo from the toolchain.
@@ -604,29 +610,49 @@ def flutter_compile_shaders(ctx, flutter_sdk_info, target_platform):
         Dict mapping bundle destination path → compiled File. Pass to
         extra_asset_copies in flutter_asset_bundle_action.
     """
-    jobs = _shader_jobs(ctx)
-    if not jobs or not flutter_sdk_info.impellerc:
+    if not flutter_sdk_info or not flutter_sdk_info.impellerc:
         return {}
 
+    require_sksl = getattr(ctx.attr, "require_sksl_shaders", False)
     compiled = {}
+
+    if not require_sksl:
+        for dep in getattr(ctx.attr, "deps", []):
+            if type(dep) == "Target" and FlutterCompiledShadersInfo in dep:
+                for entry in dep[FlutterCompiledShadersInfo].compiled_shaders.to_list():
+                    if getattr(entry, "target_platform", None) != target_platform:
+                        continue
+                    seen = compiled.get(entry.bundle_path)
+                    if seen == None:
+                        compiled[entry.bundle_path] = entry.file
+                    elif seen != entry.file:
+                        fail("%s: two shaders are bundled at %s: %s and %s." % (
+                            ctx.label,
+                            entry.bundle_path,
+                            seen.short_path,
+                            entry.file.short_path,
+                        ))
+
+    jobs = _shader_jobs(ctx)
     for job in jobs:
-        # Named by the bundle path, which is unique, so no two outputs meet.
-        out_path = job.bundle_path.replace("../", "_external/")
-        output = ctx.actions.declare_file(ctx.label.name + "_shaders/" + out_path + ".iplr")
-        flutter_shader_compile_action(
-            ctx = ctx,
-            impellerc = flutter_sdk_info.impellerc,
-            shader_lib = flutter_sdk_info.shader_lib,
-            shader = job.file,
-            output = output,
-            target_platform = target_platform,
-            is_web = target_platform == "web",
-            includes = job.includes,
-            # What compiles a shader whose SkSL stage fails without it.
-            compile_tool = ctx.executable._shader_compile_tool,
-            require_sksl = getattr(ctx.attr, "require_sksl_shaders", False),
-        )
-        compiled[job.bundle_path] = output
+        if job.bundle_path not in compiled:
+            # Named by the bundle path, which is unique, so no two outputs meet.
+            out_path = job.bundle_path.replace("../", "_external/")
+            output = ctx.actions.declare_file("_shaders_%s/%s/%s.iplr" % (target_platform, ctx.label.name, out_path))
+            flutter_shader_compile_action(
+                ctx = ctx,
+                impellerc = flutter_sdk_info.impellerc,
+                shader_lib = flutter_sdk_info.shader_lib,
+                shader = job.file,
+                output = output,
+                target_platform = target_platform,
+                is_web = target_platform == "web",
+                includes = job.includes,
+                # What compiles a shader whose SkSL stage fails without it.
+                compile_tool = ctx.executable._shader_compile_tool,
+                require_sksl = require_sksl,
+            )
+            compiled[job.bundle_path] = output
     return compiled
 
 def declare_flutter_assets_dir(ctx):
@@ -1105,8 +1131,166 @@ KERNEL_COMPILE_ATTRS = {
     ),
 } | EXTRA_DART_DEFINES_ATTR
 
+def _shader_aspect_impl(target, ctx, fixed_platform):
+    if fixed_platform != None:
+        target_platform = fixed_platform
+    else:
+        is_macos = ctx.target_platform_has_constraint(
+            ctx.attr._macos_constraint[platform_common.ConstraintValueInfo],
+        )
+        is_ios = ctx.target_platform_has_constraint(
+            ctx.attr._ios_constraint[platform_common.ConstraintValueInfo],
+        )
+        is_linux = ctx.target_platform_has_constraint(
+            ctx.attr._linux_constraint[platform_common.ConstraintValueInfo],
+        )
+        is_windows = ctx.target_platform_has_constraint(
+            ctx.attr._windows_constraint[platform_common.ConstraintValueInfo],
+        )
+        is_android = ctx.target_platform_has_constraint(
+            ctx.attr._android_constraint[platform_common.ConstraintValueInfo],
+        )
+        target_platform = detect_target_platform(is_ios, is_macos, is_linux, is_windows, is_android)
+
+    direct_jobs = []
+
+    # 1. Direct shaders from `shaders` attribute (e.g. on @flutter_sdk//:flutter or a flutter_library)
+    if hasattr(ctx.rule.files, "shaders"):
+        for shader in ctx.rule.files.shaders:
+            direct_jobs.append(struct(
+                bundle_path = "shaders/" + shader.basename,
+                file = shader,
+                includes = [],
+            ))
+
+    # 2. Direct shaders from `pkg_shaders` attribute (e.g. on flutter_library / flutter_plugin)
+    if hasattr(ctx.rule.attr, "pkg_shaders") and ctx.rule.attr.pkg_shaders:
+        pkg_name = getattr(ctx.rule.attr, "package_name", "") if hasattr(ctx.rule.attr, "package_name") else ""
+        shader_includes = getattr(ctx.rule.files, "shader_includes", []) if hasattr(ctx.rule.files, "shader_includes") else []
+        _, _, pub_shaders = build_pub_contributions(
+            package_name = pkg_name,
+            fonts_json = "",
+            font_files_dict = {},
+            pkg_assets_dict = {},
+            pkg_shaders_dict = ctx.rule.attr.pkg_shaders,
+            shader_includes = shader_includes,
+        )
+        for entry in pub_shaders:
+            prefix = "packages/{}/".format(entry.package_name) if entry.package_name else ""
+            direct_jobs.append(struct(
+                bundle_path = prefix + entry.shader_path,
+                file = entry.file,
+                includes = entry.includes,
+            ))
+
+    direct_compiled = []
+    flutter_toolchain = ctx.toolchains["@rules_flutter//flutter:toolchain_type"] if "@rules_flutter//flutter:toolchain_type" in ctx.toolchains else None
+    flutter_sdk_info = flutter_toolchain.flutter_sdk_info if flutter_toolchain else None
+
+    if direct_jobs and flutter_sdk_info and flutter_sdk_info.impellerc:
+        by_path = {}
+        for job in direct_jobs:
+            seen = by_path.get(job.bundle_path)
+            if seen == None:
+                by_path[job.bundle_path] = job
+            elif seen.file != job.file:
+                fail("%s: two shaders are bundled at %s: %s and %s." % (
+                    ctx.label,
+                    job.bundle_path,
+                    seen.file.short_path,
+                    job.file.short_path,
+                ))
+
+        for job in by_path.values():
+            out_path = job.bundle_path.replace("../", "_external/")
+            output = ctx.actions.declare_file("_shaders_%s/%s/%s.iplr" % (target_platform, ctx.label.name, out_path))
+            flutter_shader_compile_action(
+                ctx = ctx,
+                impellerc = flutter_sdk_info.impellerc,
+                shader_lib = flutter_sdk_info.shader_lib,
+                shader = job.file,
+                output = output,
+                target_platform = target_platform,
+                is_web = target_platform == "web",
+                includes = job.includes,
+                compile_tool = ctx.executable._shader_compile_tool,
+                require_sksl = False,
+            )
+            direct_compiled.append(struct(
+                bundle_path = job.bundle_path,
+                file = output,
+                target_platform = target_platform,
+            ))
+
+    transitive = []
+    if hasattr(ctx.rule.attr, "deps"):
+        deps = ctx.rule.attr.deps
+        for dep in (deps if type(deps) == "list" else [deps]):
+            if type(dep) == "Target" and FlutterCompiledShadersInfo in dep:
+                transitive.append(dep[FlutterCompiledShadersInfo].compiled_shaders)
+
+    return [
+        FlutterCompiledShadersInfo(
+            compiled_shaders = depset(direct = direct_compiled, transitive = transitive),
+        ),
+    ]
+
+def _tester_shader_aspect_impl(target, ctx):
+    return _shader_aspect_impl(target, ctx, "tester")
+
+def _web_shader_aspect_impl(target, ctx):
+    return _shader_aspect_impl(target, ctx, "web")
+
+def _app_shader_aspect_impl(target, ctx):
+    return _shader_aspect_impl(target, ctx, None)
+
+_SHADER_ASPECT_BASE_ATTRS = {
+    "_shader_compile_tool": attr.label(
+        default = Label("//flutter/private/tools:compile_shader"),
+        executable = True,
+        cfg = "exec",
+    ),
+}
+
+flutter_tester_shader_aspect = aspect(
+    implementation = _tester_shader_aspect_impl,
+    attr_aspects = ["deps"],
+    attrs = _SHADER_ASPECT_BASE_ATTRS,
+    toolchains = ["@rules_flutter//flutter:toolchain_type"],
+    doc = "Compiles transitive shaders for the flutter_tester platform on the owning targets.",
+)
+
+flutter_web_shader_aspect = aspect(
+    implementation = _web_shader_aspect_impl,
+    attr_aspects = ["deps"],
+    attrs = _SHADER_ASPECT_BASE_ATTRS,
+    toolchains = ["@rules_flutter//flutter:toolchain_type"],
+    doc = "Compiles transitive shaders for the web platform on the owning targets.",
+)
+
+flutter_app_shader_aspect = aspect(
+    implementation = _app_shader_aspect_impl,
+    attr_aspects = ["deps"],
+    attrs = _SHADER_ASPECT_BASE_ATTRS | PLATFORM_CONSTRAINT_ATTRS,
+    toolchains = ["@rules_flutter//flutter:toolchain_type"],
+    doc = "Compiles transitive shaders for the target application platform on the owning targets.",
+)
+
+FLUTTER_DEPS_DOC = (
+    "`dart_library` or `flutter_library` dependencies. A rule that " +
+    "builds an asset bundle needs `@rules_flutter//flutter:material_icons` " +
+    "listed here to bundle `MaterialIcons-Regular.otf` into " +
+    "`flutter_assets/` for Material widgets; the rules that emit only " +
+    "a kernel or an AOT artifact have no bundle for it to reach."
+)
+
 # Shared attrs for all flutter application rules.
 FLUTTER_APPLICATION_ATTRS = KERNEL_COMPILE_ATTRS | {
+    "deps": attr.label_list(
+        doc = FLUTTER_DEPS_DOC,
+        providers = [DartInfo],
+        aspects = [flutter_app_shader_aspect],
+    ),
     "assets": attr.label_list(
         doc = "Asset files to include in the bundle.",
         allow_files = True,

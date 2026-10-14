@@ -118,3 +118,10 @@ FlutterApplicationInfo = provider(
         "windows_plugin_libraries": "depset[struct]: Aggregated Windows plugin source bundles, same shape as `FlutterInfo.windows_plugin_libraries`. The Windows runner folds these into its compile.",
     },
 )
+
+FlutterCompiledShadersInfo = provider(
+    doc = "Pre-compiled shaders from transitive dependencies, keyed by bundle path.",
+    fields = {
+        "compiled_shaders": "depset[struct]: Structs with `bundle_path` (str), `file` (File), and `target_platform` (str) of compiled shaders.",
+    },
+)

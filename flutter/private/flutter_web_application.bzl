@@ -38,10 +38,12 @@ load(
     "//flutter/private:common.bzl",
     "AGENT_EXTENSIONS_ATTR",
     "FLUTTER_APPLICATION_ATTRS",
+    "FLUTTER_DEPS_DOC",
     "KERNEL_COMPILE_ATTRS",
     "declare_flutter_assets_dir",
     "flutter_build_assets",
     "flutter_compile_shaders",
+    "flutter_web_shader_aspect",
     "make_web_wrapper_main_content",
     "merge_dart_defines",
     "resolve_dev_generated_sources",
@@ -1179,6 +1181,11 @@ _WEB_APPLICATION_ATTRS = KERNEL_COMPILE_ATTRS | {
     for k, v in FLUTTER_APPLICATION_ATTRS.items()
     if k in _WEB_RELEVANT_KEYS
 }
+_WEB_APPLICATION_ATTRS["deps"] = attr.label_list(
+    doc = FLUTTER_DEPS_DOC,
+    providers = [DartInfo],
+    aspects = [flutter_web_shader_aspect],
+)
 
 # Reaches the analysis closure only — see `analyzable_info` in the impl. No
 # BUILD file names it and no compile action's inputs change.
