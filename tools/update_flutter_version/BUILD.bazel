@@ -2,7 +2,10 @@ load("@rules_dart//dart:defs.bzl", "dart_binary", "dart_test")
 
 dart_binary(
     name = "update_flutter_version",
-    srcs = ["shader_flags.dart"],
+    srcs = [
+        "artifacts.dart",
+        "shader_flags.dart",
+    ],
     main = "main.dart",
 )
 
@@ -10,5 +13,12 @@ dart_test(
     name = "shader_flags_test",
     srcs = ["shader_flags.dart"],
     main = "test/shader_flags_test.dart",
+    deps = ["@dev_tool_deps//:test"],
+)
+
+dart_test(
+    name = "artifacts_test",
+    srcs = ["artifacts.dart"],
+    main = "test/artifacts_test.dart",
     deps = ["@dev_tool_deps//:test"],
 )

@@ -8,7 +8,7 @@ libraries.json can resolve its `include` references to the base
 Dart SDK libraries (dart:core, dart:async, etc.).
 """
 
-load(":artifact_urls.bzl", "dart_sdk_artifact_path", "engine_artifact_url")
+load(":artifact_urls.bzl", "dart_sdk_artifact_path", "engine_artifact_url", "require_sha256")
 
 def _detect_host_platform(repository_ctx):
     """Detect the host platform string (e.g. 'darwin-arm64', 'linux-x64')."""
@@ -36,9 +36,10 @@ def _detect_host_platform(repository_ctx):
 def _flutter_web_sdk_repo_impl(repository_ctx):
     engine_revision = repository_ctx.attr.engine_revision
 
+    web_url = engine_artifact_url(engine_revision, "flutter-web-sdk.zip")
     repository_ctx.download_and_extract(
-        url = engine_artifact_url(engine_revision, "flutter-web-sdk.zip"),
-        sha256 = repository_ctx.attr.sha256 if repository_ctx.attr.sha256 else "",
+        url = web_url,
+        sha256 = require_sha256(repository_ctx.attr.sha256, web_url),
         output = "web-sdk",
     )
 
@@ -47,9 +48,10 @@ def _flutter_web_sdk_repo_impl(repository_ctx):
     # correctly in the Bazel sandbox.
     host_platform = _detect_host_platform(repository_ctx)
     dart_sdk_zip = dart_sdk_artifact_path(host_platform)
+    dart_url = engine_artifact_url(engine_revision, dart_sdk_zip)
     repository_ctx.download_and_extract(
-        url = engine_artifact_url(engine_revision, dart_sdk_zip),
-        sha256 = "",
+        url = dart_url,
+        sha256 = require_sha256(repository_ctx.attr.dart_sdk_sha256s.get(host_platform, ""), dart_url),
         stripPrefix = "dart-sdk",
         output = "dart-sdk",
     )
@@ -75,6 +77,9 @@ flutter_web_sdk_repo = repository_rule(
     doc = "Downloads the Flutter web SDK (dart2wasm/dart2js platform dills) and supporting Dart SDK.",
     attrs = {
         "engine_revision": attr.string(mandatory = True),
-        "sha256": attr.string(doc = "Expected SHA-256 of flutter-web-sdk.zip."),
+        "sha256": attr.string(doc = "Expected SHA-256 of flutter-web-sdk.zip. Required: an empty value fails the fetch."),
+        "dart_sdk_sha256s": attr.string_dict(
+            doc = "Expected SHA-256 of the Dart SDK archive for each host platform, keyed by platform (e.g. `linux-x64`). The rule fails if the running host has no entry.",
+        ),
     },
 )

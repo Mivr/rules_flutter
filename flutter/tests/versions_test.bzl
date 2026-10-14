@@ -1,7 +1,14 @@
 """Unit tests for versions.bzl."""
 
 load("@bazel_skylib//lib:unittest.bzl", "asserts", "unittest")
-load("//flutter/private:versions.bzl", "ARTIFACT_CHECKSUMS", "FLUTTER_VERSIONS")
+load(
+    "//flutter/private:artifact_urls.bzl",
+    "android_engine_artifact_path",
+    "desktop_engine_artifact_path",
+    "gen_snapshot_cross_artifact_path",
+    "ios_engine_artifact_path",
+)
+load("//flutter/private:versions.bzl", "ARTIFACT_CHECKSUMS", "FLUTTER_VERSIONS", "flutter_artifact_sha256")
 
 def _latest_version_first_test_impl(ctx):
     env = unittest.begin(ctx)
@@ -93,12 +100,54 @@ def _checksums_are_sha256_test_impl(ctx):
             )
     return unittest.end(env)
 
+def _artifact_sha256_returns_recorded_value_test_impl(ctx):
+    env = unittest.begin(ctx)
+    asserts.equals(
+        env,
+        ARTIFACT_CHECKSUMS["3.47.5"]["linux-x64/artifacts.zip"],
+        flutter_artifact_sha256("3.47.5", "linux-x64/artifacts.zip"),
+    )
+    return unittest.end(env)
+
+def _android_and_cross_artifacts_have_checksums_test_impl(ctx):
+    # The Android engine repos and the Android gen_snapshot cross repos fetch
+    # these paths. Each one is looked up strictly, so a missing entry fails
+    # the extension; this test catches it at unit-test time, with the version
+    # named.
+    env = unittest.begin(ctx)
+    for version in FLUTTER_VERSIONS.keys():
+        paths = [
+            android_engine_artifact_path("arm64", "release"),
+            android_engine_artifact_path("arm64", "debug"),
+            android_engine_artifact_path("x64", "release"),
+            android_engine_artifact_path("x64", "debug"),
+            ios_engine_artifact_path("release"),
+            ios_engine_artifact_path("debug"),
+            desktop_engine_artifact_path("linux", "arm64", "release"),
+            desktop_engine_artifact_path("linux", "arm64", "debug"),
+        ]
+        for arch in ["arm64", "x64"]:
+            for host in ["darwin-x64", "linux-x64", "windows-x64"]:
+                paths.append(gen_snapshot_cross_artifact_path("android-" + arch, "release", host))
+        for path in paths:
+            asserts.true(
+                env,
+                path in ARTIFACT_CHECKSUMS[version],
+                "ARTIFACT_CHECKSUMS[{}] missing {}".format(version, path),
+            )
+
+            # Also goes through the strict accessor, which fails if empty.
+            flutter_artifact_sha256(version, path)
+    return unittest.end(env)
+
 _t0_test = unittest.make(_latest_version_first_test_impl)
 _t1_test = unittest.make(_engine_revision_format_test_impl)
 _t2_test = unittest.make(_checksums_exist_for_all_versions_test_impl)
 _t3_test = unittest.make(_checksums_have_key_artifacts_test_impl)
 _t4_test = unittest.make(_checksums_are_sha256_test_impl)
 _t5_test = unittest.make(_source_sha256_recorded_for_all_versions_test_impl)
+_t6_test = unittest.make(_artifact_sha256_returns_recorded_value_test_impl)
+_t7_test = unittest.make(_android_and_cross_artifacts_have_checksums_test_impl)
 
 def versions_test_suite(name):
-    unittest.suite(name, _t0_test, _t1_test, _t2_test, _t3_test, _t4_test, _t5_test)
+    unittest.suite(name, _t0_test, _t1_test, _t2_test, _t3_test, _t4_test, _t5_test, _t6_test, _t7_test)

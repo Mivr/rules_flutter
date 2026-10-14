@@ -206,11 +206,29 @@ def _toolchain_extension(module_ctx):
             for name, info in hosted.items():
                 desc = info.get("description", {})
                 version = info.get("version", "")
+
+                # Hosted packages are fetched by checksum only. An entry with
+                # no sha256 is a lock that predates the field, or was edited
+                # by hand; refuse it rather than download unverified bytes.
+                sha256 = desc.get("sha256", "") if type(desc) == "dict" else ""
+                if not sha256:
+                    # Same wording as rules_dart's pub.from_lock(), with
+                    # flutter.pub's command.
+                    fail((
+                        "pub package \"{name}\" {version} in {lock} has no sha256. " +
+                        "Run `bazel run @rules_flutter//flutter:pub -- get` " +
+                        "(Dart 2.19 or newer records one) and commit the lock."
+                    ).format(
+                        lock = str(pub_tag.lock),
+                        name = name,
+                        version = version,
+                    ))
+
                 flutter_pub_package(
                     name = hub_name + "__" + name,
                     package_name = name,
                     version = version,
-                    sha256 = desc.get("sha256", "") if type(desc) == "dict" else "",
+                    sha256 = sha256,
                     base_url = desc.get("url", "https://pub.dev") if type(desc) == "dict" else "https://pub.dev",
                     hub_name = hub_name,
                     lock_packages = all_package_names,
