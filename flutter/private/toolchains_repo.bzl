@@ -131,6 +131,36 @@ toolchain(
             compatible_with = meta.compatible_with,
         )
 
+    # Dart toolchains: the SDK bundled with this Flutter release, declared by
+    # flutter_engine_artifacts as rules_dart's dart_toolchain. These mirror
+    # rules_dart 0.7.2's native and exec-tools registrations. A root module's
+    # register_toolchains is ordered before its dependencies', so for a native
+    # build these win over rules_dart's own. Cross-compiled Dart is deliberately
+    # not registered here: those resolutions still fall back to rules_dart's SDK.
+    for [platform, meta] in HOST_PLATFORMS.items():
+        build_content += """
+toolchain(
+    name = "{platform}_dart_toolchain",
+    exec_compatible_with = {compatible_with},
+    target_compatible_with = {compatible_with},
+    toolchain = "@{user_repository_name}_{platform}//:dart_toolchain",
+    toolchain_type = "@rules_dart//dart:toolchain_type",
+    visibility = ["//visibility:public"],
+)
+
+toolchain(
+    name = "{platform}_dart_exec_tools_toolchain",
+    exec_compatible_with = {compatible_with},
+    toolchain = "@{user_repository_name}_{platform}//:dart_toolchain",
+    toolchain_type = "@rules_dart//dart:exec_tools_toolchain_type",
+    visibility = ["//visibility:public"],
+)
+""".format(
+            platform = platform,
+            user_repository_name = repository_ctx.attr.user_repository_name,
+            compatible_with = meta.compatible_with,
+        )
+
     # Cross-compilation toolchains.
     for [host_platform, targets] in CROSS_COMPILATION_PAIRS.items():
         host_meta = HOST_PLATFORMS[host_platform]

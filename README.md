@@ -1294,6 +1294,8 @@ sdk = ctx.toolchains["@rules_flutter//flutter:toolchain_type"].flutter_sdk_info
 | `shader_lib` | `list[File]` | Shader include files for impellerc. |
 | `target_os`, `target_arch` | `str` | The cross-compilation target, or empty for a native build. |
 
+A Flutter workspace's Dart toolchain is the Dart SDK bundled with its Flutter release. Analysis, formatting, codegen, `dart_test` and `dart_binary` all use it, so the workspace downloads one Dart SDK, not two. A root module that registers its own Dart toolchain before `@flutter_toolchains` keeps it.
+
 **`FlutterInfo`** is carried by `flutter_library` and `flutter_plugin`:
 
 | Field | Type | Description |
