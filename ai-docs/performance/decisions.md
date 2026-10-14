@@ -35,3 +35,36 @@ agent recommends plan item T:
   Flutter workspace has one Dart.
 - A Flutter toolchain remains, but only for the engine artifacts. Those vary by
   target platform and are Flutter's, so they don't belong in `DartSdkInfo`.
+
+**Toolchain shape: plan item T adopted (user).** Flutter's bundled Dart becomes a
+rules_dart `dart_toolchain`, so every Flutter workspace has one Dart. A Flutter
+toolchain remains for the engine artifacts only.
+
+**Landing (user).** As in rules_dart: once a change is verified, it is
+fast-forwarded onto `main` and pushed to `Mivr/rules_flutter`.
+
+**Verification scope (user).** Linux and web on the review machine for now.
+Later, xtool for the Apple paths and the Android emulator on the review
+machine.
+
+**Downloads are hermetic (user).** "The SDK should be downloaded with proper
+checksums so it is a hermetic part of the build, both for Dart and Flutter
+SDKs." Every repository download, whether SDK, engine artifact or pub package,
+is pinned by sha256, and a missing checksum fails the fetch instead of
+downloading unverified. This is plan item H0. Under T, the Dart SDK is Flutter's
+`dart-sdk-<host>.zip`, which is already pinned for every listed Flutter version.
+
+**T stays on the dart toolchain API of the published rules_dart 0.7.2 (agent).**
+rules_flutter depends on rules_dart through the BCR, so T uses only
+`dart_toolchain`'s 0.7.2 attributes (`dart`, `sdk_root`, `version`,
+`target_os`, `target_arch`). The SDK subsets (`compile_files`/`runtime_files`)
+follow when rules_flutter's pin reaches a rules_dart release that has them,
+through ask E's macro if rules_dart provides it.
+
+**The kernel compile keeps the engine's `dartaotruntime` (agent).** frontend_server
+ships as an AOT snapshot in the engine's `host-tools/`, and an AOT snapshot runs
+only on the `dartaotruntime` of the build that produced it. So
+`FlutterSdkInfo` keeps `dartaotruntime`, `frontend_server` and the platform
+dills, all from the one engine download, even if a user registers a different
+Dart toolchain ahead of Flutter's. Build-step scripts and tools take `dart`
+from the rules_dart toolchain.

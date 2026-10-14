@@ -133,3 +133,36 @@ Against rules_dart `main` at `95089ce`, through `--override_module` with
     it.
   - With `--repo_env=CC=/usr/bin/gcc`, it fails with `key "ar" not found in
     dictionary`.
+
+## Download checksums (audit, 2026-10-14)
+
+- **rules_dart's SDK download is strict.** `dart/repositories.bzl` indexes
+  `TOOL_VERSIONS[version][platform]`, so a missing checksum fails the fetch.
+- **rules_flutter's checksums are optional.** Every engine download in
+  `flutter/repositories.bzl` reads `ARTIFACT_CHECKSUMS.get(version,
+  {}).get(path, "")`, and Bazel accepts any bytes for an empty `sha256`.
+  - `ARTIFACT_CHECKSUMS` has 8 Flutter versions, 30–31 artifacts each,
+    including `dart-sdk-<host>.zip` for all five hosts.
+  - The Android engine artifacts (`android-<arch>-<mode>/artifacts.zip`) and
+    Android `gen_snapshot` (`android-<arch>-release/<host>.zip`) are not in the
+    table for any version, so today they download unverified.
+  - `flutter_source_sha256()` and `LINUX_SYSROOT_CHECKSUMS[...]` are strict.
+- **Pub packages:** `flutter.pub` takes each hosted package's `sha256` from
+  `pubspec.lock` (`description.sha256`). An entry without one downloads
+  unverified (`flutter/extensions.bzl`, `flutter_pub_package.bzl`).
+
+## Plan T is feasible on rules_dart 0.7.2 (read from the code)
+
+- **Finding the SDK.** rules_dart derives the SDK directory from the `dart`
+  binary (`sdk_path_from_dart`: strip `/bin/dart`), not from the repository
+  root. So an SDK under `dart-sdk/` in Flutter's engine repository resolves
+  correctly.
+- **What T1 must mirror.** rules_dart registers, per host:
+  - a `toolchain_type` toolchain, with exec and target both the host;
+  - an `exec_tools_toolchain_type` toolchain, with exec constraints only;
+  - desktop cross toolchains (`CROSS_TARGETS`, which reuse the host `dart`).
+  T1 has to mirror all three, or the remaining resolutions fall back to
+  rules_dart's registration and fetch its SDK.
+- **The 0.7.2 attributes.** `dart_toolchain` in 0.7.2 takes `dart`,
+  `sdk_root`, `version`, `target_os` and `target_arch`. `compile_files` and
+  `runtime_files` exist only on rules_dart `main` (`b3c8dc3`).

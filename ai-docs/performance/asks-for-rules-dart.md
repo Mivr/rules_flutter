@@ -56,9 +56,9 @@ version = "0.7.2")`). `--override_module` only helps local work. The ask: say
 when the performance work will be released, or which `main` commit is safe to
 pin for testing.
 
-## E. Declare an SDK toolchain over a directory (only if rules_flutter adopts plan T)
+## E. Declare an SDK toolchain over a directory (plan T adopted 2026-10-14)
 
-The proposal is that rules_flutter registers the Flutter-bundled `dart-sdk/` as
+rules_flutter will register the Flutter-bundled `dart-sdk/` as
 a `dart_toolchain`. Its layout matches the root of rules_dart's SDK repository.
 The ask: export the `sdk_root`, `compile_files`, `runtime_files` and
 `dart_toolchain` declaration that `dart/repositories.bzl` generates as a macro
@@ -67,9 +67,9 @@ file lists would stay in one place. Also confirm that a root-registered
 `dart_toolchain` wins over rules_dart's default registration without fetching
 the default SDK.
 
-## F. The Dart version may come from Flutter (only if T)
+## F. The Dart version comes from Flutter (plan T adopted)
 
-With T, a Flutter workspace's Dart is the one its Flutter release bundles, not
+A Flutter workspace's Dart is the one its Flutter release bundles, not
 rules_dart's default. The ask: keep rules_dart's features correct, or falling
 back, on SDKs other than the default. The analyzer-summary linter is vendored
 for one analyzer version, and the runner snapshot and `kernel_worker`
@@ -87,3 +87,24 @@ on the pinned pair uses one Bazel.
 on `bazel_lib` only for rules_dart's `colocate_packages`. The ask: note in
 `for-rules-flutter.md` when #11 lands, so rules_flutter drops the dependency in
 the same release.
+
+## I. Fail on pub packages without a checksum (the user's hermeticity rule)
+
+The user requires every downloaded SDK, artifact and package to be pinned by
+sha256, with a missing checksum failing the fetch. rules_dart's SDK download is
+already strict. Its pub path is not:
+
+- `dart/pub/extensions.bzl` passes `desc.get("sha256", "")`;
+- `pub_lock_package` and `pub_repository` then download with `sha256 = ""`.
+
+So a lock entry without a checksum downloads unverified. rules_flutter's
+`flutter.pub` has the same gap and closes it in plan H0. The ask: the same
+rule for `pub.from_lock()`, preferably with the same error text.
+
+## J. Keep finding the SDK from `dart`
+
+Plan T places the SDK under `dart-sdk/` inside Flutter's engine repository, not
+at a repository root. That works because rules_dart derives the SDK directory
+from the `dart` binary (`sdk_path_from_dart`). The ask: keep that contract,
+with nothing deriving SDK paths from `sdk_root`'s repository root, or tell
+rules_flutter before it changes.
