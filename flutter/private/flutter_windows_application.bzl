@@ -21,7 +21,7 @@ Output bundle structure:
 
 load("//flutter:providers.bzl", "FlutterApplicationInfo")
 load("//flutter/private:cc_runner_compile.bzl", "compile_and_link_runner")
-load("//flutter/private:common.bzl", "compute_desktop_bundle_copies")
+load("//flutter/private:common.bzl", "compute_desktop_bundle_copies", "resolve_flutter_sdk_info")
 load("//flutter/private:engine_helpers.bzl", "find_engine_header_dir")
 
 # =============================================================================
@@ -284,8 +284,7 @@ def _flutter_windows_bundle_impl(ctx):
     native_libs.extend(app_info.bundled_code_assets.to_list())
     is_debug = app_info.is_debug
 
-    flutter_toolchain = ctx.toolchains["@rules_flutter//flutter:toolchain_type"]
-    flutter_sdk_info = flutter_toolchain.flutter_sdk_info
+    flutter_sdk_info = resolve_flutter_sdk_info(ctx)
 
     app_name = ctx.attr.app_name or ctx.label.name
 
@@ -397,6 +396,7 @@ flutter_windows_bundle_rule = rule(
     },
     toolchains = [
         "@rules_flutter//flutter:toolchain_type",
+        config_common.toolchain_type("@rules_flutter//flutter/private:desktop_engine_toolchain_type", mandatory = False),
     ],
     doc = "Assembles a Windows application directory from a pre-compiled runner and flutter_application artifacts.",
 )

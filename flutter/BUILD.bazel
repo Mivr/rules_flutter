@@ -11,6 +11,32 @@ toolchain_type(
     visibility = ["//visibility:public"],
 )
 
+# Public aliases for the optional lazy sub-toolchain types consumed via
+# `resolve_flutter_sdk_info(ctx)`.
+alias(
+    name = "product_tools_toolchain_type",
+    actual = "//flutter/private:product_tools_toolchain_type",
+    visibility = ["//visibility:public"],
+)
+
+alias(
+    name = "aot_toolchain_type",
+    actual = "//flutter/private:aot_toolchain_type",
+    visibility = ["//visibility:public"],
+)
+
+alias(
+    name = "desktop_engine_toolchain_type",
+    actual = "//flutter/private:desktop_engine_toolchain_type",
+    visibility = ["//visibility:public"],
+)
+
+alias(
+    name = "material_icons_toolchain_type",
+    actual = "//flutter/private:material_icons_toolchain_type",
+    visibility = ["//visibility:public"],
+)
+
 # Compilation mode config_settings used by select() in macros.
 config_setting(
     name = "release",

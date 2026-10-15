@@ -125,11 +125,48 @@ toolchain(
     toolchain_type = "@rules_flutter//flutter:toolchain_type",
     visibility = ["//visibility:public"],
 )
+
+toolchain(
+    name = "{platform}_product_tools_toolchain",
+    exec_compatible_with = {compatible_with},
+    toolchain = "@{user_repository_name}_{platform}//:product_tools_toolchain",
+    toolchain_type = "@rules_flutter//flutter/private:product_tools_toolchain_type",
+    visibility = ["//visibility:public"],
+)
+
+toolchain(
+    name = "{platform}_aot_toolchain",
+    exec_compatible_with = {compatible_with},
+    target_compatible_with = {compatible_with},
+    toolchain = "@{user_repository_name}_{platform}//:aot_toolchain",
+    toolchain_type = "@rules_flutter//flutter/private:aot_toolchain_type",
+    visibility = ["//visibility:public"],
+)
+
+toolchain(
+    name = "{platform}_desktop_engine_toolchain",
+    exec_compatible_with = {compatible_with},
+    target_compatible_with = {compatible_with},
+    toolchain = "@{user_repository_name}_{platform}//:desktop_engine_toolchain",
+    toolchain_type = "@rules_flutter//flutter/private:desktop_engine_toolchain_type",
+    visibility = ["//visibility:public"],
+)
 """.format(
             platform = platform,
             user_repository_name = repository_ctx.attr.user_repository_name,
             compatible_with = meta.compatible_with,
         )
+
+    build_content += """
+toolchain(
+    name = "material_icons_toolchain",
+    toolchain = "@{user_repository_name}_material_fonts//:material_icons_toolchain",
+    toolchain_type = "@rules_flutter//flutter/private:material_icons_toolchain_type",
+    visibility = ["//visibility:public"],
+)
+""".format(
+        user_repository_name = repository_ctx.attr.user_repository_name,
+    )
 
     # Dart toolchains: the SDK bundled with this Flutter release, declared by
     # flutter_engine_artifacts as rules_dart's dart_toolchain. These mirror
@@ -175,6 +212,15 @@ toolchain(
     toolchain_type = "@rules_flutter//flutter:toolchain_type",
     visibility = ["//visibility:public"],
 )
+
+toolchain(
+    name = "{host}_to_{target}_aot_toolchain",
+    exec_compatible_with = {exec_compatible_with},
+    target_compatible_with = {target_compatible_with},
+    toolchain = "@{user_repository_name}_cross_{host}_{target}//:aot_toolchain",
+    toolchain_type = "@rules_flutter//flutter/private:aot_toolchain_type",
+    visibility = ["//visibility:public"],
+)
 """.format(
                 host = host_platform,
                 target = target_platform,
@@ -195,6 +241,24 @@ toolchain(
     target_compatible_with = {target_compatible_with},
     toolchain = "@{user_repository_name}_desktop_cross_{host}_{target}//:flutter_toolchain",
     toolchain_type = "@rules_flutter//flutter:toolchain_type",
+    visibility = ["//visibility:public"],
+)
+
+toolchain(
+    name = "{host}_to_{target}_desktop_aot_toolchain",
+    exec_compatible_with = {exec_compatible_with},
+    target_compatible_with = {target_compatible_with},
+    toolchain = "@{user_repository_name}_desktop_cross_{host}_{target}//:aot_toolchain",
+    toolchain_type = "@rules_flutter//flutter/private:aot_toolchain_type",
+    visibility = ["//visibility:public"],
+)
+
+toolchain(
+    name = "{host}_to_{target}_desktop_engine_toolchain",
+    exec_compatible_with = {exec_compatible_with},
+    target_compatible_with = {target_compatible_with},
+    toolchain = "@{user_repository_name}_desktop_cross_{host}_{target}//:desktop_engine_toolchain",
+    toolchain_type = "@rules_flutter//flutter/private:desktop_engine_toolchain_type",
     visibility = ["//visibility:public"],
 )
 """.format(

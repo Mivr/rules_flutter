@@ -8,6 +8,29 @@ config_setting(
     visibility = ["//visibility:public"],
 )
 
+# Internal sub-toolchain types so rules only trigger fetching of the lazy
+# SDK repositories they actually use (product patched SDK + font-subset,
+# AOT gen_snapshot, desktop engine + Linux sysroot, MaterialIcons font).
+toolchain_type(
+    name = "product_tools_toolchain_type",
+    visibility = ["//visibility:public"],
+)
+
+toolchain_type(
+    name = "aot_toolchain_type",
+    visibility = ["//visibility:public"],
+)
+
+toolchain_type(
+    name = "desktop_engine_toolchain_type",
+    visibility = ["//visibility:public"],
+)
+
+toolchain_type(
+    name = "material_icons_toolchain_type",
+    visibility = ["//visibility:public"],
+)
+
 bzl_library(
     name = "common",
     srcs = ["common.bzl"],

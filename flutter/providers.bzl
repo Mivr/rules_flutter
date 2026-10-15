@@ -1,19 +1,34 @@
 """Providers for Flutter rules."""
 
 FlutterSdkInfo = provider(
-    doc = "Information about the Flutter engine provided by the toolchain.",
+    doc = """Information about the Flutter engine provided by the toolchain.
+
+Core host fields (`version`, `engine_revision`, `dart`, `dartaotruntime`, \
+`flutter_tester`, `frontend_server`, `platform_kernel_dill`, `patched_sdk`, \
+`icu_data`, `impellerc`, `shader_lib`, `vm_isolate_snapshot`, \
+`isolate_snapshot`, `tool_files`, `dart_vm_files`, `dart_pub_files`, \
+`dart2wasm_files`, `dart2js_files`, `target_os`, `target_arch`) are populated \
+directly on `ctx.toolchains["@rules_flutter//flutter:toolchain_type"].flutter_sdk_info`.
+
+Lazy-fetched fields (`gen_snapshot`, `platform_kernel_dill_product`, \
+`const_finder`, `font_subset`, `engine_library`, `linux_sysroot`, \
+`material_icons_font`) live on optional sub-toolchains so builds only fetch \
+the repositories they need. Custom rules that read those fields should \
+declare `toolchains = ["@rules_flutter//flutter:toolchain_type"] + FLUTTER_OPTIONAL_TOOLCHAINS` \
+(or the specific sub-toolchain types they need) and call \
+`resolve_flutter_sdk_info(ctx)`.""",
     fields = {
         "version": "str: The Flutter SDK version string (e.g. `3.41.2`).",
         "engine_revision": "str: The engine commit hash.",
         "dart": "File: The `dart` executable from the Flutter-bundled Dart SDK.",
         "dartaotruntime": "File: The `dartaotruntime` executable for running AOT snapshots.",
-        "gen_snapshot": "File: The `gen_snapshot` AOT compiler binary.",
+        "gen_snapshot": "File or None: The `gen_snapshot` AOT compiler binary (resolved via `@rules_flutter//flutter:aot_toolchain_type` and `resolve_flutter_sdk_info`).",
         "flutter_tester": "File or None: The `flutter_tester` binary — a headless Flutter engine " +
                           "used to run widget tests (`flutter_test` rule). None if the host SDK " +
                           "doesn't include it (e.g. cross-compilation targets).",
         "frontend_server": "File: The `frontend_server_aot.dart.snapshot` for kernel compilation.",
         "platform_kernel_dill": "File: `platform_strong.dill` — the debug platform kernel.",
-        "platform_kernel_dill_product": "File: `platform_strong_product.dill` — the release platform kernel.",
+        "platform_kernel_dill_product": "File or None: `platform_strong_product.dill` — the release platform kernel (resolved via `@rules_flutter//flutter:product_tools_toolchain_type` and `resolve_flutter_sdk_info`).",
         "patched_sdk": "Target: The Flutter patched Dart SDK root directory.",
         "icu_data": "File: `icudtl.dat` — ICU data file required by the engine.",
         "tool_files": "depset[File]: Deprecated. All files in the bundled Dart SDK and patched SDK. " +
@@ -24,19 +39,88 @@ FlutterSdkInfo = provider(
         "dart2js_files": "depset[File]: Host Dart SDK files required for `dart compile js`.",
         "engine_library": "Target or None: The platform-specific Flutter engine runtime library " +
                           "(FlutterMacOS.framework, libflutter_linux_gtk.so, flutter_windows.dll). " +
-                          "None for mobile/web or when engine runtime is not downloaded.",
-        "const_finder": "File or None: The `const_finder.dart.snapshot` for icon tree shaking.",
-        "font_subset": "File or None: The `font-subset` binary for font subsetting.",
+                          "None for mobile/web or when engine runtime is not downloaded (resolved via `@rules_flutter//flutter:desktop_engine_toolchain_type` and `resolve_flutter_sdk_info`).",
+        "const_finder": "File or None: The `const_finder.dart.snapshot` for icon tree shaking (resolved via `@rules_flutter//flutter:product_tools_toolchain_type` and `resolve_flutter_sdk_info`).",
+        "font_subset": "File or None: The `font-subset` binary for font subsetting (resolved via `@rules_flutter//flutter:product_tools_toolchain_type` and `resolve_flutter_sdk_info`).",
         "impellerc": "File or None: The `impellerc` shader compiler binary.",
         "shader_lib": "list[File]: Shader include files for impellerc (shader_lib/ directory contents).",
-        "material_icons_font": "File or None: MaterialIcons-Regular.otf font file.",
+        "material_icons_font": "File or None: MaterialIcons-Regular.otf font file (resolved via `@rules_flutter//flutter:material_icons_toolchain_type` and `resolve_flutter_sdk_info`).",
         "vm_isolate_snapshot": "File or None: `vm_isolate_snapshot.bin` — VM bootstrap snapshot for debug mode.",
         "isolate_snapshot": "File or None: `isolate_snapshot.bin` — isolate bootstrap snapshot for debug mode (includes kernel service).",
         "target_os": "str: Cross-compilation target OS, or empty for native.",
         "target_arch": "str: Cross-compilation target architecture, or empty for native.",
-        "linux_sysroot": "Target or None: Chromium sysroot filegroup for hermetic Linux GTK3 builds. None on non-Linux platforms.",
+        "linux_sysroot": "Target or None: Chromium sysroot filegroup for hermetic Linux GTK3 builds. None on non-Linux platforms (resolved via `@rules_flutter//flutter:desktop_engine_toolchain_type` and `resolve_flutter_sdk_info`).",
     },
 )
+
+FLUTTER_OPTIONAL_TOOLCHAINS = [
+    config_common.toolchain_type("@rules_flutter//flutter/private:product_tools_toolchain_type", mandatory = False),
+    config_common.toolchain_type("@rules_flutter//flutter/private:aot_toolchain_type", mandatory = False),
+    config_common.toolchain_type("@rules_flutter//flutter/private:desktop_engine_toolchain_type", mandatory = False),
+    config_common.toolchain_type("@rules_flutter//flutter/private:material_icons_toolchain_type", mandatory = False),
+]
+
+def _lookup_sub_toolchain(ctx, private_type, public_type):
+    if private_type in ctx.toolchains:
+        return ctx.toolchains[private_type]
+    if public_type in ctx.toolchains:
+        return ctx.toolchains[public_type]
+    return None
+
+def resolve_flutter_sdk_info(ctx):
+    """Resolves `FlutterSdkInfo` from the primary toolchain and any optional sub-toolchains.
+
+    Preserves every field on the primary `FlutterSdkInfo` generically and overlays
+    `platform_kernel_dill_product`, `const_finder`, `font_subset`, `gen_snapshot`,
+    `engine_library`, `linux_sysroot`, and `material_icons_font` from any optional
+    sub-toolchains declared on the rule.
+    """
+    flutter_toolchain = ctx.toolchains["@rules_flutter//flutter:toolchain_type"]
+    info = flutter_toolchain.flutter_sdk_info
+
+    product_tc = _lookup_sub_toolchain(
+        ctx,
+        "@rules_flutter//flutter/private:product_tools_toolchain_type",
+        "@rules_flutter//flutter:product_tools_toolchain_type",
+    )
+    aot_tc = _lookup_sub_toolchain(
+        ctx,
+        "@rules_flutter//flutter/private:aot_toolchain_type",
+        "@rules_flutter//flutter:aot_toolchain_type",
+    )
+    desktop_tc = _lookup_sub_toolchain(
+        ctx,
+        "@rules_flutter//flutter/private:desktop_engine_toolchain_type",
+        "@rules_flutter//flutter:desktop_engine_toolchain_type",
+    )
+    material_tc = _lookup_sub_toolchain(
+        ctx,
+        "@rules_flutter//flutter/private:material_icons_toolchain_type",
+        "@rules_flutter//flutter:material_icons_toolchain_type",
+    )
+
+    if not product_tc and not aot_tc and not desktop_tc and not material_tc:
+        return info
+
+    fields = {
+        k: getattr(info, k)
+        for k in dir(info)
+        if k not in ("to_json", "to_proto")
+    }
+    if product_tc:
+        for k in ("platform_kernel_dill_product", "const_finder", "font_subset"):
+            if not fields.get(k):
+                fields[k] = getattr(product_tc, k, None)
+    if aot_tc and not fields.get("gen_snapshot"):
+        fields["gen_snapshot"] = getattr(aot_tc, "gen_snapshot", None)
+    if desktop_tc:
+        for k in ("engine_library", "linux_sysroot"):
+            if not fields.get(k):
+                fields[k] = getattr(desktop_tc, k, None)
+    if material_tc and not fields.get("material_icons_font"):
+        fields["material_icons_font"] = getattr(material_tc, "material_icons_font", None)
+
+    return FlutterSdkInfo(**fields)
 
 FlutterInfo = provider(
     doc = """The channels a Flutter library contributes to its consumers.

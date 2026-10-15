@@ -1268,10 +1268,13 @@ On Windows, the repository rule extracts all of `packages/flutter_tools` (about 
 
 ### Providers
 
-**`FlutterSdkInfo`** comes from the toolchain and carries the engine binaries and SDK files a custom rule needs:
+**`FlutterSdkInfo`** comes from the toolchain and carries the engine binaries and SDK files a custom rule needs. Core host fields live directly on `@rules_flutter//flutter:toolchain_type`; lazy-fetched fields (`gen_snapshot`, `platform_kernel_dill_product`, `const_finder`, `font_subset`, `engine_library`, `linux_sysroot`, `material_icons_font`) live on optional sub-toolchains so builds only download the repositories they use. Use `resolve_flutter_sdk_info(ctx)` with `FLUTTER_OPTIONAL_TOOLCHAINS` (from `@rules_flutter//flutter:providers.bzl` or `@rules_flutter//flutter:toolchain.bzl`) to merge them:
 
 ```starlark
-sdk = ctx.toolchains["@rules_flutter//flutter:toolchain_type"].flutter_sdk_info
+load("@rules_flutter//flutter:providers.bzl", "FLUTTER_OPTIONAL_TOOLCHAINS", "resolve_flutter_sdk_info")
+
+# In rule(..., toolchains = ["@rules_flutter//flutter:toolchain_type"] + FLUTTER_OPTIONAL_TOOLCHAINS):
+sdk = resolve_flutter_sdk_info(ctx)
 ```
 
 | Field | Type | Description |
@@ -1280,10 +1283,10 @@ sdk = ctx.toolchains["@rules_flutter//flutter:toolchain_type"].flutter_sdk_info
 | `engine_revision` | `str` | The engine commit hash. |
 | `dart` | `File` | The `dart` executable from the bundled Dart SDK. |
 | `dartaotruntime` | `File` | The runtime for AOT snapshots. |
-| `gen_snapshot` | `File` | The AOT compiler. |
+| `gen_snapshot` | `File` or `None` | The AOT compiler (resolved via `@rules_flutter//flutter:aot_toolchain_type`). |
 | `frontend_server` | `File` | `frontend_server_aot.dart.snapshot`, for kernel compilation. |
 | `platform_kernel_dill` | `File` | `platform_strong.dill`, the debug platform kernel. |
-| `platform_kernel_dill_product` | `File` | `platform_strong_product.dill`, the release platform kernel. |
+| `platform_kernel_dill_product` | `File` or `None` | `platform_strong_product.dill`, the release platform kernel (resolved via `@rules_flutter//flutter:product_tools_toolchain_type`). |
 | `patched_sdk` | `Target` | The Flutter-patched Dart SDK root. |
 | `icu_data` | `File` | `icudtl.dat`. |
 | `tool_files` | `depset[File]` | Everything needed to run the build tools, for action inputs. |
@@ -1291,9 +1294,11 @@ sdk = ctx.toolchains["@rules_flutter//flutter:toolchain_type"].flutter_sdk_info
 | `dart_pub_files` | `depset[File]` | Minimal Dart SDK files needed for `dart pub` (`bin/dart`, `bin/dartaotruntime`, `bin/snapshots/dartdev_aot.dart.snapshot`, `version`). |
 | `dart2wasm_files` | `depset[File]` | Minimal Dart SDK files needed for `dart compile wasm` (`bin/dart`, `bin/dartaotruntime`, `bin/snapshots/dart2wasm_product.snapshot`, `bin/wasm-opt`). |
 | `dart2js_files` | `depset[File]` | Minimal Dart SDK files needed for `dart compile js` (`bin/dart`, `bin/dartvm`, `bin/snapshots/dart2js.dart.snapshot`). |
-| `engine_library` | `Target` or `None` | The platform engine runtime library. `None` for mobile and web. |
-| `const_finder` | `File` or `None` | `const_finder.dart.snapshot`, for icon tree shaking. |
-| `font_subset` | `File` or `None` | The `font-subset` binary. |
+| `engine_library` | `Target` or `None` | The platform engine runtime library. `None` for mobile and web (resolved via `@rules_flutter//flutter:desktop_engine_toolchain_type`). |
+| `linux_sysroot` | `Target` or `None` | The Chromium sysroot filegroup for Linux GTK3 builds (resolved via `@rules_flutter//flutter:desktop_engine_toolchain_type`). |
+| `const_finder` | `File` or `None` | `const_finder.dart.snapshot`, for icon tree shaking (resolved via `@rules_flutter//flutter:product_tools_toolchain_type`). |
+| `font_subset` | `File` or `None` | The `font-subset` binary (resolved via `@rules_flutter//flutter:product_tools_toolchain_type`). |
+| `material_icons_font` | `File` or `None` | `MaterialIcons-Regular.otf` (resolved via `@rules_flutter//flutter:material_icons_toolchain_type`). |
 | `impellerc` | `File` or `None` | The shader compiler. |
 | `shader_lib` | `list[File]` | Shader include files for impellerc. |
 | `target_os`, `target_arch` | `str` | The cross-compilation target, or empty for a native build. |
