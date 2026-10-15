@@ -61,6 +61,10 @@ flutter_toolchain(
     name = "flutter_toolchain",
     dart = "@{host_repo_name}//:dart-sdk/bin/{dart_bin}",
     dart_sdk = "@{host_repo_name}//:dart_sdk_files",
+    dart_vm_files = "@{host_repo_name}//:dart_vm_files",
+    dart_pub_files = "@{host_repo_name}//:dart_pub_files",
+    dart2wasm_files = "@{host_repo_name}//:dart2wasm_files",
+    dart2js_files = "@{host_repo_name}//:dart2js_files",
     dartaotruntime = "@{host_repo_name}//:dart-sdk/bin/{dartaotruntime_bin}",
 {engine_library_attr}
     engine_revision = "{engine_revision}",

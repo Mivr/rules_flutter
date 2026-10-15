@@ -78,8 +78,8 @@ def build_asset_manifest(assets):
 
 def flutter_asset_bundle_action(
         ctx,
-        dart,
-        flutter_sdk_files,
+        dart = None,
+        flutter_sdk_files = None,
         assets = [],
         fonts = [],
         notices = "",
@@ -93,8 +93,8 @@ def flutter_asset_bundle_action(
 
     Args:
         ctx: Rule context.
-        dart: The `dart` executable File from the Flutter SDK.
-        flutter_sdk_files: SDK files needed to run dart (for action inputs).
+        dart: The `dart` executable File from the Flutter SDK (only required when icon tree shaking is enabled).
+        flutter_sdk_files: SDK files needed to run dart (for action inputs when icon tree shaking is enabled).
         assets: list of File objects to include in the bundle.
         fonts: list of font declaration dicts (FontManifest.json schema).
         notices: License text string to compress into NOTICES.Z.
@@ -186,9 +186,6 @@ def flutter_asset_bundle_action(
     return output_dir
 
 def _flutter_asset_bundle_impl(ctx):
-    flutter_toolchain = ctx.toolchains["@rules_flutter//flutter:toolchain_type"]
-    flutter_sdk_info = flutter_toolchain.flutter_sdk_info
-
     # Collect assets from direct attr + transitive FlutterInfo deps.
     all_assets = list(ctx.files.assets)
     for dep in ctx.attr.deps:
@@ -202,8 +199,6 @@ def _flutter_asset_bundle_impl(ctx):
 
     output_dir = flutter_asset_bundle_action(
         ctx = ctx,
-        dart = flutter_sdk_info.dart,
-        flutter_sdk_files = flutter_sdk_info.tool_files,
         assets = all_assets,
         fonts = fonts,
         notices = "",

@@ -1287,6 +1287,10 @@ sdk = ctx.toolchains["@rules_flutter//flutter:toolchain_type"].flutter_sdk_info
 | `patched_sdk` | `Target` | The Flutter-patched Dart SDK root. |
 | `icu_data` | `File` | `icudtl.dat`. |
 | `tool_files` | `depset[File]` | Everything needed to run the build tools, for action inputs. |
+| `dart_vm_files` | `depset[File]` | Minimal Dart SDK files needed to run the `dart` VM on a snapshot (`bin/dart`, `bin/dartvm`). |
+| `dart_pub_files` | `depset[File]` | Minimal Dart SDK files needed for `dart pub` (`bin/dart`, `bin/dartaotruntime`, `bin/snapshots/dartdev_aot.dart.snapshot`, `version`). |
+| `dart2wasm_files` | `depset[File]` | Minimal Dart SDK files needed for `dart compile wasm` (`bin/dart`, `bin/dartaotruntime`, `bin/snapshots/dart2wasm_product.snapshot`, `bin/wasm-opt`). |
+| `dart2js_files` | `depset[File]` | Minimal Dart SDK files needed for `dart compile js` (`bin/dart`, `bin/dartvm`, `bin/snapshots/dart2js.dart.snapshot`). |
 | `engine_library` | `Target` or `None` | The platform engine runtime library. `None` for mobile and web. |
 | `const_finder` | `File` or `None` | `const_finder.dart.snapshot`, for icon tree shaking. |
 | `font_subset` | `File` or `None` | The `font-subset` binary. |

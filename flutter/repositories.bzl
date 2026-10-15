@@ -206,6 +206,83 @@ filegroup(
     visibility = ["//visibility:public"],
 )
 
+filegroup(
+    name = "dart_vm_files",
+    srcs = glob(
+        [
+            "dart-sdk/bin/dart",
+            "dart-sdk/bin/dart.exe",
+            "dart-sdk/bin/dartvm*",
+            "dart-sdk/bin/*.dll",
+        ],
+        allow_empty = True,
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "dart_pub_files",
+    srcs = glob(
+        [
+            "dart-sdk/bin/dart",
+            "dart-sdk/bin/dart.exe",
+            "dart-sdk/bin/dartaotruntime",
+            "dart-sdk/bin/dartaotruntime.exe",
+            "dart-sdk/bin/*.dll",
+            "dart-sdk/bin/snapshots/dartdev.dart.snapshot",
+            "dart-sdk/bin/snapshots/dartdev_aot.dart.snapshot",
+            "dart-sdk/version",
+        ],
+        allow_empty = True,
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "dart2wasm_files",
+    srcs = glob(
+        [
+            "dart-sdk/bin/dart",
+            "dart-sdk/bin/dart.exe",
+            "dart-sdk/bin/dartaotruntime",
+            "dart-sdk/bin/dartaotruntime.exe",
+            "dart-sdk/bin/*.dll",
+            "dart-sdk/bin/utils/**",
+            "dart-sdk/bin/snapshots/dartdev.dart.snapshot",
+            "dart-sdk/bin/snapshots/dartdev_aot.dart.snapshot",
+            "dart-sdk/bin/snapshots/dart2wasm*",
+            "dart-sdk/lib/_internal/dart2wasm_platform.dill",
+            "dart-sdk/lib/_internal/allowed_experiments.json",
+            "dart-sdk/lib/libraries.json",
+            "dart-sdk/version",
+        ],
+        allow_empty = True,
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "dart2js_files",
+    srcs = glob(
+        [
+            "dart-sdk/bin/dart",
+            "dart-sdk/bin/dart.exe",
+            "dart-sdk/bin/dartaotruntime",
+            "dart-sdk/bin/dartaotruntime.exe",
+            "dart-sdk/bin/*.dll",
+            "dart-sdk/bin/snapshots/dartdev.dart.snapshot",
+            "dart-sdk/bin/snapshots/dartdev_aot.dart.snapshot",
+            "dart-sdk/bin/snapshots/dart2js*",
+            "dart-sdk/lib/_internal/dart2js_platform.dill",
+            "dart-sdk/lib/_internal/allowed_experiments.json",
+            "dart-sdk/lib/libraries.json",
+            "dart-sdk/version",
+        ],
+        allow_empty = True,
+    ),
+    visibility = ["//visibility:public"],
+)
+
 # The Dart SDK bundled with this Flutter release, as rules_dart's Dart toolchain.
 # Flutter workspaces register it ahead of rules_dart's own SDK, so analysis,
 # formatting, codegen and dart_test/dart_binary use the same Dart as the
@@ -244,6 +321,10 @@ flutter_toolchain(
     name = "flutter_toolchain",
     dart = "dart-sdk/bin/{dart_bin}",
     dart_sdk = ":dart_sdk_files",
+    dart_vm_files = ":dart_vm_files",
+    dart_pub_files = ":dart_pub_files",
+    dart2wasm_files = ":dart2wasm_files",
+    dart2js_files = ":dart2js_files",
     dartaotruntime = "dart-sdk/bin/{dartaotruntime_bin}",
     engine_revision = "{engine_revision}",
 {engine_library_attr}
