@@ -8,7 +8,7 @@ flutter_application, flutter_android_bundle, and flutter_ios_application.
 load("@bazel_skylib//rules:common_settings.bzl", "BuildSettingInfo")
 load("@rules_dart//dart:providers.bzl", "DartInfo")
 load("@rules_dart//dart:utils.bzl", "collect_packages", "collect_transitive_srcs", "derive_lib_root", "generate_dev_package_config")
-load("//flutter:providers.bzl", "FlutterCompiledShadersInfo", "FlutterInfo", "FlutterNativeLibraryInfo")
+load("//flutter:providers.bzl", "FlutterCompiledShadersInfo", "FlutterInfo", "FlutterNativeLibraryInfo", "FlutterSdkInfo")
 load("//flutter/private:app_entrypoint.bzl", "APP_SCHEME", "app_main_location", "app_scheme_location", "app_scheme_sources", "compile_package_config", "resolve_kernel_entrypoint", "synthesize_app_package", "with_root")
 load("//flutter/private:flutter_asset_bundle.bzl", "flutter_asset_bundle_action")
 load("//flutter/private:flutter_compile.bzl", "flutter_kernel_compile_action")
@@ -18,6 +18,45 @@ load("//flutter/private:flutter_shader_compile.bzl", "flutter_shader_compile_act
 load("//flutter/private:native_sources.bzl", "native_sources_aspect")
 load("//flutter/private:plugin_registrant.bzl", "generate_dart_plugin_registrant", "generate_dev_plugin_registrants")
 load("//flutter/private:validation.bzl", "validate_dart_defines")
+
+def resolve_flutter_sdk_info(ctx):
+    """Resolves `FlutterSdkInfo` from the primary toolchain and any optional sub-toolchains."""
+    flutter_toolchain = ctx.toolchains["@rules_flutter//flutter:toolchain_type"]
+    info = flutter_toolchain.flutter_sdk_info
+
+    product_tc = ctx.toolchains["@rules_flutter//flutter/private:product_tools_toolchain_type"] if "@rules_flutter//flutter/private:product_tools_toolchain_type" in ctx.toolchains else None
+    aot_tc = ctx.toolchains["@rules_flutter//flutter/private:aot_toolchain_type"] if "@rules_flutter//flutter/private:aot_toolchain_type" in ctx.toolchains else None
+    desktop_tc = ctx.toolchains["@rules_flutter//flutter/private:desktop_engine_toolchain_type"] if "@rules_flutter//flutter/private:desktop_engine_toolchain_type" in ctx.toolchains else None
+    material_tc = ctx.toolchains["@rules_flutter//flutter/private:material_icons_toolchain_type"] if "@rules_flutter//flutter/private:material_icons_toolchain_type" in ctx.toolchains else None
+
+    if not product_tc and not aot_tc and not desktop_tc and not material_tc:
+        return info
+
+    return FlutterSdkInfo(
+        version = info.version,
+        engine_revision = info.engine_revision,
+        dart = info.dart,
+        dartaotruntime = info.dartaotruntime,
+        frontend_server = info.frontend_server,
+        gen_snapshot = info.gen_snapshot or (aot_tc.gen_snapshot if aot_tc else None),
+        flutter_tester = info.flutter_tester,
+        impellerc = info.impellerc,
+        const_finder = info.const_finder or (product_tc.const_finder if product_tc else None),
+        font_subset = info.font_subset or (product_tc.font_subset if product_tc else None),
+        shader_lib = info.shader_lib,
+        material_icons_font = info.material_icons_font or (material_tc.material_icons_font if material_tc else None),
+        patched_sdk = info.patched_sdk,
+        platform_kernel_dill = info.platform_kernel_dill,
+        platform_kernel_dill_product = info.platform_kernel_dill_product or (product_tc.platform_kernel_dill_product if product_tc else None),
+        engine_library = info.engine_library or (desktop_tc.engine_library if desktop_tc else None),
+        icu_data = info.icu_data,
+        vm_isolate_snapshot = info.vm_isolate_snapshot,
+        isolate_snapshot = info.isolate_snapshot,
+        target_os = info.target_os,
+        target_arch = info.target_arch,
+        linux_sysroot = info.linux_sysroot or (desktop_tc.linux_sysroot if desktop_tc else None),
+        tool_files = info.tool_files,
+    )
 
 def make_web_wrapper_main_content(original_import, registrant_import = None):
     """Generate a web wrapper main.dart that uses ui_web.bootstrapEngine().

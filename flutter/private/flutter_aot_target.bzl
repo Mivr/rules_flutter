@@ -8,12 +8,11 @@ platforms (ELF .so).
 """
 
 load("@rules_dart//dart:utils.bzl", "COPY_TO_DIRECTORY_TOOLCHAINS")
-load("//flutter/private:common.bzl", "FLUTTER_APPLICATION_ATTRS", "KERNEL_COMPILE_ATTRS", "PLATFORM_CONSTRAINT_ATTRS", "flutter_compile_kernel")
+load("//flutter/private:common.bzl", "FLUTTER_APPLICATION_ATTRS", "KERNEL_COMPILE_ATTRS", "PLATFORM_CONSTRAINT_ATTRS", "flutter_compile_kernel", "resolve_flutter_sdk_info")
 load("//flutter/private:flutter_aot_compile.bzl", "flutter_aot_elf_action", "flutter_aot_macho_action")
 
 def _flutter_aot_target_impl(ctx):
-    flutter_toolchain = ctx.toolchains["@rules_flutter//flutter:toolchain_type"]
-    flutter_sdk_info = flutter_toolchain.flutter_sdk_info
+    flutter_sdk_info = resolve_flutter_sdk_info(ctx)
 
     bazel_mode = ctx.var["COMPILATION_MODE"]
     is_debug = bazel_mode == "dbg"
@@ -81,6 +80,8 @@ flutter_aot_target = rule(
     attrs = dict(_AOT_ATTRS, **PLATFORM_CONSTRAINT_ATTRS),
     toolchains = [
         "@rules_flutter//flutter:toolchain_type",
+        config_common.toolchain_type("@rules_flutter//flutter/private:product_tools_toolchain_type", mandatory = False),
+        config_common.toolchain_type("@rules_flutter//flutter/private:aot_toolchain_type", mandatory = False),
     ] + COPY_TO_DIRECTORY_TOOLCHAINS,
     doc = "Compiles Flutter sources to an AOT artifact (.so or .dylib depending on target platform).",
 )

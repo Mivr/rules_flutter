@@ -15,15 +15,14 @@ load("@apple_support//lib:apple_support.bzl", "apple_support")
 load("@bazel_skylib//lib:dicts.bzl", "dicts")
 load("@rules_dart//dart:utils.bzl", "COPY_TO_DIRECTORY_TOOLCHAINS", "dart_link_hook_actions", "link_hook_runner_attr")
 load("//flutter:providers.bzl", "FlutterApplicationInfo", "FlutterInfo")
-load("//flutter/private:common.bzl", "FLUTTER_APPLICATION_ATTRS", "PLATFORM_CONSTRAINT_ATTRS", "check_unreplaced_hooks", "collect_binding_contracts", "collect_native_libs", "declare_flutter_assets_dir", "detect_target_platform", "flutter_build_assets", "flutter_compile_kernel", "flutter_compile_shaders", "host_target_arch", "launch_build_args", "shader_sources")
+load("//flutter/private:common.bzl", "FLUTTER_APPLICATION_ATTRS", "PLATFORM_CONSTRAINT_ATTRS", "check_unreplaced_hooks", "collect_binding_contracts", "collect_native_libs", "declare_flutter_assets_dir", "detect_target_platform", "flutter_build_assets", "flutter_compile_kernel", "flutter_compile_shaders", "host_target_arch", "launch_build_args", "resolve_flutter_sdk_info", "shader_sources")
 load("//flutter/private:flutter_aot_compile.bzl", "flutter_aot_elf_action", "flutter_aot_macho_action")
 load("//flutter/private:flutter_info.bzl", "dedup_plugins")
 load("//flutter/private:flutter_native_assets.bzl", "bridge_dart_code_assets", "collect_bundled_code_asset_files", "write_native_assets_manifest")
 load("//flutter/private:native_sources.bzl", "collect_native_source_pairs")
 
 def _flutter_application_impl(ctx):
-    flutter_toolchain = ctx.toolchains["@rules_flutter//flutter:toolchain_type"]
-    flutter_sdk_info = flutter_toolchain.flutter_sdk_info
+    flutter_sdk_info = resolve_flutter_sdk_info(ctx)
 
     bazel_mode = ctx.var["COMPILATION_MODE"]
     is_profile = ctx.attr.profile
@@ -467,6 +466,8 @@ flutter_application = rule(
     ),
     toolchains = [
         "@rules_flutter//flutter:toolchain_type",
+        config_common.toolchain_type("@rules_flutter//flutter/private:product_tools_toolchain_type", mandatory = False),
+        config_common.toolchain_type("@rules_flutter//flutter/private:aot_toolchain_type", mandatory = False),
         "@rules_dart//dart:exec_tools_toolchain_type",
     ] + COPY_TO_DIRECTORY_TOOLCHAINS,
     doc = "Compiles a Flutter application to AOT native code + asset bundle (release) or kernel .dill + assets (debug).",

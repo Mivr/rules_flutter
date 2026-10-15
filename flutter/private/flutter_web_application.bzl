@@ -47,6 +47,7 @@ load(
     "make_web_wrapper_main_content",
     "merge_dart_defines",
     "resolve_dev_generated_sources",
+    "resolve_flutter_sdk_info",
     "shader_sources",
 )
 load("//flutter/private:flutter_compile.bzl", "flutter_kernel_compile_action")
@@ -302,8 +303,7 @@ def _flutter_web_bundle_impl(ctx):
     validate_base_href(ctx.attr.base_href, ctx.label)
     validate_static_assets_url(ctx.attr.static_assets_url, ctx.label)
 
-    flutter_toolchain = ctx.toolchains["@rules_flutter//flutter:toolchain_type"]
-    flutter_sdk_info = flutter_toolchain.flutter_sdk_info
+    flutter_sdk_info = resolve_flutter_sdk_info(ctx)
 
     # Merged once for all compile actions below (dart2wasm, dart2js, icon
     # tree-shake kernel) and the dev-config emission.
@@ -1503,6 +1503,9 @@ build knows which served file is a native module.
             cfg = "exec",
         ),
     }) | AGENT_EXTENSIONS_ATTR,
-    toolchains = ["@rules_flutter//flutter:toolchain_type"] + COPY_TO_DIRECTORY_TOOLCHAINS,
+    toolchains = [
+        "@rules_flutter//flutter:toolchain_type",
+        config_common.toolchain_type("@rules_flutter//flutter/private:product_tools_toolchain_type", mandatory = False),
+    ] + COPY_TO_DIRECTORY_TOOLCHAINS,
     doc = "Builds a Flutter web application (WASM or JS) with all deployment artifacts.",
 )

@@ -4,11 +4,10 @@ This is the base compilation step shared by all Flutter platform targets.
 """
 
 load("@rules_dart//dart:utils.bzl", "COPY_TO_DIRECTORY_TOOLCHAINS")
-load("//flutter/private:common.bzl", "AGENT_EXTENSIONS_ATTR", "KERNEL_COMPILE_ATTRS", "flutter_compile_kernel")
+load("//flutter/private:common.bzl", "AGENT_EXTENSIONS_ATTR", "KERNEL_COMPILE_ATTRS", "flutter_compile_kernel", "resolve_flutter_sdk_info")
 
 def _flutter_kernel_target_impl(ctx):
-    flutter_toolchain = ctx.toolchains["@rules_flutter//flutter:toolchain_type"]
-    flutter_sdk_info = flutter_toolchain.flutter_sdk_info
+    flutter_sdk_info = resolve_flutter_sdk_info(ctx)
 
     # flutter_compile_kernel handles mode-aware platform dill selection.
     # If the user explicitly requests AOT, force it regardless of mode.
@@ -33,6 +32,7 @@ flutter_kernel_target = rule(
     } | AGENT_EXTENSIONS_ATTR,
     toolchains = [
         "@rules_flutter//flutter:toolchain_type",
+        config_common.toolchain_type("@rules_flutter//flutter/private:product_tools_toolchain_type", mandatory = False),
     ] + COPY_TO_DIRECTORY_TOOLCHAINS,
     doc = "Compiles Flutter sources to a kernel .dill file.",
 )

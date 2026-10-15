@@ -22,7 +22,7 @@ Output bundle structure:
 
 load("//flutter:providers.bzl", "FlutterApplicationInfo")
 load("//flutter/private:cc_runner_compile.bzl", "compile_and_link_runner")
-load("//flutter/private:common.bzl", "compute_desktop_bundle_copies")
+load("//flutter/private:common.bzl", "compute_desktop_bundle_copies", "resolve_flutter_sdk_info")
 load("//flutter/private:engine_helpers.bzl", "find_engine_header_dir", "linux_multiarch_triple")
 
 # GTK3 include subdirectories within the Chromium sysroot.
@@ -147,8 +147,7 @@ def linux_runner_defines(gtk_app_id, window_title):
     ]
 
 def _flutter_linux_runner_lib_impl(ctx):
-    flutter_toolchain = ctx.toolchains["@rules_flutter//flutter:toolchain_type"]
-    flutter_sdk_info = flutter_toolchain.flutter_sdk_info
+    flutter_sdk_info = resolve_flutter_sdk_info(ctx)
 
     # Get engine files from the engine target.
     engine_files = ctx.attr.engine[DefaultInfo].files.to_list()
@@ -404,6 +403,7 @@ flutter_linux_runner_lib = rule(
     toolchains = [
         "@bazel_tools//tools/cpp:toolchain_type",
         "@rules_flutter//flutter:toolchain_type",
+        config_common.toolchain_type("@rules_flutter//flutter/private:desktop_engine_toolchain_type", mandatory = False),
     ],
     doc = "Compiles a GTK Linux runner binary from C++ sources with engine and registrant.",
 )
@@ -420,8 +420,7 @@ def _flutter_linux_bundle_impl(ctx):
     native_libs.extend(app_info.bundled_code_assets.to_list())
     is_debug = app_info.is_debug
 
-    flutter_toolchain = ctx.toolchains["@rules_flutter//flutter:toolchain_type"]
-    flutter_sdk_info = flutter_toolchain.flutter_sdk_info
+    flutter_sdk_info = resolve_flutter_sdk_info(ctx)
 
     app_name = ctx.attr.app_name or ctx.label.name
 
@@ -521,6 +520,7 @@ flutter_linux_bundle_rule = rule(
     },
     toolchains = [
         "@rules_flutter//flutter:toolchain_type",
+        config_common.toolchain_type("@rules_flutter//flutter/private:desktop_engine_toolchain_type", mandatory = False),
     ],
     doc = "Assembles a Linux application directory from a pre-compiled runner and flutter_application artifacts.",
 )
