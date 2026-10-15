@@ -51,7 +51,9 @@ load("@rules_dart//dart:utils.bzl", "collect_packages", "collect_transitive_srcs
 load("//flutter:providers.bzl", "FlutterInfo")
 load(
     "//flutter/private:app_entrypoint.bzl",
-    "compile_package_config",
+    "app_main_location",
+    "app_scheme_location",
+    "compile_kernel_package_config",
     "synthesize_app_package",
 )
 load(
@@ -301,11 +303,13 @@ def _flutter_test_impl(ctx):
             target_file = ctx.file._golden_comparator_src,
         )
 
-    # Per-target bootstrap. Imports the user's test by a path computed from the
-    # bootstrap's bin-dir back through the exec root to the test's source path.
+    lib_root = derive_lib_root(ctx.label.workspace_root, ctx.label.package)
+
+    # Per-target bootstrap. Imports the user's test via its `package:` URI when
+    # `main` sits under `<lib_root>/lib/` and via `org-dartlang-app:///<stable_path>`
+    # otherwise.
     bootstrap = ctx.actions.declare_file(ctx.label.name + "_bootstrap.dart")
-    bootstrap_depth = len(bootstrap.dirname.split("/"))
-    test_import = "../" * bootstrap_depth + ctx.file.main.path
+    test_import = app_main_location(ctx.attr.package_name, lib_root, ctx.file.main).uri
     ctx.actions.write(bootstrap, make_bootstrap_content(
         test_import,
         golden_comparator_import = staged_comparator.basename if staged_comparator else None,
@@ -318,19 +322,21 @@ def _flutter_test_impl(ctx):
     packages = collect_packages(ctx.attr.deps)
 
     # Register the test's own package (when declared) so `package:<self>/foo`
-    # imports inside test sources resolve, then co-locate any package whose
-    # hand-written + generated sources straddle the source tree and bazel-out
-    # so `part` directives and the package's single rootUri resolve. Without
-    # the colocation, a test that imports `package:<self>/foo.dart` fails to
-    # find foo.dart's generated `.g.dart` / `.freezed.dart` siblings.
+    # imports inside test sources resolve across the multi-root `org-dartlang-app:///`
+    # scheme without copying sources.
     packages = synthesize_app_package(
         ctx.label,
         packages,
         ctx.attr.package_name,
-        derive_lib_root(ctx.label.workspace_root, ctx.label.package),
+        lib_root,
         ctx.attr.language_version,
     )
-    pc = compile_package_config(ctx, packages, all_srcs)
+    pc = compile_kernel_package_config(
+        ctx,
+        packages,
+        all_srcs,
+        roots = {ctx.attr.package_name: True} if ctx.attr.package_name else None,
+    )
     package_config = pc.config_file
     all_srcs = pc.srcs
 
@@ -343,6 +349,7 @@ def _flutter_test_impl(ctx):
         frontend_server = flutter_sdk_info.frontend_server,
         platform_dill = flutter_sdk_info.platform_kernel_dill,
         main = bootstrap,
+        entrypoint_uri = app_scheme_location(bootstrap).uri,
         srcs = all_srcs,
         package_config = package_config,
         output = kernel_dill,

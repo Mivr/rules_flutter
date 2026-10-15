@@ -9,7 +9,7 @@ load("@bazel_skylib//rules:common_settings.bzl", "BuildSettingInfo")
 load("@rules_dart//dart:providers.bzl", "DartInfo")
 load("@rules_dart//dart:utils.bzl", "collect_packages", "collect_transitive_srcs", "derive_lib_root", "generate_dev_package_config", _DART_COPY_TO_DIRECTORY_TOOLCHAINS = "COPY_TO_DIRECTORY_TOOLCHAINS")
 load("//flutter:providers.bzl", "FlutterCompiledShadersInfo", "FlutterInfo", "FlutterNativeLibraryInfo", "FlutterSdkInfo", _resolve_exec_dart = "resolve_exec_dart", _resolve_flutter_sdk_info = "resolve_flutter_sdk_info")
-load("//flutter/private:app_entrypoint.bzl", "APP_SCHEME", "app_main_location", "app_scheme_location", "app_scheme_sources", "compile_package_config", "resolve_kernel_entrypoint", "synthesize_app_package", "with_root")
+load("//flutter/private:app_entrypoint.bzl", "APP_SCHEME", "app_main_location", "app_scheme_location", "app_scheme_sources", "compile_kernel_package_config", "resolve_kernel_entrypoint", "synthesize_app_package", "with_root")
 load("//flutter/private:flutter_asset_bundle.bzl", "flutter_asset_bundle_action")
 load("//flutter/private:flutter_compile.bzl", "flutter_kernel_compile_action")
 load("//flutter/private:flutter_info.bzl", "dedup_plugins")
@@ -360,7 +360,12 @@ def flutter_compile_kernel(ctx, flutter_sdk_info, aot = None, platform_dill = No
             colocate_inputs,
         )
 
-    pc = compile_package_config(ctx, packages, colocate_inputs)
+    pc = compile_kernel_package_config(
+        ctx,
+        packages,
+        colocate_inputs,
+        roots = {app_pkg_name: True} if app_pkg_name else None,
+    )
     config_file = pc.config_file
     all_srcs = pc.srcs
     packages = pc.packages

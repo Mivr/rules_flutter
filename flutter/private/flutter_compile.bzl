@@ -118,11 +118,16 @@ def flutter_kernel_compile_action(
     for d in defines:
         args.add("-D" + d)
 
-    if filesystem_roots:
-        # The action's cwd is the exec root, so `""` mounts it as `.`.
-        for root in filesystem_roots:
-            args.add("--filesystem-root", root or ".")
-        args.add("--filesystem-scheme", APP_SCHEME)
+    # Always mount the output bin_dir first and the exec root (`.`) second under
+    # APP_SCHEME so multi-root package_config.json entries (`org-dartlang-app:///...`)
+    # resolve both generated files in bazel-out and hand-written files in the source tree.
+    mounted_roots = [ctx.bin_dir.path, ""]
+    for r in filesystem_roots:
+        if r != None and r not in mounted_roots:
+            mounted_roots.append(r)
+    for root in mounted_roots:
+        args.add("--filesystem-root", root or ".")
+    args.add("--filesystem-scheme", APP_SCHEME)
 
     if dart_plugin_registrant_uri:
         args.add("--source", dart_plugin_registrant_uri)
