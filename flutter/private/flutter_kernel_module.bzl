@@ -121,7 +121,17 @@ def _flutter_kernel_module_aspect_impl(target, ctx):
         order = "postorder",
         transitive = [k.transitive_kmods for k in dep_kernels],
     )
+    dep_outline_closure = depset(
+        order = "postorder",
+        transitive = [k.transitive_koutlines for k in dep_kernels],
+    )
     upstream_excluded = depset(transitive = [k.closure_excluded for k in dep_kernels])
+    has_cross_pkg_cycle = False
+    cross_pkg_srcs = (
+        depset(own_srcs, transitive = [collect_transitive_srcs(rule_deps)])
+        if has_cross_pkg_cycle
+        else depset(transitive = [k.cross_pkg_srcs for k in dep_kernels])
+    )
     owned = depset(
         [(str(target.label), f.short_path) for f in own_srcs],
         transitive = [k.owned for k in dep_kernels],
@@ -144,9 +154,12 @@ def _flutter_kernel_module_aspect_impl(target, ctx):
             FlutterKernelModuleInfo(
                 kernel_info = DartKernelInfo(
                     kmod = None,
+                    koutline = None,
                     transitive_kmods = dep_closure,
+                    transitive_koutlines = dep_outline_closure,
                     modular = True,
                     closure_excluded = upstream_excluded,
+                    cross_pkg_srcs = cross_pkg_srcs,
                     owned = owned,
                     edges = edges,
                     base_dill = base_dill,
@@ -156,6 +169,7 @@ def _flutter_kernel_module_aspect_impl(target, ctx):
         ]
 
     kmod = ctx.actions.declare_directory(target.label.name + ".flutter.kmod")
+    koutline = ctx.actions.declare_directory(target.label.name + ".flutter.koutline")
     sources = [
         struct(uri = library_source_uri(package_name, lib_root, f.short_path), file = f)
         for f in own_srcs
@@ -165,8 +179,9 @@ def _flutter_kernel_module_aspect_impl(target, ctx):
         tools,
         sources,
         first_per_package(records),
-        dep_closure,
+        dep_outline_closure,
         kmod,
+        koutline = koutline,
         defines = _kernel_worker_defines(ctx),
         exclude_non_sources = True,
         droppable = True,
@@ -196,9 +211,12 @@ def _flutter_kernel_module_aspect_impl(target, ctx):
         FlutterKernelModuleInfo(
             kernel_info = DartKernelInfo(
                 kmod = kmod,
+                koutline = koutline,
                 transitive_kmods = depset(order = "postorder", direct = [kmod], transitive = [dep_closure]),
+                transitive_koutlines = depset(order = "postorder", direct = [koutline], transitive = [dep_outline_closure]),
                 modular = True,
                 closure_excluded = depset(direct = [excluded], transitive = [upstream_excluded]),
+                cross_pkg_srcs = cross_pkg_srcs,
                 owned = owned,
                 edges = edges,
                 base_dill = base_dill,
@@ -314,18 +332,25 @@ def compile_flutter_modular_test_kernel(
         order = "postorder",
         transitive = [k.transitive_kmods for k in dep_kernels],
     )
+    dep_outline_closure = depset(
+        order = "postorder",
+        transitive = [k.transitive_koutlines for k in dep_kernels],
+    )
+    cross_pkg_srcs = depset(
+        transitive = [k.cross_pkg_srcs for k in dep_kernels],
+    )
     entry = ctx.actions.declare_directory(ctx.label.name + ".flutter_entry.kmod")
     kernel_module_action(
         ctx,
         tools,
         sources,
         first_per_package(packages),
-        dep_closure,
+        dep_outline_closure,
         entry,
         defines = _kernel_worker_defines(ctx),
         exclude_non_sources = True,
         droppable = False,
-        extra_inputs = collect_transitive_srcs(ctx.attr.deps),
+        extra_inputs = cross_pkg_srcs,
         closure_excluded = depset(transitive = [k.closure_excluded for k in dep_kernels]),
         target = "flutter",
         platform_dill = flutter_sdk_info.platform_kernel_dill,

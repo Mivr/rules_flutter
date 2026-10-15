@@ -79,10 +79,31 @@ def _flutter_test_runfiles_test_impl(ctx):
     )
 
     # By default (`modular_kernel = True`), `flutter_test` compiles its entry module
-    # with `DartKernel` and links with `DartKernelLink`, emitting no whole-program
+    # with `DartKernel` against upstream `.flutter.koutline` summaries (without
+    # staging upstream `.flutter.kmod` or transitive `.dart` sources) and links
+    # with `DartKernelLink` against `.flutter.kmod`, emitting no whole-program
     # `FlutterKernelCompile`.
-    _find_action(env, ["DartKernel"])
-    _find_action(env, ["DartKernelLink"])
+    kernel_action = _find_action(env, ["DartKernel"])
+    kernel_inputs = _input_paths(kernel_action)
+    _assert_some_path_contains(
+        env,
+        kernel_inputs,
+        ["fake_test_api.flutter.koutline"],
+        "flutter_test DartKernel inputs",
+    )
+    _assert_no_path_contains(
+        env,
+        kernel_inputs,
+        ["fake_test_api.flutter.kmod/", "fake_test_api/lib/backend.dart"],
+        "flutter_test DartKernel inputs",
+    )
+    link_action = _find_action(env, ["DartKernelLink"])
+    _assert_some_path_contains(
+        env,
+        _input_paths(link_action),
+        ["fake_test_api.flutter.kmod"],
+        "flutter_test DartKernelLink inputs",
+    )
     whole_program = [a for a in analysistest.target_actions(env) if a.mnemonic == "FlutterKernelCompile"]
     asserts.equals(env, [], whole_program, "modular flutter_test must not run FlutterKernelCompile")
     return analysistest.end(env)
