@@ -419,3 +419,65 @@ Measured on a fresh `--output_base` and fresh `--repository_cache` on `linux-x64
 | Web bundle (`e2e/web_example //:app`) | 615.8 MB -> **566.5 MB** (-49.3 MB) | 1,891.5 MB -> **967.9 MB** (-923.7 MB, -50.1%) |
 | Linux debug bundle (`//:hello_world_linux`) | 584.4 MB -> **567.0 MB** (-17.4 MB) | 1,104.0 MB -> **1,057.1 MB** (-47.0 MB) |
 
+## Consolidated Wave 3: modular `flutter_test`, stable URIs, trimmed `dart_toolchain`, and analyzer summaries (plans T2, T1b, 2.1, 2.2, 2.3, 2.4; `31b867a` + `rules_dart` `1756ca5`)
+
+- **T2 (`48d3542`):** `resolve_exec_dart(ctx, flutter_sdk_info)` resolves the
+  host `dart` executable from `@rules_dart//dart:exec_tools_toolchain_type` for
+  `flutter_build_assets`, `flutter_web_bundle`, `flutter_pub`, and
+  `flutter_sdk_binary`, deprecating `FlutterSdkInfo.dart`.
+- **T1b (`31b867a`):** `flutter_engine_artifacts` calls
+  `declare_dart_sdk_toolchains(prefix = "dart-sdk/")` from
+  `@rules_dart//dart:repositories.bzl` (`0f1999b`) so `DartKernel`, `DartCompile`,
+  `DartFormat`, `DartAnalyze`, and `DartAnalyzerSummary` stage only the narrow
+  `compile_files`, `runtime_files`, and `analyze_files` SDK subsets.
+- **2.4 (`4d86a32`):** Dropped `bazel_dep(name = "bazel_lib")` from `MODULE.bazel`.
+- **2.2 (`ca41c64`):** `FlutterKernelCompile` emits multi-root
+  `org-dartlang-app:///` `rootUri`s via `generate_stable_package_config(...,
+  scheme = APP_SCHEME)` and always mounts `[ctx.bin_dir.path, "."]` under
+  `--filesystem-scheme org-dartlang-app`, eliminating `DartCopyTree` package
+  colocation and sandbox `file://` URIs in compiled `.dill` outputs.
+- **2.1 (`35f7c5d`):** `flutter_kernel_module_aspect` (`flutter_kernel_module.bzl`)
+  compiles each `DartInfo` dependency in a `flutter_test` closure once into a
+  `<name>.flutter.kmod` directory via `kernel_module_action` (`--target flutter`,
+  `platform_dill = flutter_sdk_info.platform_kernel_dill`,
+  `extra_libraries = ["ui", "nativewrappers"]`, `scheme = APP_SCHEME`) using
+  Bazel persistent `kernel_worker` instances. Each `flutter_test` compiles only
+  its entry module (`<name>.flutter_entry.kmod`) and links reachable `.dill`
+  components with `DartKernelLink`.
+- **2.3 (`rules_dart` `aa0dc5b`):** `//dart:analyzer_summaries` embeds Flutter's
+  `sky_engine` `lib/_embedder.yaml` (`dart:ui` et al.) into
+  `<name>.embedder_sdk.sum` and analyzes Flutter libraries and tests against
+  per-library `.sum` summaries in persistent `analyzer_summary` workers.
+
+Raw data: `results/final_wave3.json` (`RULES_FLUTTER_BENCH_JOBS=4`, full 30x20 /
+80x30 benchmark).
+
+| Metric | `baseline_main` (`f60a24b`) | `t1_one_dart` (`7ba01b7`) | `p12_compiled_tools` (`280bfb9`) | `p13_shaders_once` (`14e5844`) | `main_dart_4005f33` (`2f2a861`) | `final_wave3` (`31b867a`) |
+| --- | --- | --- | --- | --- | --- | --- |
+| Re-analysis, 80-pkg variant (s) | 9.66 | 7.41 | 10.72 | 7.46 | 1.60 | **1.23** |
+| Clean build wall (s) | 196.33 | 210.73 | 193.76 | 171.76 | 161.57 | **80.77** |
+|   compile CPU (s) | 8.46 | 2.79 | 39.36 | 17.53 | 8.79 | 37.48 |
+|   kernel compile CPU (`FlutterKernelCompile`, s) | 426.34 | 417.85 | 405.04 | 385.08 | 387.61 | **27.79** (3 app targets) |
+|   modular kernel CPU (`DartKernel`, s) | – | – | – | – | 5.63 | **68.02** (90 modules, in workers) |
+|   modular link actions (`DartKernelLink`) | – | – | – | – | – | **30** (4.99 s CPU) |
+|   asset bundle CPU (s) | 73.89 | 62.25 | 58.18 | 70.52 | 102.22 | **3.61** |
+|   sandboxed actions | 139 | 139 | 144 | 86 | 92 | **96** |
+| Body edit rebuild wall (s) | 158.60 | 196.97 | 155.58 | 153.08 | 141.94 | **54.18** |
+|   `FlutterKernelCompile` re-run | 33 | 33 | 33 | 33 | 33 | **3** (apps only) |
+|   `DartKernel` modules re-run | – | – | – | – | – | **59** (67.37 s CPU, in workers) |
+|   `DartKernelLink` re-run | – | – | – | – | – | **30** |
+| API edit rebuild wall (s) | 157.47 | 179.08 | 163.63 | 149.93 | 142.20 | **54.39** |
+| Null build (s) | 0.29 | 0.21 | 0.31 | 0.27 | 0.19 | **0.18** |
+| Test run wall (s) | 11.77 | 14.52 | 12.40 | 12.54 | 9.97 | **9.17** |
+|   per test (s) | 1.418 | 1.754 | 1.495 | 1.534 | 1.225 | **1.121** |
+| Test runfiles (files / MB) | 1,062 / 752 | 1,062 / 752 | 1,062 / 752 | 1,062 / 752 | 1,062 / 752 | **13 / 88** |
+| Extracted external SDK dirs (MB) | 2,450 | 1,808 | 1,808 | 1,808 | 1,808 | **1,116** |
+|   `rules_dart` Dart SDK fetched | True | False | False | False | False | **False** |
+| Lint clean wall (s) | 528.31 | 648.43 | 565.13 | 516.65 | 453.93 | **106.55** |
+|   `DartAnalyze` CPU across 61 targets (s) | 732.0 | 954.0 | 840.0 | 817.0 | 716.0 | **9.61** (in summary workers) |
+|   sandboxed actions | 1,261 | 1,261 | 1,266 | 1,208 | 342 | **401** |
+| Lint body edit wall (s) | 463.12 | 535.36 | 512.14 | 479.67 | 430.74 | **55.75** |
+|   `DartAnalyze` re-run | 61 | 61 | 61 | 61 | 61 | **2** (8.70 s CPU) |
+|   `DartAnalyzerSummary` re-run | – | – | – | – | – | **1** (0.74 s CPU; early cutoff) |
+|   `DartFormat` re-run | 61 | 61 | 61 | 61 | 2 | **2** |
+|   staging copies re-run | 61 | 61 | 61 | 61 | 63 | **4** (`DartCopyTree`) |

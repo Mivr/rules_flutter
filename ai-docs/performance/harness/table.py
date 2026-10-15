@@ -30,11 +30,15 @@ ROWS = [
     ("Clean build wall (s)", ("clean_build", "wall_s")),
     ("  compile CPU (s)", ("clean_build", "actions", "DartCompile", "cpu_s")),
     ("  kernel compile CPU (s)", ("clean_build", "actions", "FlutterKernelCompile", "cpu_s")),
+    ("  modular kernel CPU (s)", ("clean_build", "actions", "DartKernel", "cpu_s")),
+    ("  modular link actions", ("clean_build", "actions", "DartKernelLink", "n")),
     ("  asset bundle CPU (s)", ("clean_build", "actions", "FlutterAssetBundle", "cpu_s")),
     ("  sandboxed actions", ("clean_build", "sandboxed")),
     ("Body edit rebuild (s)", ("body_edit_build", "wall_s")),
     ("  compiles re-run", ("body_edit_build", "actions", "DartCompile", "n")),
     ("  kernel compiles re-run", ("body_edit_build", "actions", "FlutterKernelCompile", "n")),
+    ("  modular kernels re-run", ("body_edit_build", "actions", "DartKernel", "n")),
+    ("  modular links re-run", ("body_edit_build", "actions", "DartKernelLink", "n")),
     ("API edit rebuild (s)", ("api_edit_build", "wall_s")),
     ("Null build (s)", ("null_build_s",)),
     ("Test run wall (s)", ("test_run", "wall_s")),
@@ -49,8 +53,10 @@ ROWS = [
     ("  sandboxed actions", ("lint_clean", "sandboxed")),
     ("Lint body edit wall (s)", ("lint_body_edit", "wall_s")),
     ("  analyze re-run", ("lint_body_edit", "actions", "DartAnalyze", "n")),
+    ("  summaries re-run", ("lint_body_edit", "actions", "DartAnalyzerSummary", "n")),
     ("  format re-run", ("lint_body_edit", "actions", "DartFormat", "n")),
-    ("  copies re-run", ("lint_body_edit", "actions", "CopyToDirectory", "n")),
+    ("  copies re-run (CopyToDirectory)", ("lint_body_edit", "actions", "CopyToDirectory", "n")),
+    ("  copies re-run (DartCopyTree)", ("lint_body_edit", "actions", "DartCopyTree", "n")),
 ]
 
 

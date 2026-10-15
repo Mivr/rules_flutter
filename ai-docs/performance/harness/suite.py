@@ -153,15 +153,16 @@ def expand_inputs(data, action):
 
 
 def kernel_inputs(ws, target):
-    q = f"mnemonic(\"FlutterKernelCompile\", {target})"
+    q = f"mnemonic(\"FlutterKernelCompile|DartKernel\", {target})"
     r = subprocess.run(["bazel", "aquery", "--output=jsonproto", "--include_commandline=false", q],
                        cwd=ws, capture_output=True, text=True)
     if r.returncode != 0:
         raise SystemExit(f"aquery failed: {r.stderr[-2000:]}")
     data = json.loads(r.stdout)
-    actions = [a for a in data.get("actions", []) if a.get("mnemonic") == "FlutterKernelCompile"]
+    actions = [a for a in data.get("actions", [])
+               if a.get("mnemonic") in ("FlutterKernelCompile", "DartKernel")]
     if not actions:
-        return {"target": target, "error": "no FlutterKernelCompile action"}
+        return {"target": target, "error": "no FlutterKernelCompile or DartKernel action"}
     frags = {f["id"]: f for f in data.get("pathFragments", [])}
     arts = {a["id"]: a for a in data.get("artifacts", [])}
 

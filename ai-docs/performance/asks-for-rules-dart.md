@@ -6,21 +6,21 @@ session on 2026-10-14. Its answers go in rules_dart's
 `ai-docs/performance/for-rules-flutter.md` on `main`, where this review reads
 them.
 
-## Status (rules_dart answered on 2026-10-14, `ad95e65`)
+## Status (rules_dart `v0.8.1` `1756ca5`, all asks landed)
 
 | Ask | rules_dart's answer | rules_flutter's reply / next step |
 | --- | --- | --- |
-| A | Accepted, plan #16. Exported after the modular regressions (#14) are fixed. Helper takes `target`, `platform_dill`, `libraries_platform` plus extra available `dart:` libraries, `scheme`, `extra_inputs`. | Wait for #16; then plan 2.1. |
-| B | Accepted, plan #17: the SDK summary takes an embedder (`_embedder.yaml`). Until then, never set `//dart:analyzer_summaries` in a Flutter workspace. | Wait for #17; then plan 2.3. |
-| C | Proposal: the path convention is the contract, the scheme name a parameter. | **Agreed.** Flutter keeps `org-dartlang-app` (frontend_server, hot reload) and mounts the same two roots (exec root, bin dir) with rules_dart's `stable_path` rule. rules_dart keeps `org-dartlang-bazel`. |
-| D | The user's call. For testing, pin `main` at `ca41cd4` with `--@rules_dart//dart:modular_kernel=false`. | Asked the user. Test against `ca41cd4` with the flag meanwhile. |
-| E | Accepted, plan #18: a macro over a path prefix for the SDK filegroups and `dart_toolchain`, plus a test that the default SDK isn't fetched. | Plan T1b: switch the engine repo to the macro once rules_flutter pins a rules_dart that has it. T1 already shows the default SDK isn't fetched. |
+| A | Done (`f90efba`, plan #16). Exported `DartKernelInfo`, `kernel_module_action`, `kernel_link_action`, `//dart:kernel_module`, `//dart:kernel_link`, parameterized by `target`, `platform_dill`, `extra_libraries`, `scheme`, `extra_frontend_flags`. | **Adopted** (`35f7c5d`, plan 2.1). |
+| B | Done (`aa0dc5b`, plan #17b): `analyzer_summary sdk` accepts `--embedder-yaml` (`sky_engine/lib/_embedder.yaml`) and builds `<name>.embedder_sdk.sum`. | **Adopted** (plan 2.3; default-on via `//dart:analyzer_summaries`). |
+| C | Done (`f90efba`). `generate_stable_package_config` and `kernel_module_action` take `scheme = "org-dartlang-app"`. | **Adopted** (`ca41c64`, plan 2.2; `35f7c5d`, plan 2.1). |
+| D | Released on `Mivr/rules_dart` (`v0.8.0` / `v0.8.1` at `1756ca5`). | **Verified** across root suite, `e2e/*`, and full benchmark (`results/final_wave3.json`). |
+| E | Done (`0f1999b`, plan #18): exported `declare_dart_sdk_toolchains(..., prefix = "dart-sdk/")` in `dart/toolchain.bzl` and `dart/repositories.bzl`. | **Adopted** (`31b867a`, plan T1b). |
 | F | Each feature falls back correctly (see rules_dart's answer). | Nothing to do. |
 | G | Agreed; when the user schedules it. | Plan H1. |
-| H | Done (`84c8767`, `5387726`): copy toolchain is `//dart:copy_toolchain_type`, `bazel_lib` and `yaml.bzl` dropped. | **Reopened by K.** Plain-string `"//dart:copy_toolchain_type"` resolves against `@rules_flutter` when used by `flutter_test`. Wait for K before plan 2.4. |
-| I | Accepted, plan #19, proposed shared error text. | **Agreed.** H0 uses it, with `flutter.pub`'s command: ``pub package "<name>" <version> in <lock file> has no sha256. Run `bazel run @rules_flutter//flutter:pub -- get` (Dart 2.19 or newer records one) and commit the lock.`` |
+| H | Done (`84c8767`, `5387726`, `99055ee`): copy toolchain is `//dart:copy_toolchain_type`, `bazel_lib` and `yaml.bzl` dropped. | **Adopted** (`4d86a32`, plan 2.4). |
+| I | Done (`e9451d6`, plan #19): `pub.from_lock()` fails on hosted packages without `sha256` and git packages without `resolved-ref`. | **Adopted** (`d36f9e7`, plan H0). |
 | J | Confirmed. | Nothing to do. |
-| K | _Sent 2026-10-15._ | Wrap `"//dart:copy_toolchain_type"` in `Label(...)` in `dart/private/source_set.bzl`, plus an external-module e2e test. |
+| K | Done (`99055ee`, `72a7942`). Wrapped exported toolchain/tool labels in `Label(...)` and ordered `ctx.bin_dir.path` before `.`. | **Verified.** |
 
 ## A. Export modular compilation with the target as a parameter (rules_dart #7)
 
