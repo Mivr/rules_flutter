@@ -206,6 +206,12 @@ filegroup(
     visibility = ["//visibility:public"],
 )
 
+filegroup(
+    name = "dart_sdk_lib_files",
+    srcs = glob(["dart-sdk/lib/**"]),
+    visibility = ["//visibility:public"],
+)
+
 # The Dart SDK bundled with this Flutter release, as rules_dart's Dart toolchain.
 # Flutter workspaces register it ahead of rules_dart's own SDK, so analysis,
 # formatting, codegen and dart_test/dart_binary use the same Dart as the
@@ -436,10 +442,7 @@ def flutter_register_toolchains(name, **kwargs):
         name = name + "_web_sdk",
         engine_revision = meta.engine_revision,
         sha256 = flutter_artifact_sha256(flutter_version, "flutter-web-sdk.zip"),
-        dart_sdk_sha256s = {
-            host: flutter_artifact_sha256(flutter_version, dart_sdk_artifact_path(host))
-            for host in HOST_PLATFORMS
-        },
+        user_repository_name = name,
     )
 
     # sky_engine (lazy — only fetched when Flutter code is analyzed). Nothing
