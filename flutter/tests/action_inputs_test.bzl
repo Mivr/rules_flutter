@@ -75,6 +75,22 @@ def _flutter_test_runfiles_test_impl(ctx):
         ["/dart-sdk/", "/patched-sdk/"],
         "flutter_test FlutterAssetBundle",
     )
+
+    # By default (`modular_kernel = True`), `flutter_test` compiles its entry module
+    # with `DartKernel` and links with `DartKernelLink`, emitting no whole-program
+    # `FlutterKernelCompile`.
+    _find_action(env, ["DartKernel"])
+    _find_action(env, ["DartKernelLink"])
+    whole_program = [a for a in analysistest.target_actions(env) if a.mnemonic == "FlutterKernelCompile"]
+    asserts.equals(env, [], whole_program, "modular flutter_test must not run FlutterKernelCompile")
+    return analysistest.end(env)
+
+def _flutter_test_defines_fallback_test_impl(ctx):
+    """When per-test `defines` are set, `flutter_test` falls back to `FlutterKernelCompile`."""
+    env = analysistest.begin(ctx)
+    _find_action(env, ["FlutterKernelCompile"])
+    modular_links = [a for a in analysistest.target_actions(env) if a.mnemonic == "DartKernelLink"]
+    asserts.equals(env, [], modular_links, "flutter_test with own defines must fall back from DartKernelLink")
     return analysistest.end(env)
 
 def _application_opt_inputs_test_impl(ctx):
@@ -241,6 +257,7 @@ def _pub_runfiles_test_impl(ctx):
     return analysistest.end(env)
 
 _flutter_test_runfiles_test = analysistest.make(_flutter_test_runfiles_test_impl)
+_flutter_test_defines_fallback_test = analysistest.make(_flutter_test_defines_fallback_test_impl)
 _application_opt_inputs_test = analysistest.make(
     _application_opt_inputs_test_impl,
     config_settings = {"//command_line_option:compilation_mode": "opt"},
@@ -265,6 +282,14 @@ def _setup_fixtures():
         name = "_inputs_flutter_test",
         package_name = _PACKAGE,
         main = _MAIN,
+        tags = ["manual"],
+        deps = ["//flutter/tests/flutter_test_analyze_fixture/fake_test_api"],
+    )
+    flutter_test(
+        name = "_inputs_flutter_test_defines",
+        package_name = _PACKAGE,
+        main = _MAIN,
+        defines = ["FOO=1"],
         tags = ["manual"],
         deps = ["//flutter/tests/flutter_test_analyze_fixture/fake_test_api"],
     )
@@ -303,6 +328,10 @@ def action_inputs_test_suite(name):
         name = name + "_flutter_test_runfiles",
         target_under_test = ":_inputs_flutter_test",
     )
+    _flutter_test_defines_fallback_test(
+        name = name + "_flutter_test_defines_fallback",
+        target_under_test = ":_inputs_flutter_test_defines",
+    )
     _application_opt_inputs_test(
         name = name + "_application_opt",
         target_under_test = ":_inputs_application",
@@ -332,6 +361,7 @@ def action_inputs_test_suite(name):
         name = name,
         tests = [
             ":" + name + "_flutter_test_runfiles",
+            ":" + name + "_flutter_test_defines_fallback",
             ":" + name + "_application_opt",
             ":" + name + "_application_dbg",
             ":" + name + "_asset_bundle",

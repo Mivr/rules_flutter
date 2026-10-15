@@ -47,7 +47,16 @@ cannot write there.
 """
 
 load("@rules_dart//dart:providers.bzl", "DartInfo")
-load("@rules_dart//dart:utils.bzl", "collect_packages", "collect_transitive_srcs", "dart_analyzable_info_with_package", "derive_lib_root", "runfiles_path")
+load(
+    "@rules_dart//dart:utils.bzl",
+    "MODULAR_KERNEL_ATTRS",
+    "MODULAR_KERNEL_TOOLCHAINS",
+    "collect_packages",
+    "collect_transitive_srcs",
+    "dart_analyzable_info_with_package",
+    "derive_lib_root",
+    "runfiles_path",
+)
 load("//flutter:providers.bzl", "FlutterInfo")
 load(
     "//flutter/private:app_entrypoint.bzl",
@@ -72,6 +81,12 @@ load(
     "merge_dart_defines",
 )
 load("//flutter/private:flutter_compile.bzl", "flutter_kernel_compile_action")
+load(
+    "//flutter/private:flutter_kernel_module.bzl",
+    "compile_flutter_modular_test_kernel",
+    "flutter_kernel_module_aspect",
+    "flutter_modular_test_tools",
+)
 load("//flutter/private:flutter_native_assets.bzl", "bridge_dart_code_assets", "collect_bundled_code_asset_files", "write_native_assets_manifest")
 
 def make_bootstrap_content(test_relative_import, golden_comparator_import = None):
@@ -315,10 +330,6 @@ def _flutter_test_impl(ctx):
         golden_comparator_import = staged_comparator.basename if staged_comparator else None,
     ))
 
-    # Collect transitive Dart sources and packages for the kernel compile.
-    all_srcs = list(ctx.files.srcs) + collect_transitive_srcs(ctx.attr.deps).to_list() + [ctx.file.main, bootstrap]
-    if staged_comparator:
-        all_srcs.append(staged_comparator)
     packages = collect_packages(ctx.attr.deps)
 
     # Register the test's own package (when declared) so `package:<self>/foo`
@@ -331,33 +342,55 @@ def _flutter_test_impl(ctx):
         lib_root,
         ctx.attr.language_version,
     )
-    pc = compile_kernel_package_config(
-        ctx,
-        packages,
-        all_srcs,
-        roots = {ctx.attr.package_name: True} if ctx.attr.package_name else None,
-    )
-    package_config = pc.config_file
-    all_srcs = pc.srcs
 
-    # Compile bootstrap+test to kernel using the debug platform dill (asserts on).
+    # Compile bootstrap+test to kernel modularly when eligible, falling back
+    # to whole-program compilation otherwise (e.g. per-test defines or code assets).
     kernel_dill = ctx.actions.declare_file(ctx.label.name + ".dill")
-    flutter_kernel_compile_action(
-        ctx = ctx,
-        dartaotruntime = flutter_sdk_info.dartaotruntime,
-        kernel_filter_tool = ctx.executable._kernel_filter_tool,
-        frontend_server = flutter_sdk_info.frontend_server,
-        platform_dill = flutter_sdk_info.platform_kernel_dill,
-        main = bootstrap,
-        entrypoint_uri = app_scheme_location(bootstrap).uri,
-        srcs = all_srcs,
-        package_config = package_config,
-        output = kernel_dill,
-        aot = False,
-        defines = merge_dart_defines(ctx),
-        target = "flutter",
-        native_assets_manifest = native_assets_manifest,
+    own_files = [ctx.file.main] + [f for f in ctx.files.srcs if f != ctx.file.main]
+    modular_tools = flutter_modular_test_tools(
+        ctx,
+        flutter_sdk_info,
+        own_files,
+        packages,
+        native_assets_list,
     )
+    if modular_tools != None:
+        compile_flutter_modular_test_kernel(
+            ctx,
+            flutter_sdk_info,
+            modular_tools,
+            bootstrap,
+            staged_comparator,
+            lib_root,
+            packages,
+            kernel_dill,
+        )
+    else:
+        all_srcs = list(ctx.files.srcs) + collect_transitive_srcs(ctx.attr.deps).to_list() + [ctx.file.main, bootstrap]
+        if staged_comparator:
+            all_srcs.append(staged_comparator)
+        pc = compile_kernel_package_config(
+            ctx,
+            packages,
+            all_srcs,
+            roots = {ctx.attr.package_name: True} if ctx.attr.package_name else None,
+        )
+        flutter_kernel_compile_action(
+            ctx = ctx,
+            dartaotruntime = flutter_sdk_info.dartaotruntime,
+            kernel_filter_tool = ctx.executable._kernel_filter_tool,
+            frontend_server = flutter_sdk_info.frontend_server,
+            platform_dill = flutter_sdk_info.platform_kernel_dill,
+            main = bootstrap,
+            entrypoint_uri = app_scheme_location(bootstrap).uri,
+            srcs = pc.srcs,
+            package_config = pc.config_file,
+            output = kernel_dill,
+            aot = False,
+            defines = merge_dart_defines(ctx),
+            target = "flutter",
+            native_assets_manifest = native_assets_manifest,
+        )
 
     # Build a `flutter_assets/` tree for the test. Material widgets pull
     # `shaders/ink_sparkle.frag` at first paint, and pub-package fonts/assets
@@ -532,7 +565,7 @@ _TEST_ATTRS = {
 _TEST_ATTRS["deps"] = attr.label_list(
     doc = FLUTTER_DEPS_DOC,
     providers = [DartInfo],
-    aspects = [flutter_tester_shader_aspect],
+    aspects = [flutter_tester_shader_aspect, flutter_kernel_module_aspect],
 )
 
 # Standard `data` attr — files made available at test runtime via
@@ -581,6 +614,7 @@ _TEST_ATTRS["env"] = attr.string_dict(
           "FLUTTER_TEST_* keys the rule sets itself cannot be overridden.",
 )
 _TEST_ATTRS.update(PLATFORM_CONSTRAINT_ATTRS)
+_TEST_ATTRS.update(MODULAR_KERNEL_ATTRS)
 _TEST_ATTRS["_tool"] = attr.label(
     default = Label("//flutter/private/tools:flutter_test_runner"),
     cfg = "exec",
@@ -615,7 +649,7 @@ flutter_test = rule(
     test = True,
     toolchains = [
         "@rules_flutter//flutter:toolchain_type",
-    ] + COPY_TO_DIRECTORY_TOOLCHAINS,
+    ] + COPY_TO_DIRECTORY_TOOLCHAINS + MODULAR_KERNEL_TOOLCHAINS,
     doc = "Compiles a Flutter widget test, then runs it under flutter_tester " +
           "via the package:test_api RemoteListener protocol.",
 )

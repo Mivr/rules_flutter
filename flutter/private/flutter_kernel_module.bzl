@@ -1,0 +1,306 @@
+"""Modular Flutter kernel compilation for `flutter_test` dependencies and entrypoints.
+
+Compiles each `DartInfo` dependency target in a `flutter_test` closure once into
+a `<name>.flutter.kmod` directory against Flutter's patched `platform_strong.dill`
+(`--target flutter`), then links the entry module and reachable dependency
+modules with `DartKernelLink`.
+
+Uses a distinct provider (`FlutterKernelModuleInfo`) and directory suffix
+(`.flutter.kmod`) so the aspect can run over `dart_library` targets alongside
+`dart_library`'s own VM `DartKernelInfo` (`<name>.kmod`) without provider or
+output-path collisions.
+"""
+
+load("@bazel_skylib//rules:common_settings.bzl", "BuildSettingInfo")
+load("@rules_dart//dart:providers.bzl", "DartInfo", "DartKernelInfo")
+load(
+    "@rules_dart//dart:utils.bzl",
+    "KERNEL_MODULE_ATTRS",
+    "MODULAR_KERNEL_ATTRS",
+    "MODULAR_KERNEL_TOOLCHAINS",
+    "collect_transitive_srcs",
+    "duplicated_source",
+    "first_per_package",
+    "kernel_link_action",
+    "kernel_module_action",
+    "kernel_packages_consistent",
+    "kernel_tools_for",
+    "library_source_uri",
+    "modular_kernel_eligible",
+    "no_kernel_module",
+)
+load(
+    "//flutter/private:app_entrypoint.bzl",
+    "APP_SCHEME",
+    "app_main_location",
+    "app_scheme_location",
+    "package_lib_prefix",
+)
+
+FlutterKernelModuleInfo = provider(
+    doc = "Modular Flutter kernel info for a DartInfo target.",
+    fields = {
+        "kernel_info": "DartKernelInfo compiled for the Flutter target and patched SDK.",
+    },
+)
+
+def _kernel_worker_defines(ctx):
+    """Returns `--@rules_flutter//flutter:extra_dart_defines` entries supported by `kernel_worker`.
+
+    `kernel_worker`'s `ArgParser` declares `-D` / `--define` with `package:args`'s
+    default `splitCommas: true`, so a define whose value contains `,` (such as
+    `e2e/hello_world/.bazelrc`'s `E2E_FLAG=from,flag`) would be split at the
+    comma and rejected with `FormatException: no value given to -D option`.
+    """
+    return [
+        d
+        for d in ctx.attr._extra_dart_defines[BuildSettingInfo].value
+        if "," not in d
+    ]
+
+def _own_package_record(info):
+    """Returns the `DartPackageInfo` for the package a `DartInfo` itself owns."""
+    if not info.package_name:
+        return None
+    for pkg in info.transitive_packages.to_list():
+        if pkg.package_name == info.package_name and pkg.lib_root == info.lib_root:
+            return pkg
+    return None
+
+def _flutter_kernel_module_aspect_impl(target, ctx):
+    if DartInfo not in target:
+        return [FlutterKernelModuleInfo(kernel_info = no_kernel_module())]
+
+    enabled = ctx.attr._modular_kernel[BuildSettingInfo].value
+    flutter_toolchain = ctx.toolchains["@rules_flutter//flutter:toolchain_type"]
+    flutter_sdk_info = flutter_toolchain.flutter_sdk_info if flutter_toolchain else None
+    tools = kernel_tools_for(ctx)
+
+    dart_info = target[DartInfo]
+    package_name = dart_info.package_name
+    lib_root = dart_info.lib_root
+    own_record = _own_package_record(dart_info)
+    srcs_dir = getattr(ctx.rule.attr, "srcs_dir", None)
+    has_srcs_attr = hasattr(ctx.rule.attr, "srcs")
+    own_srcs = getattr(ctx.rule.files, "srcs", [])
+    rule_deps = getattr(ctx.rule.attr, "deps", [])
+    if type(rule_deps) != "list":
+        rule_deps = [rule_deps]
+
+    opaque = bool(srcs_dir)
+    if not has_srcs_attr and dart_info.transitive_srcs.to_list() != [] and len(rule_deps) == 0:
+        opaque = True
+    prefix = package_lib_prefix(lib_root)
+    if own_srcs and (not package_name or own_record == None or any([not f.short_path.startswith(prefix) for f in own_srcs])):
+        opaque = True
+
+    if opaque or not enabled or tools == None or flutter_sdk_info == None or flutter_sdk_info.platform_kernel_dill == None:
+        return [FlutterKernelModuleInfo(kernel_info = no_kernel_module())]
+
+    dep_kernels = [
+        dep[FlutterKernelModuleInfo].kernel_info
+        for dep in rule_deps
+        if type(dep) == "Target" and FlutterKernelModuleInfo in dep
+    ]
+    if len(dep_kernels) != len(rule_deps):
+        return [FlutterKernelModuleInfo(kernel_info = no_kernel_module())]
+
+    raw = depset(
+        transitive = [
+            dep[DartInfo].transitive_packages
+            for dep in rule_deps
+            if type(dep) == "Target" and DartInfo in dep
+        ],
+    ).to_list()
+    records = ([own_record] if own_record != None else []) + raw
+    modular = kernel_packages_consistent(records) and all([k.modular for k in dep_kernels])
+    if not modular:
+        return [FlutterKernelModuleInfo(kernel_info = no_kernel_module())]
+
+    dep_closure = depset(
+        order = "postorder",
+        transitive = [k.transitive_kmods for k in dep_kernels],
+    )
+    upstream_excluded = depset(transitive = [k.closure_excluded for k in dep_kernels])
+    owned = depset(
+        [(str(target.label), f.short_path) for f in own_srcs],
+        transitive = [k.owned for k in dep_kernels],
+    )
+    edges = depset(
+        [(str(target.label), str(dep.label)) for dep in rule_deps],
+        transitive = [k.edges for k in dep_kernels],
+    )
+    if not own_srcs:
+        return [
+            FlutterKernelModuleInfo(
+                kernel_info = DartKernelInfo(
+                    kmod = None,
+                    transitive_kmods = dep_closure,
+                    modular = True,
+                    closure_excluded = upstream_excluded,
+                    owned = owned,
+                    edges = edges,
+                ),
+            ),
+        ]
+
+    kmod = ctx.actions.declare_directory(target.label.name + ".flutter.kmod")
+    sources = [
+        struct(uri = library_source_uri(package_name, lib_root, f.short_path), file = f)
+        for f in own_srcs
+    ]
+    excluded = kernel_module_action(
+        ctx,
+        tools,
+        sources,
+        first_per_package(records),
+        dep_closure,
+        kmod,
+        defines = _kernel_worker_defines(ctx),
+        exclude_non_sources = True,
+        droppable = True,
+        closure_excluded = upstream_excluded,
+        target = "flutter",
+        platform_dill = flutter_sdk_info.platform_kernel_dill,
+        extra_libraries = ["ui", "nativewrappers"],
+        scheme = APP_SCHEME,
+    )
+    return [
+        FlutterKernelModuleInfo(
+            kernel_info = DartKernelInfo(
+                kmod = kmod,
+                transitive_kmods = depset(order = "postorder", direct = [kmod], transitive = [dep_closure]),
+                modular = True,
+                closure_excluded = depset(direct = [excluded], transitive = [upstream_excluded]),
+                owned = owned,
+                edges = edges,
+            ),
+        ),
+    ]
+
+flutter_kernel_module_aspect = aspect(
+    implementation = _flutter_kernel_module_aspect_impl,
+    attr_aspects = ["deps"],
+    attrs = KERNEL_MODULE_ATTRS | {
+        "_extra_dart_defines": attr.label(
+            default = Label("//flutter:extra_dart_defines"),
+            providers = [BuildSettingInfo],
+        ),
+    },
+    toolchains = [
+        "@rules_flutter//flutter:toolchain_type",
+    ] + MODULAR_KERNEL_TOOLCHAINS,
+    doc = "Compiles each DartInfo library in a flutter_test closure into a modular .flutter.kmod directory.",
+)
+
+def flutter_modular_test_tools(ctx, flutter_sdk_info, own_files, packages, native_assets_list):
+    """Decides whether a `flutter_test` compiles modularly, and with which tools.
+
+    Args:
+      ctx: The `flutter_test` rule context.
+      flutter_sdk_info: `FlutterSdkInfo` from the active Flutter toolchain.
+      own_files: The test's own `.dart` files (`[ctx.file.main] + ctx.files.srcs`).
+      packages: The synthesized `DartPackageInfo` list for the test.
+      native_assets_list: Resolved native code assets for the test.
+
+    Returns:
+      The kernel tools struct from `kernel_tools_for`, or `None` when the test
+      must fall back to whole-program `FlutterKernelCompile`.
+    """
+    enabled = ctx.attr._modular_kernel[BuildSettingInfo].value if hasattr(ctx.attr, "_modular_kernel") else True
+    if not enabled or flutter_sdk_info == None or flutter_sdk_info.platform_kernel_dill == None:
+        return None
+    tools = kernel_tools_for(ctx)
+    if tools == None:
+        return None
+
+    dep_kernels = [
+        dep[FlutterKernelModuleInfo].kernel_info
+        for dep in ctx.attr.deps
+        if FlutterKernelModuleInfo in dep
+    ]
+    dep_modular = len(dep_kernels) == len(ctx.attr.deps) and all([k.modular for k in dep_kernels])
+
+    owned = depset(transitive = [k.owned for k in dep_kernels]).to_list()
+    edges = depset(transitive = [k.edges for k in dep_kernels]).to_list()
+    duplicate = duplicated_source([f.short_path for f in own_files], owned, edges)
+
+    eligible = modular_kernel_eligible(
+        enabled = enabled,
+        kernel_mode = True,
+        dep_modular = dep_modular,
+        packages_consistent = kernel_packages_consistent(packages),
+        has_code_assets = len(native_assets_list) > 0,
+        has_own_defines = len(ctx.attr.defines) > 0,
+        has_compile_flags = False,
+        has_duplicate_source = duplicate != None,
+        same_sdk = True,
+    )
+    return tools if eligible else None
+
+def compile_flutter_modular_test_kernel(
+        ctx,
+        flutter_sdk_info,
+        tools,
+        bootstrap,
+        staged_comparator,
+        lib_root,
+        packages,
+        output):
+    """Compiles a `flutter_test`'s entry module and links it with dependency modules.
+
+    Args:
+      ctx: The `flutter_test` rule context.
+      flutter_sdk_info: `FlutterSdkInfo` from the active Flutter toolchain.
+      tools: The kernel tools struct returned by `flutter_modular_test_tools`.
+      bootstrap: The generated `<name>_bootstrap.dart` File (entry point).
+      staged_comparator: Optional staged `<name>.golden_comparator.dart` File.
+      lib_root: The test package's `lib_root` from `derive_lib_root`.
+      packages: The synthesized `DartPackageInfo` list for the test.
+      output: The linked `.dill` File to produce.
+    """
+    sources = [
+        struct(uri = app_scheme_location(bootstrap).uri, file = bootstrap),
+    ]
+    if staged_comparator != None:
+        sources.append(struct(uri = app_scheme_location(staged_comparator).uri, file = staged_comparator))
+    sources.append(struct(
+        uri = app_main_location(ctx.attr.package_name, lib_root, ctx.file.main).uri,
+        file = ctx.file.main,
+    ))
+    for f in ctx.files.srcs:
+        if f == ctx.file.main:
+            continue
+        sources.append(struct(
+            uri = app_main_location(ctx.attr.package_name, lib_root, f).uri,
+            file = f,
+        ))
+
+    dep_kernels = [
+        dep[FlutterKernelModuleInfo].kernel_info
+        for dep in ctx.attr.deps
+        if FlutterKernelModuleInfo in dep
+    ]
+    dep_closure = depset(
+        order = "postorder",
+        transitive = [k.transitive_kmods for k in dep_kernels],
+    )
+    entry = ctx.actions.declare_directory(ctx.label.name + ".flutter_entry.kmod")
+    kernel_module_action(
+        ctx,
+        tools,
+        sources,
+        first_per_package(packages),
+        dep_closure,
+        entry,
+        defines = _kernel_worker_defines(ctx),
+        exclude_non_sources = True,
+        droppable = False,
+        extra_inputs = collect_transitive_srcs(ctx.attr.deps),
+        closure_excluded = depset(transitive = [k.closure_excluded for k in dep_kernels]),
+        target = "flutter",
+        platform_dill = flutter_sdk_info.platform_kernel_dill,
+        extra_libraries = ["ui", "nativewrappers"],
+        scheme = APP_SCHEME,
+    )
+    kernel_link_action(ctx, dep_closure, entry, output)
