@@ -51,7 +51,7 @@ def _flutter_pub_impl(ctx):
         files = [ctx.file.version_manifest],
         transitive_files = depset(
             ctx.files.dev_root,
-            transitive = [flutter_sdk_info.tool_files],
+            transitive = [flutter_sdk_info.dart_pub_files],
         ),
     )
     runfiles = runfiles.merge(tool[DefaultInfo].default_runfiles)

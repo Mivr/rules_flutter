@@ -4,6 +4,10 @@ load("//flutter:providers.bzl", "FlutterSdkInfo")
 
 def _flutter_toolchain_impl(ctx):
     tool_files = depset(transitive = [ctx.attr.dart_sdk.files, ctx.attr.patched_sdk.files])
+    dart_vm_files = ctx.attr.dart_vm_files.files if ctx.attr.dart_vm_files else tool_files
+    dart_pub_files = ctx.attr.dart_pub_files.files if ctx.attr.dart_pub_files else tool_files
+    dart2wasm_files = ctx.attr.dart2wasm_files.files if ctx.attr.dart2wasm_files else tool_files
+    dart2js_files = ctx.attr.dart2js_files.files if ctx.attr.dart2js_files else tool_files
 
     flutter_sdk_info = FlutterSdkInfo(
         version = ctx.attr.version,
@@ -25,6 +29,10 @@ def _flutter_toolchain_impl(ctx):
         vm_isolate_snapshot = ctx.file.vm_isolate_snapshot,
         isolate_snapshot = ctx.file.isolate_snapshot,
         tool_files = tool_files,
+        dart_vm_files = dart_vm_files,
+        dart_pub_files = dart_pub_files,
+        dart2wasm_files = dart2wasm_files,
+        dart2js_files = dart2js_files,
         engine_library = ctx.attr.engine_library,
         target_os = ctx.attr.target_os,
         target_arch = ctx.attr.target_arch,
@@ -102,6 +110,18 @@ flutter_toolchain = rule(
         "patched_sdk": attr.label(
             doc = "A filegroup containing the Flutter patched Dart SDK files.",
             mandatory = True,
+        ),
+        "dart_vm_files": attr.label(
+            doc = "A filegroup containing the Dart SDK files required for `dart` to run a precompiled kernel snapshot.",
+        ),
+        "dart_pub_files": attr.label(
+            doc = "A filegroup containing the Dart SDK files required for `dart pub`.",
+        ),
+        "dart2wasm_files": attr.label(
+            doc = "A filegroup containing the host Dart SDK files required for `dart compile wasm`.",
+        ),
+        "dart2js_files": attr.label(
+            doc = "A filegroup containing the host Dart SDK files required for `dart compile js`.",
         ),
         "icu_data": attr.label(
             doc = "The `icudtl.dat` ICU data file.",

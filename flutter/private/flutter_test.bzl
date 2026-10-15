@@ -423,7 +423,6 @@ def _flutter_test_impl(ctx):
         # so what lands in runfiles is the File the manifest points at rather
         # than the `_solib_<arch>/` original.
         files = runtime_files + ctx.files.data + bundled_code_assets.to_list(),
-        transitive_files = flutter_sdk_info.tool_files,
     )
     runfiles = runfiles.merge(tool_runfiles)
 

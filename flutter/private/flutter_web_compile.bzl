@@ -177,7 +177,6 @@ def flutter_dart2wasm_action(
         ctx,
         dart,
         flutter_sdk_files,
-        web_sdk_files,
         dart2wasm_platform_dill,
         main_dart,
         srcs,
@@ -197,8 +196,7 @@ def flutter_dart2wasm_action(
     Args:
         ctx: Rule context.
         dart: The `dart` executable File.
-        flutter_sdk_files: SDK files needed to run dart.
-        web_sdk_files: Flutter web SDK files.
+        flutter_sdk_files: Host Dart SDK files needed to run `dart compile wasm`.
         dart2wasm_platform_dill: The dart2wasm_platform.dill File.
         main_dart: The main .dart source File.
         srcs: All transitive source Files needed for compilation.
@@ -285,7 +283,7 @@ def flutter_dart2wasm_action(
         arguments = [args],
         inputs = depset(
             direct = [main_dart, package_config, dart2wasm_platform_dill] + srcs,
-            transitive = [flutter_sdk_files, depset(web_sdk_files)],
+            transitive = [flutter_sdk_files],
         ),
         outputs = [output_wasm, output_mjs] + ([output_source_map] if output_source_map != None else []),
         mnemonic = "FlutterDart2Wasm",

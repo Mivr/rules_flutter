@@ -419,6 +419,11 @@ def _flutter_web_bundle_impl(ctx):
     # dart2js outputs to a tree artifact (directory) to support deferred loading:
     # dart2js may produce main.dart.js + *.part.js files for deferred imports.
     web_sdk_file_list = ctx.attr._web_sdk.files.to_list() if ctx.attr._web_sdk else []
+    dart2js_web_sdk_files = [
+        f
+        for f in web_sdk_file_list
+        if "/web-sdk/lib/" in f.path or f.path.endswith("/libraries.json")
+    ]
     compile_outputs = []  # Files (wasm, mjs, wasm.map)
     compile_copies = []  # Bundle copy entries for compile_outputs
     dart2js_dirs = []  # Tree artifacts from dart2js
@@ -440,8 +445,7 @@ def _flutter_web_bundle_impl(ctx):
         flutter_dart2wasm_action(
             ctx = ctx,
             dart = flutter_sdk_info.dart,
-            flutter_sdk_files = flutter_sdk_info.tool_files,
-            web_sdk_files = web_sdk_file_list,
+            flutter_sdk_files = flutter_sdk_info.dart2wasm_files,
             dart2wasm_platform_dill = ctx.file._dart2wasm_platform_dill,
             main_dart = entrypoint,
             srcs = all_srcs,
@@ -463,8 +467,8 @@ def _flutter_web_bundle_impl(ctx):
         flutter_dart2js_action(
             ctx = ctx,
             dart = flutter_sdk_info.dart,
-            flutter_sdk_files = flutter_sdk_info.tool_files,
-            web_sdk_files = web_sdk_file_list,
+            flutter_sdk_files = flutter_sdk_info.dart2js_files,
+            web_sdk_files = dart2js_web_sdk_files,
             dart2js_platform_dill = ctx.file._dart2js_platform_dill,
             main_dart = entrypoint,
             srcs = all_srcs,
@@ -497,8 +501,8 @@ def _flutter_web_bundle_impl(ctx):
         flutter_dart2js_action(
             ctx = ctx,
             dart = flutter_sdk_info.dart,
-            flutter_sdk_files = flutter_sdk_info.tool_files,
-            web_sdk_files = web_sdk_file_list,
+            flutter_sdk_files = flutter_sdk_info.dart2js_files,
+            web_sdk_files = dart2js_web_sdk_files,
             dart2js_platform_dill = ctx.file._dart2js_platform_dill,
             main_dart = entrypoint,
             srcs = all_srcs,

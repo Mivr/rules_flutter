@@ -9,7 +9,6 @@ Output format depends on the target platform:
 def _flutter_aot_action(
         ctx,
         gen_snapshot,
-        flutter_sdk_files,
         kernel_dill,
         output,
         snapshot_kind,
@@ -35,21 +34,19 @@ def _flutter_aot_action(
         arguments = [args],
         inputs = depset(
             direct = [kernel_dill],
-            transitive = [flutter_sdk_files],
         ),
         outputs = [output] + extra_outputs,
         mnemonic = mnemonic,
         progress_message = "AOT compiling Flutter %s %s" % (snapshot_kind, ctx.label),
     )
 
-def flutter_aot_elf_action(ctx, gen_snapshot, flutter_sdk_files, kernel_dill, output, strip = True, extra_flags = [], extra_outputs = []):
+def flutter_aot_elf_action(ctx, gen_snapshot, kernel_dill, output, strip = True, extra_flags = [], extra_outputs = []):
     """AOT compile to ELF shared library. Used for Android, Linux, Windows."""
-    _flutter_aot_action(ctx, gen_snapshot, flutter_sdk_files, kernel_dill, output, "app-aot-elf", "--elf", strip, extra_flags, extra_outputs, "FlutterAotElf")
+    _flutter_aot_action(ctx, gen_snapshot, kernel_dill, output, "app-aot-elf", "--elf", strip, extra_flags, extra_outputs, "FlutterAotElf")
 
 def flutter_aot_macho_action(
         ctx,
         gen_snapshot,
-        flutter_sdk_files,
         kernel_dill,
         output,
         strip = True,
@@ -63,7 +60,6 @@ def flutter_aot_macho_action(
     Args:
         ctx: Rule context.
         gen_snapshot: gen_snapshot executable File.
-        flutter_sdk_files: SDK support files.
         kernel_dill: Kernel .dill input.
         output: Output dylib File.
         strip: Whether to strip debug symbols.
@@ -79,4 +75,4 @@ def flutter_aot_macho_action(
         macho_flags.append("--macho-min-os-version=" + min_os_version)
     if rpath:
         macho_flags.append("--macho-rpath=" + rpath)
-    _flutter_aot_action(ctx, gen_snapshot, flutter_sdk_files, kernel_dill, output, "app-aot-macho-dylib", "--macho", strip, macho_flags, extra_outputs, "FlutterAotMacho")
+    _flutter_aot_action(ctx, gen_snapshot, kernel_dill, output, "app-aot-macho-dylib", "--macho", strip, macho_flags, extra_outputs, "FlutterAotMacho")

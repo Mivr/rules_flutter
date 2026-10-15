@@ -731,8 +731,8 @@ def flutter_build_assets(ctx, flutter_sdk_info, output_dir, compiled_shaders = {
 
     return flutter_asset_bundle_action(
         ctx = ctx,
-        dart = flutter_sdk_info.dart,
-        flutter_sdk_files = flutter_sdk_info.tool_files,
+        dart = flutter_sdk_info.dart if tree_shake_icons else None,
+        flutter_sdk_files = flutter_sdk_info.dart_vm_files if tree_shake_icons else None,
         assets = all_assets,
         fonts = fonts,
         license_files = license_files,

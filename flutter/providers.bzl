@@ -16,7 +16,12 @@ FlutterSdkInfo = provider(
         "platform_kernel_dill_product": "File: `platform_strong_product.dill` — the release platform kernel.",
         "patched_sdk": "Target: The Flutter patched Dart SDK root directory.",
         "icu_data": "File: `icudtl.dat` — ICU data file required by the engine.",
-        "tool_files": "depset[File]: All files needed to run Flutter build tools (for use in action inputs).",
+        "tool_files": "depset[File]: Deprecated. All files in the bundled Dart SDK and patched SDK. " +
+                      "Prefer action-specific sets (`dart_vm_files`, `dart_pub_files`, `dart2wasm_files`, `dart2js_files`).",
+        "dart_vm_files": "depset[File]: Host Dart SDK files required for `dart` to run a precompiled kernel snapshot (e.g. `const_finder.dart.snapshot`).",
+        "dart_pub_files": "depset[File]: Host Dart SDK files required for `dart pub`.",
+        "dart2wasm_files": "depset[File]: Host Dart SDK files required for `dart compile wasm`.",
+        "dart2js_files": "depset[File]: Host Dart SDK files required for `dart compile js`.",
         "engine_library": "Target or None: The platform-specific Flutter engine runtime library " +
                           "(FlutterMacOS.framework, libflutter_linux_gtk.so, flutter_windows.dll). " +
                           "None for mobile/web or when engine runtime is not downloaded.",
