@@ -7,6 +7,8 @@ bundled `dart-sdk/` and `patched-sdk/` trees.
 """
 
 load("@bazel_skylib//lib:unittest.bzl", "analysistest", "asserts")
+load("@rules_dart//dart:analyze.bzl", "dart_analyze")
+load("@rules_dart//dart:defs.bzl", "dart_binary")
 load("//flutter/private:flutter_aot_target.bzl", "flutter_aot_target")
 load("//flutter/private:flutter_application.bzl", "flutter_application")
 load("//flutter/private:flutter_asset_bundle.bzl", "flutter_asset_bundle")
@@ -240,6 +242,78 @@ def _pub_runfiles_test_impl(ctx):
     )
     return analysistest.end(env)
 
+_InspectActionsInfo = provider(
+    doc = "Actions collected after `dart_analyze` and `dart_analyzer_summary` run.",
+    fields = ["actions"],
+)
+
+def _inspect_analyze_actions_aspect_impl(target, _ctx):
+    return [_InspectActionsInfo(actions = target.actions)]
+
+_inspect_analyze_actions_aspect = aspect(
+    implementation = _inspect_analyze_actions_aspect_impl,
+    requires = [dart_analyze],
+)
+
+def _dart_toolchain_inputs_test_impl(ctx):
+    """Bundled `dart_toolchain` stages `compile_files` for compile and `analyze_files` for analysis."""
+    env = analysistest.begin(ctx)
+    target = analysistest.target_under_test(env)
+    all_actions = target[_InspectActionsInfo].actions
+
+    for mnemonic in ["DartKernel", "DartCompile"]:
+        compile_action = _find_action(env, [mnemonic])
+        compile_paths = _input_paths(compile_action)
+        _assert_some_path_contains(
+            env,
+            compile_paths,
+            [
+                "dart-sdk/bin/dart",
+                "vm_platform_strong.dill",
+            ],
+            mnemonic,
+        )
+        _assert_no_path_contains(
+            env,
+            compile_paths,
+            [
+                "/patched-sdk/",
+                "dart-sdk/bin/snapshots/analysis_server",
+                "dart-sdk/bin/snapshots/dart2wasm",
+                "dart-sdk/lib/core/",
+            ],
+            mnemonic,
+        )
+
+    analyze_found = [a for a in all_actions if a.mnemonic == "DartAnalyze"]
+    asserts.equals(
+        env,
+        1,
+        len(analyze_found),
+        "expected one DartAnalyze action, got %s" % [a.mnemonic for a in all_actions],
+    )
+    analyze_paths = _input_paths(analyze_found[0] if analyze_found else None)
+    _assert_some_path_contains(
+        env,
+        analyze_paths,
+        [
+            "dart-sdk/bin/snapshots/analysis_server",
+            "dart-sdk/lib/core/",
+        ],
+        "DartAnalyze",
+    )
+    _assert_no_path_contains(
+        env,
+        analyze_paths,
+        [
+            "/patched-sdk/",
+            "dart-sdk/bin/snapshots/dart2wasm",
+            "dart-sdk/bin/utils/wasm-opt",
+        ],
+        "DartAnalyze",
+    )
+    return analysistest.end(env)
+
 _flutter_test_runfiles_test = analysistest.make(_flutter_test_runfiles_test_impl)
 _application_opt_inputs_test = analysistest.make(
     _application_opt_inputs_test_impl,
@@ -259,6 +333,10 @@ _web_inputs_test = analysistest.make(
     config_settings = {"//command_line_option:compilation_mode": "opt"},
 )
 _pub_runfiles_test = analysistest.make(_pub_runfiles_test_impl)
+_dart_toolchain_inputs_test = analysistest.make(
+    _dart_toolchain_inputs_test_impl,
+    extra_target_under_test_aspects = [_inspect_analyze_actions_aspect],
+)
 
 def _setup_fixtures():
     flutter_test(
@@ -286,6 +364,12 @@ def _setup_fixtures():
     )
     flutter_web_bundle(
         name = "_inputs_web_bundle",
+        package_name = _PACKAGE,
+        main = _MAIN,
+        tags = ["manual"],
+    )
+    dart_binary(
+        name = "_inputs_dart_binary",
         package_name = _PACKAGE,
         main = _MAIN,
         tags = ["manual"],
@@ -327,6 +411,10 @@ def action_inputs_test_suite(name):
         name = name + "_pub",
         target_under_test = "//flutter:pub",
     )
+    _dart_toolchain_inputs_test(
+        name = name + "_dart_toolchain",
+        target_under_test = ":_inputs_dart_binary",
+    )
 
     native.test_suite(
         name = name,
@@ -338,5 +426,6 @@ def action_inputs_test_suite(name):
             ":" + name + "_aot_target",
             ":" + name + "_web",
             ":" + name + "_pub",
+            ":" + name + "_dart_toolchain",
         ],
     )
