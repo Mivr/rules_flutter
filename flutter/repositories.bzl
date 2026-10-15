@@ -517,10 +517,7 @@ def flutter_register_toolchains(name, **kwargs):
         name = name + "_web_sdk",
         engine_revision = meta.engine_revision,
         sha256 = flutter_artifact_sha256(flutter_version, "flutter-web-sdk.zip"),
-        dart_sdk_sha256s = {
-            host: flutter_artifact_sha256(flutter_version, dart_sdk_artifact_path(host))
-            for host in HOST_PLATFORMS
-        },
+        user_repository_name = name,
     )
 
     # sky_engine (lazy — only fetched when Flutter code is analyzed). Nothing
