@@ -17,9 +17,10 @@ them.
 | E | Accepted, plan #18: a macro over a path prefix for the SDK filegroups and `dart_toolchain`, plus a test that the default SDK isn't fetched. | Plan T1b: switch the engine repo to the macro once rules_flutter pins a rules_dart that has it. T1 already shows the default SDK isn't fetched. |
 | F | Each feature falls back correctly (see rules_dart's answer). | Nothing to do. |
 | G | Agreed; when the user schedules it. | Plan H1. |
-| H | Landing: copy toolchain becomes `//dart:copy_toolchain_type`, `flutter_test` needs no change. | Plan 2.4 when the commits are named. |
+| H | Done (`84c8767`, `5387726`): copy toolchain is `//dart:copy_toolchain_type`, `bazel_lib` and `yaml.bzl` dropped. | **Reopened by K.** Plain-string `"//dart:copy_toolchain_type"` resolves against `@rules_flutter` when used by `flutter_test`. Wait for K before plan 2.4. |
 | I | Accepted, plan #19, proposed shared error text. | **Agreed.** H0 uses it, with `flutter.pub`'s command: ``pub package "<name>" <version> in <lock file> has no sha256. Run `bazel run @rules_flutter//flutter:pub -- get` (Dart 2.19 or newer records one) and commit the lock.`` |
 | J | Confirmed. | Nothing to do. |
+| K | _Sent 2026-10-15._ | Wrap `"//dart:copy_toolchain_type"` in `Label(...)` in `dart/private/source_set.bzl`, plus an external-module e2e test. |
 
 ## A. Export modular compilation with the target as a parameter (rules_dart #7)
 
@@ -121,3 +122,94 @@ at a repository root. That works because rules_dart derives the SDK directory
 from the `dart` binary (`sdk_path_from_dart`). The ask: keep that contract,
 with nothing deriving SDK paths from `sdk_root`'s repository root, or tell
 rules_flutter before it changes.
+
+## K. Wrap exported toolchain labels in `Label()` (reopens H)
+
+`for-rules-flutter.md` answered ask H (`84c8767`) with: "`COPY_TO_DIRECTORY_TOOLCHAINS`
+keeps its name and now lists `//dart:copy_toolchain_type`, which rules_dart
+registers itself, so `flutter_test` needs no change."
+
+Testing `rules_flutter` against `rules_dart` `main` (`4005f33`) fails in
+analysis on every `flutter_test` (and `flutter_kernel_target`,
+`flutter_aot_target`, `flutter_application`, `flutter_web_application`) with:
+
+```text
+no such target '@@rules_flutter+//dart:copy_toolchain_type': target 'copy_toolchain_type' not declared in package 'dart'
+```
+
+**Cause.** `dart/private/source_set.bzl` defines `COPY_TO_DIRECTORY_TOOLCHAINS`
+as a list containing a plain string `"//dart:copy_toolchain_type"`, and
+`assemble_source_dir` passes that same plain string to `ctx.toolchains[...]` and
+`ctx.actions.run(..., toolchain = ...)`. When a rule defined in another
+repository (`rules_flutter`) spreads `COPY_TO_DIRECTORY_TOOLCHAINS` into its
+`rule(toolchains = ...)` or calls `colocate_packages` / `colocate_entrypoint`
+with its own `ctx`, Bazel resolves the repo-less string `"//dart:..."` against
+the defining rule's repository (`@@rules_flutter+`), not `@@rules_dart+`.
+`dart/tests/source_set_test.bzl` did not catch this because its test rules live
+inside `@rules_dart`.
+
+**Places to fix in `rules_dart`:**
+
+1. `dart/private/source_set.bzl` (three places, exported today through
+   `@rules_dart//dart:utils.bzl`):
+   - `COPY_TO_DIRECTORY_TOOLCHAINS = ["//dart:copy_toolchain_type"]` (line 23)
+   - `executable = ctx.toolchains["//dart:copy_toolchain_type"].copy_tree` in
+     `assemble_source_dir` (line 100)
+   - `toolchain = "//dart:copy_toolchain_type"` in `ctx.actions.run` in
+     `assemble_source_dir` (line 107)
+2. `dart/private/dart_kernel.bzl` (before plan #16 / ask A exports modular
+   compile helpers to downstream rule sets):
+   - `EXEC_TOOLS_TOOLCHAIN = "//dart:exec_tools_toolchain_type"` (line 50), used
+     in `MODULAR_KERNEL_TOOLCHAINS` (line 100) and
+     `ctx.toolchains[EXEC_TOOLS_TOOLCHAIN]` in `kernel_tools_for(ctx)` (line
+     393)
+   - `ctx.toolchains["//dart:toolchain_type"]` in `modular_executable_tools`
+     (line 642)
+
+**Patch used for the `main_dart_4005f33` benchmark (`0b0f033`):**
+
+```diff
+diff --git a/dart/private/source_set.bzl b/dart/private/source_set.bzl
+index e573e38..f73e66c 100644
+--- a/dart/private/source_set.bzl
++++ b/dart/private/source_set.bzl
+@@ -24,9 +24,11 @@ Copies remain where a consumer needs one real directory tree:
+
+ load("//dart/private:dart_info.bzl", "derived_package_info")
+
++_COPY_TOOLCHAIN_TYPE = Label("//dart:copy_toolchain_type")
++
+ # The toolchain that provides the `copy_tree` tool. Rules that copy files list it
+ # here; `dart/utils.bzl` exports the same list for rule sets built on rules_dart.
+-COPY_TO_DIRECTORY_TOOLCHAINS = ["//dart:copy_toolchain_type"]
++COPY_TO_DIRECTORY_TOOLCHAINS = [_COPY_TOOLCHAIN_TYPE]
+
+ def needs_source_assembly(srcs):
+     """Whether `srcs` must be assembled into one directory before compilation.
+@@ -100,13 +102,13 @@ def assemble_source_dir(ctx, name, srcs, root_paths = ["."], replace_prefixes =
+     args.add_all(srcs, map_each = _copy_record, expand_directories = True)
+
+     ctx.actions.run(
+-        executable = ctx.toolchains["//dart:copy_toolchain_type"].copy_tree,
++        executable = ctx.toolchains[_COPY_TOOLCHAIN_TYPE].copy_tree,
+         arguments = [args],
+         inputs = srcs,
+         outputs = [dst],
+         mnemonic = "DartCopyTree",
+         progress_message = "Copying files to directory %{output}",
+-        toolchain = "//dart:copy_toolchain_type",
++        toolchain = _COPY_TOOLCHAIN_TYPE,
+     )
+     return dst
+```
+
+**The ask:**
+
+- Apply the `Label("//dart:copy_toolchain_type")` fix in
+  `dart/private/source_set.bzl` (and wrap the toolchain labels in
+  `dart/private/dart_kernel.bzl` before exporting them in plan #16).
+- Add a test in an external module (for example in an `e2e/` workspace,
+  alongside `e2e/analysis/exec_pkg/rules.bzl` and `e2e/link_hook/in_rule.bzl`)
+  that defines a small rule loading `COPY_TO_DIRECTORY_TOOLCHAINS` and
+  `colocate_packages` from `@rules_dart//dart:utils.bzl` and exercises source
+  assembly on a generated input.

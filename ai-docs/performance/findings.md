@@ -287,3 +287,90 @@ unchanged. Raw data: `results/p13_shaders_once.json`.
 
 The count no longer grows with the number of tests and apps: it is the
 number of distinct shaders times the platforms built.
+
+## rules_flutter on rules_dart main (`4005f33`)
+
+`rules_flutter` `2f2a861` (T1 + 1.2 + 1.3) measured against `rules_dart` `main`
+at `4005f33` via `--override_module`, plus a local three-line
+`Label("//dart:copy_toolchain_type")` fix in `dart/private/source_set.bzl`
+(`0b0f033`; without it, analysis fails on every `flutter_test` with
+`no such target '@@rules_flutter+//dart:copy_toolchain_type'`, reported as ask
+K). Raw data: `results/main_dart_4005f33.json`.
+
+| Metric | 1.3 (`p13_shaders_once`) | `main_dart_4005f33` |
+| --- | --- | --- |
+| Re-analysis, 80-pkg variant (median) | 7.46 s (`[7.80, 7.25, 7.46]`) | **1.60 s** (`[1.76, 1.60, 1.39]`) |
+| Clean build: sandboxed actions | 86 | 92 (+6 `DartKernel`) |
+| Clean build: tool compiles (`DartKernel` + `DartCompile`) | 0 + 6 (17.5 s) | 6 + 6 (5.6 s + 8.8 s) |
+| Clean build: `FlutterKernelCompile` / `FlutterShaderCompile` | 33 / 6 | 33 / 6 |
+| Kernel inputs of one test / test runfiles | 1269 (69.2 MB) / 1062 (752 MB) | 1269 (69.2 MB) / 1062 (752 MB) |
+| Extracted external SDK dirs (`fetch_footprint`) | 1808 MB | 1808 MB |
+| Lint clean: copy actions | 998 `CopyToDirectory` (563 s) | **122 `DartCopyTree`** (363 s) |
+| Lint clean: `DartAnalyze` / `DartFormat` | 61 (817 s) / 61 (178 s) | 61 (716 s) / 61 (**106 s**) |
+| Lint clean: tool compiles (`DartKernel` + `DartCompile`) | 0 + 8 (41.4 s) | 9 + 9 (12.0 s + 19.0 s) |
+| Lint clean: sandboxed actions | 1208 | **342** |
+| Lint after a body edit: analyze / format / copy re-run | 61 / 61 / 61 `CopyToDirectory` | 61 / **2** / 63 `DartCopyTree` |
+| Lint after a body edit: sandboxed actions | 223 | **166** |
+
+What the bump buys:
+
+- **Lint copy actions drop 8.2x (`998 -> 122`), and `lint_clean` sandboxed
+  actions drop 3.5x (`1,208 -> 342`).** `stage_config_project(...,
+  copy_external = False)` (`95089ce`) names external pub and SDK packages in
+  place in `package_config.json`, eliminating all 937 `.dart_analyze.extpkgs/*`
+  copy actions. The remaining 122 `DartCopyTree` actions are two per analyzed
+  target across the 61 workspace targets (`30 flutter_library + 30 flutter_test
+  + 1 app_kernel`): one `.dart_analyze.proj/src` tree for `DartAnalyze` and one
+  `.dart_analyze.format.proj/src` tree for `DartFormat`. `FileWrite` actions in
+  `lint_clean` also fall from 2,347 to 1,533.
+- **A leaf body edit re-runs 2 `DartFormat` actions instead of 61 (8.5 s vs
+  199 s summed CPU).** `DartFormat` now stages only a target's own `.dart`
+  files (`6d99c78`), so editing `packages/pkg0/lib/src/f0.dart` invalidates
+  only `//packages/pkg0:pkg0` and `//packages/pkg0:pkg0_test`; the other 59
+  targets' format trees and actions are cache hits.
+- **Re-analysis of the 80-package graph drops 4.7x (`7.46 s -> 1.60 s`).**
+  `colocate_packages`, `resolve_package_roots`, and
+  `generate_dev_package_config` (all called by `flutter_compile_kernel` on
+  every `flutter_test` and app) now index packages once with `package_index`
+  and match each file in path-depth time via `package_for_index` (`0e3c404`),
+  rather than scanning the package list per file.
+- **`bazel_lib` and `yaml.bzl` are replaced on the Dart side (`84c8767`,
+  `5387726`).** Directory assembly runs `//dart/private/tools:copy_tree`
+  (mnemonic `DartCopyTree`; `table.py`'s `copies re-run` row queries
+  `CopyToDirectory` and therefore prints `–` for `main_dart_4005f33`, where 63
+  `DartCopyTree` actions ran).
+
+What it costs and what remains:
+
+- **Needs the `Label("//dart:copy_toolchain_type")` fix in `rules_dart` (ask
+  K).** `dart/private/source_set.bzl` exported
+  `COPY_TO_DIRECTORY_TOOLCHAINS = ["//dart:copy_toolchain_type"]` as a plain
+  string and indexed `ctx.toolchains` with it, which resolves against
+  `@@rules_flutter+` when a `rules_flutter` rule declares the toolchain or
+  calls `colocate_packages`.
+- **Two-stage tool compiles add 6 `DartKernel` actions in `clean_build` (9 in
+  `lint_clean`, plus 1 `DartCompile` for `copy_tree`).**
+  `dart_binary(compile_mode = "exe")` now runs `gen_kernel` (`DartKernel`)
+  before `gen_snapshot` (`DartCompile`) to emit stable
+  `org-dartlang-bazel:///` URIs (`d2120e8`). Summed tool-compile CPU in
+  `clean_build` is 14.4 s (5.6 s + 8.8 s) vs 17.5 s before.
+- **A leaf body edit still re-runs all 61 `DartAnalyze` and 63 `DartCopyTree`
+  actions (61 `.dart_analyze.proj/src` + 2 `.dart_analyze.format.proj/src`).**
+  Staging only a target's own sources for analysis requires
+  `//dart:analyzer_summaries`, which stays off until ask B (rules_dart plan
+  #17, embedding `sky_engine`'s `dart:ui` in the SDK summary) lands.
+- **Dart toolchain actions still carry the whole 1,047-file / 642 MB
+  `dart-sdk/` as inputs.** `rules_dart` `main` added optional `compile_files`,
+  `runtime_files`, and `analyze_files` attributes to `dart_toolchain`
+  (`b3c8dc3`), falling back to `tool_files` (`sdk_root`) when unset. Because
+  `flutter/repositories.bzl` registers Flutter's Dart with `sdk_root =
+  ":dart_sdk_files"` alone until ask E (plan #18 / plan T1b) lands, all 61
+  `DartAnalyze`, 61 `DartFormat`, and 9 `DartKernel` / `DartCompile` actions
+  still take the full SDK depset, and `find_sdk_kernel_tools` scans all 1,047
+  files per tool compile.
+- **Extracted vs downloaded SDK size.** `fetch_footprint` measures extracted
+  directories under `external/` (1,808 MB: `flutter_linux-x64` at 824 MB and
+  `flutter_web_sdk` at 759 MB each extract a 642 MB `dart-sdk/`, while
+  `rules_dart`'s standalone SDK is not fetched). Bazel's repository cache is
+  content-addressed by sha256, so the shared Dart SDK archive is downloaded at
+  most once over the network but extracted twice on disk (plan D1/D2).
