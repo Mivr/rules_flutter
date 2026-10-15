@@ -130,6 +130,15 @@ def _flutter_kernel_module_aspect_impl(target, ctx):
         [(str(target.label), str(dep.label)) for dep in rule_deps],
         transitive = [k.edges for k in dep_kernels],
     )
+    base_dill = None
+    base_keys = None
+    for k in dep_kernels:
+        kd = getattr(k, "base_dill", None)
+        kk = getattr(k, "base_keys", None)
+        if kd != None and kk != None:
+            base_dill = kd
+            base_keys = kk
+            break
     if not own_srcs:
         return [
             FlutterKernelModuleInfo(
@@ -140,6 +149,8 @@ def _flutter_kernel_module_aspect_impl(target, ctx):
                     closure_excluded = upstream_excluded,
                     owned = owned,
                     edges = edges,
+                    base_dill = base_dill,
+                    base_keys = base_keys,
                 ),
             ),
         ]
@@ -165,6 +176,22 @@ def _flutter_kernel_module_aspect_impl(target, ctx):
         extra_libraries = ["ui", "nativewrappers"],
         scheme = APP_SCHEME,
     )
+    if package_name == "flutter_test" and hasattr(ctx.executable, "_kernel_link"):
+        base_dill = ctx.actions.declare_file(target.label.name + ".flutter_base.dill")
+        base_keys = ctx.actions.declare_file(target.label.name + ".flutter_base.keys")
+        seed_modules = [kmod] + [
+            k.kmod
+            for k in dep_kernels
+            if k.kmod != None and k.kmod.basename == "flutter.flutter.kmod"
+        ]
+        kernel_link_action(
+            ctx,
+            dep_closure,
+            entry = None,
+            output = base_dill,
+            seed_modules = seed_modules,
+            write_keys = base_keys,
+        )
     return [
         FlutterKernelModuleInfo(
             kernel_info = DartKernelInfo(
@@ -174,6 +201,8 @@ def _flutter_kernel_module_aspect_impl(target, ctx):
                 closure_excluded = depset(direct = [excluded], transitive = [upstream_excluded]),
                 owned = owned,
                 edges = edges,
+                base_dill = base_dill,
+                base_keys = base_keys,
             ),
         ),
     ]
@@ -303,4 +332,14 @@ def compile_flutter_modular_test_kernel(
         extra_libraries = ["ui", "nativewrappers"],
         scheme = APP_SCHEME,
     )
-    kernel_link_action(ctx, dep_closure, entry, output)
+    base_dill = None
+    base_keys = None
+    for k in dep_kernels:
+        kd = getattr(k, "base_dill", None)
+        kk = getattr(k, "base_keys", None)
+        if kd != None and kk != None:
+            base_dill = kd
+            base_keys = kk
+            break
+    kernel_link_action(ctx, dep_closure, entry, output, base_keys = base_keys)
+    return base_dill

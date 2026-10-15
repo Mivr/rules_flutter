@@ -354,8 +354,9 @@ def _flutter_test_impl(ctx):
         packages,
         native_assets_list,
     )
+    base_dill = None
     if modular_tools != None:
-        compile_flutter_modular_test_kernel(
+        base_dill = compile_flutter_modular_test_kernel(
             ctx,
             flutter_sdk_info,
             modular_tools,
@@ -435,6 +436,8 @@ def _flutter_test_impl(ctx):
         "FLUTTER_TEST_PATH": ctx.file.main.short_path,
         "FLUTTER_TEST_IMPELLER": "1" if ctx.attr.enable_impeller else "",
     }
+    if base_dill != None:
+        env["FLUTTER_TEST_BASE_DILL"] = runfiles_path(base_dill, workspace_name)
 
     # User-supplied variables, merged last but never over the rule's own keys:
     # those six are the runner's start-up contract, and a test that quietly
@@ -454,7 +457,7 @@ def _flutter_test_impl(ctx):
         flutter_sdk_info.flutter_tester,
         flutter_sdk_info.icu_data,
         flutter_assets,
-    ]
+    ] + ([base_dill] if base_dill != None else [])
     tool_runfiles = tool[DefaultInfo].default_runfiles
     runfiles = ctx.runfiles(
         # The bundled native-asset libraries ship here, at the runfiles-relative
