@@ -227,7 +227,7 @@ Future<void> main(List<String> args) async {
   Map<String, Set<int>>? usedCodePoints;
   Map<String, String>? fontFamilyToAsset;
 
-  if (iconTreeShaking != null) {
+  if (iconTreeShaking != null && fonts.isNotEmpty) {
     final dart = iconTreeShaking['dart'] as String;
     final constFinder = iconTreeShaking['const_finder'] as String;
     final kernelDill = iconTreeShaking['kernel_dill'] as String;

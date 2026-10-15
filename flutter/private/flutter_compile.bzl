@@ -25,7 +25,8 @@ def flutter_kernel_compile_action(
         native_assets_manifest = None,
         dart_plugin_registrant_uri = None,
         filesystem_roots = [],
-        recorded_uses = None):
+        recorded_uses = None,
+        from_dill = None):
     """Creates a Flutter kernel compilation action.
 
     Invokes the frontend_server via dartaotruntime to compile Dart sources
@@ -81,6 +82,9 @@ def flutter_kernel_compile_action(
             `@RecordUse` uses that survive tree-shaking to (`--recorded-uses`),
             the input of package link hooks. Only an AOT compile records; a
             JIT compile writes an empty file.
+        from_dill: Optional pre-linked modular `.dill` File passed via
+            `--from-dill` to initialize `frontend_server` without re-parsing
+            transitive sources.
     """
     args = ctx.actions.args()
     args.add("--")
@@ -109,6 +113,7 @@ def flutter_kernel_compile_action(
     if aot:
         args.add("--aot")
         args.add("--tfa")
+        args.add("--no-embed-source-text")
 
     # Compilation mode flags
     bazel_mode = ctx.var["COMPILATION_MODE"]
@@ -142,6 +147,9 @@ def flutter_kernel_compile_action(
     if recorded_uses != None:
         args.add("--recorded-uses", recorded_uses)
 
+    if from_dill != None:
+        args.add("--from-dill", from_dill.path)
+
     if entrypoint_uri:
         args.add(entrypoint_uri)
     else:
@@ -156,7 +164,10 @@ def flutter_kernel_compile_action(
     else:
         env["HOME"] = output.dirname
 
-    direct_inputs = [main, package_config, frontend_server, platform_dill] + srcs
+    if from_dill != None:
+        direct_inputs = [main, package_config, frontend_server, platform_dill, from_dill]
+    else:
+        direct_inputs = [main, package_config, frontend_server, platform_dill] + srcs
     if native_assets_manifest != None:
         direct_inputs.append(native_assets_manifest)
     outputs = [output]

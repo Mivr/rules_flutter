@@ -368,3 +368,76 @@ def compile_flutter_modular_test_kernel(
             break
     kernel_link_action(ctx, dep_closure, entry, output, base_keys = base_keys)
     return base_dill
+
+def compile_flutter_modular_web_kernel(
+        ctx,
+        flutter_sdk_info,
+        tools,
+        lib_root,
+        packages,
+        output):
+    """Compiles a `flutter_web_bundle`'s entry module and links it with dependency modules and the product platform dill.
+
+    Args:
+      ctx: The `flutter_web_bundle` rule context.
+      flutter_sdk_info: `FlutterSdkInfo` from the active Flutter toolchain.
+      tools: The kernel tools struct returned by `flutter_modular_test_tools`.
+      lib_root: The web app package's `lib_root` from `derive_lib_root`.
+      packages: The synthesized `DartPackageInfo` list for the web app.
+      output: The linked `.dill` File to produce (with product platform dill prepended).
+    """
+    sources = [
+        struct(
+            uri = app_main_location(ctx.attr.package_name, lib_root, ctx.file.main).uri,
+            file = ctx.file.main,
+        ),
+    ]
+    for f in ctx.files.srcs:
+        if f == ctx.file.main:
+            continue
+        sources.append(struct(
+            uri = app_main_location(ctx.attr.package_name, lib_root, f).uri,
+            file = f,
+        ))
+
+    dep_kernels = [
+        dep[FlutterKernelModuleInfo].kernel_info
+        for dep in ctx.attr.deps
+        if FlutterKernelModuleInfo in dep
+    ]
+    dep_closure = depset(
+        order = "postorder",
+        transitive = [k.transitive_kmods for k in dep_kernels],
+    )
+    dep_outline_closure = depset(
+        order = "postorder",
+        transitive = [k.transitive_koutlines for k in dep_kernels],
+    )
+    cross_pkg_srcs = depset(
+        transitive = [k.cross_pkg_srcs for k in dep_kernels],
+    )
+    entry = ctx.actions.declare_directory(ctx.label.name + "_icon_tree_shaking.flutter_entry.kmod")
+    kernel_module_action(
+        ctx,
+        tools,
+        sources,
+        first_per_package(packages),
+        dep_outline_closure,
+        entry,
+        defines = _kernel_worker_defines(ctx),
+        exclude_non_sources = True,
+        droppable = False,
+        extra_inputs = cross_pkg_srcs,
+        closure_excluded = depset(transitive = [k.closure_excluded for k in dep_kernels]),
+        target = "flutter",
+        platform_dill = flutter_sdk_info.platform_kernel_dill,
+        extra_libraries = ["ui", "nativewrappers"],
+        scheme = APP_SCHEME,
+    )
+    kernel_link_action(
+        ctx,
+        dep_closure,
+        entry,
+        output,
+        platform_dill = flutter_sdk_info.platform_kernel_dill_product,
+    )

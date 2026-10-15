@@ -408,6 +408,15 @@ def _opt_web_defines_test_impl(ctx):
             "dev-loop file %s leaked into release outputs" % basename,
         )
 
+    # A release web bundle with no fonts and no language experiments skips the
+    # redundant icon tree-shaking kernel compile.
+    asserts.equals(
+        env,
+        [],
+        [a for a in analysistest.target_actions(env) if a.mnemonic == "FlutterKernelCompile"],
+        "a fontless release web build must skip FlutterKernelCompile",
+    )
+
     # Nothing serves a release bundle but a web server, so an index.html that
     # inlines the bootstrap is a legitimate single-request deployment here.
     _assert_template_wiring(env, expect_dev_loop_guard = False)
@@ -794,11 +803,30 @@ def _experiments_test_impl(ctx):
     ]
     asserts.equals(env, 1, len(kernels), "expected the icon tree-shake kernel compile")
     if kernels:
-        _assert_argv(env, kernels[0], present = [flag])
+        _assert_argv(env, kernels[0], present = [flag, "--no-embed-source-text"])
     return analysistest.end(env)
 
 _experiments_test = analysistest.make(
     _experiments_test_impl,
+    config_settings = {"//command_line_option:compilation_mode": "opt"},
+)
+
+def _font_icon_tree_shake_test_impl(ctx):
+    """A release web build with fonts pre-links a modular dill for icon tree-shaking."""
+    env = analysistest.begin(ctx)
+    _action(env, "DartKernel")
+    link_action = _action(env, "DartKernelLink")
+    _assert_argv(env, link_action, present = ["--platform"])
+    kernel_action = _action(env, "FlutterKernelCompile")
+    _assert_argv(
+        env,
+        kernel_action,
+        present = ["--from-dill", "--no-embed-source-text"],
+    )
+    return analysistest.end(env)
+
+_font_icon_tree_shake_test = analysistest.make(
+    _font_icon_tree_shake_test_impl,
     config_settings = {"//command_line_option:compilation_mode": "opt"},
 )
 
@@ -1313,6 +1341,14 @@ def _setup_web_fixtures():
     )
 
     flutter_web_bundle(
+        name = "_web_font_fixture",
+        package_name = "web_fixture",
+        main = "lib/web_fixture_main.dart",
+        deps = ["//flutter:material_icons"],
+        tags = ["manual"],
+    )
+
+    flutter_web_bundle(
         name = "_web_dump_info_fixture",
         package_name = "web_fixture",
         main = "lib/web_fixture_main.dart",
@@ -1515,6 +1551,14 @@ def web_test_suite(name):
     _experiments_test(
         name = name + "_experiments",
         target_under_test = ":_web_experiments_fixture",
+    )
+    _font_icon_tree_shake_test(
+        name = name + "_font_icon_tree_shake",
+        target_under_test = ":_web_font_fixture",
+    )
+    build_test(
+        name = name + "_font_icon_tree_shake_build",
+        targets = [":_web_font_fixture"],
     )
     _dev_config_overrides_test(
         name = name + "_dev_config_overrides",

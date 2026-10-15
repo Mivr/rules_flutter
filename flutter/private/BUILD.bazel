@@ -281,6 +281,7 @@ bzl_library(
         ":common",
         ":flutter_asset_bundle",
         ":flutter_info",
+        ":flutter_kernel_module",
         ":flutter_library",
         ":flutter_web_compile",
         ":plugin_registrant",

@@ -127,6 +127,11 @@ def _in_lib_test_impl(ctx):
         "package:%s/web_fixture_main.dart" % _PACKAGE,
         argv[-1] if argv else None,
     )
+    asserts.false(
+        env,
+        "--no-embed-source-text" in argv,
+        "JIT FlutterKernelCompile must keep embedded source text, got %r" % argv,
+    )
     _assert_registrant_on_app_scheme(env, argv)
 
     # Nothing for the dev loop to mount: the entrypoint resolves through the
@@ -146,6 +151,11 @@ def _opt_in_lib_test_impl(ctx):
         env,
         "package:%s/web_fixture_main.dart" % _PACKAGE,
         argv[-1] if argv else None,
+    )
+    asserts.true(
+        env,
+        "--no-embed-source-text" in argv,
+        "AOT FlutterKernelCompile must pass --no-embed-source-text, got %r" % argv,
     )
     _assert_multi_root_and_package_config(env, argv)
     return analysistest.end(env)

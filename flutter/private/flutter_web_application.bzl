@@ -20,7 +20,7 @@ so we skip the frontend_server kernel compilation step used by desktop/mobile.
 """
 
 load("@rules_dart//dart:providers.bzl", "DartInfo")
-load("@rules_dart//dart:utils.bzl", "collect_packages", "collect_transitive_srcs", "dart_analyzable_info_with_package", "derive_lib_root", "generate_dev_package_config")
+load("@rules_dart//dart:utils.bzl", "MODULAR_KERNEL_ATTRS", "MODULAR_KERNEL_TOOLCHAINS", "collect_packages", "collect_transitive_srcs", "dart_analyzable_info_with_package", "derive_lib_root", "generate_dev_package_config")
 load("//flutter:providers.bzl", "FlutterInfo", "FlutterNativeLibraryInfo")
 load(
     "//flutter/private:app_entrypoint.bzl",
@@ -54,6 +54,13 @@ load(
 )
 load("//flutter/private:flutter_compile.bzl", "flutter_kernel_compile_action")
 load("//flutter/private:flutter_info.bzl", "dedup_plugins")
+load(
+    "//flutter/private:flutter_kernel_module.bzl",
+    "compile_flutter_modular_web_kernel",
+    "flutter_kernel_module_aspect",
+    "flutter_modular_test_tools",
+)
+load("//flutter/private:flutter_library.bzl", "aggregate_pub_contributions")
 load(
     "//flutter/private:flutter_web_compile.bzl",
     "flutter_dart2js_action",
@@ -531,10 +538,40 @@ def _flutter_web_bundle_impl(ctx):
     # Icon tree shaking: compile a kernel .dill for const_finder analysis.
     # Web targets don't otherwise need a kernel (they use dart2wasm/dart2js),
     # so we compile one specifically for const_finder to analyze IconData constants.
+    fonts, _ = aggregate_pub_contributions(ctx.attr.deps)
     kernel_dill = None
     if (ctx.attr.tree_shake_icons and not is_debug and
+        (bool(fonts) or bool(ctx.attr.enable_experiments)) and
         flutter_sdk_info.const_finder != None and flutter_sdk_info.font_subset != None):
         kernel_dill = ctx.actions.declare_file(ctx.label.name + "_icon_tree_shaking.dill")
+        entrypoint_uri = app_main_package_uri(
+            ctx.attr.package_name,
+            lib_root,
+            ctx.file.main.short_path,
+        )
+        from_dill = None
+        if (not ctx.attr.enable_experiments and
+            not user_defines and
+            entrypoint_uri != None and
+            flutter_sdk_info.platform_kernel_dill_product != None):
+            own_files = [ctx.file.main] + [f for f in ctx.files.srcs if f != ctx.file.main]
+            modular_tools = flutter_modular_test_tools(
+                ctx,
+                flutter_sdk_info,
+                own_files,
+                packages,
+                [],
+            )
+            if modular_tools != None:
+                from_dill = ctx.actions.declare_file(ctx.label.name + "_icon_tree_shaking.modular.dill")
+                compile_flutter_modular_web_kernel(
+                    ctx,
+                    flutter_sdk_info,
+                    modular_tools,
+                    lib_root,
+                    packages,
+                    from_dill,
+                )
 
         # When the app is a Dart package, key the entrypoint by its `package:`
         # URI so the compile reads `main.dart` from the colocated package and
@@ -549,11 +586,7 @@ def _flutter_web_bundle_impl(ctx):
             frontend_server = flutter_sdk_info.frontend_server,
             platform_dill = flutter_sdk_info.platform_kernel_dill_product,
             main = ctx.file.main,
-            entrypoint_uri = app_main_package_uri(
-                ctx.attr.package_name,
-                lib_root,
-                ctx.file.main.short_path,
-            ),
+            entrypoint_uri = entrypoint_uri,
             srcs = all_srcs,
             package_config = config_file,
             output = kernel_dill,
@@ -568,6 +601,7 @@ def _flutter_web_bundle_impl(ctx):
             # would die here — in an icon-shaking step the user never asked
             # for — while both real compilers accepted it.
             extra_flags = web_experiment_flags(ctx.attr.enable_experiments),
+            from_dill = from_dill,
         )
 
     flutter_assets = declare_flutter_assets_dir(ctx)
@@ -1191,8 +1225,9 @@ _WEB_APPLICATION_ATTRS = KERNEL_COMPILE_ATTRS | {
 _WEB_APPLICATION_ATTRS["deps"] = attr.label_list(
     doc = FLUTTER_DEPS_DOC,
     providers = [DartInfo],
-    aspects = [flutter_web_shader_aspect],
+    aspects = [flutter_web_shader_aspect, flutter_kernel_module_aspect],
 )
+_WEB_APPLICATION_ATTRS.update(MODULAR_KERNEL_ATTRS)
 
 # Reaches the analysis closure only — see `analyzable_info` in the impl. No
 # BUILD file names it and no compile action's inputs change.
@@ -1513,7 +1548,6 @@ build knows which served file is a native module.
     toolchains = [
         "@rules_flutter//flutter:toolchain_type",
         config_common.toolchain_type("@rules_flutter//flutter/private:product_tools_toolchain_type", mandatory = False),
-        config_common.toolchain_type("@rules_dart//dart:exec_tools_toolchain_type", mandatory = False),
-    ] + COPY_TO_DIRECTORY_TOOLCHAINS,
+    ] + COPY_TO_DIRECTORY_TOOLCHAINS + MODULAR_KERNEL_TOOLCHAINS,
     doc = "Builds a Flutter web application (WASM or JS) with all deployment artifacts.",
 )
