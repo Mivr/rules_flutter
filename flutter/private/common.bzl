@@ -7,7 +7,7 @@ flutter_application, flutter_android_bundle, and flutter_ios_application.
 
 load("@bazel_skylib//rules:common_settings.bzl", "BuildSettingInfo")
 load("@rules_dart//dart:providers.bzl", "DartInfo")
-load("@rules_dart//dart:utils.bzl", "collect_packages", "collect_transitive_srcs", "derive_lib_root", "generate_dev_package_config")
+load("@rules_dart//dart:utils.bzl", "collect_packages", "collect_transitive_srcs", "derive_lib_root", "generate_dev_package_config", _DART_COPY_TO_DIRECTORY_TOOLCHAINS = "COPY_TO_DIRECTORY_TOOLCHAINS")
 load("//flutter:providers.bzl", "FlutterCompiledShadersInfo", "FlutterInfo", "FlutterNativeLibraryInfo", "FlutterSdkInfo", _resolve_flutter_sdk_info = "resolve_flutter_sdk_info")
 load("//flutter/private:app_entrypoint.bzl", "APP_SCHEME", "app_main_location", "app_scheme_location", "app_scheme_sources", "compile_package_config", "resolve_kernel_entrypoint", "synthesize_app_package", "with_root")
 load("//flutter/private:flutter_asset_bundle.bzl", "flutter_asset_bundle_action")
@@ -20,6 +20,17 @@ load("//flutter/private:plugin_registrant.bzl", "generate_dart_plugin_registrant
 load("//flutter/private:validation.bzl", "validate_dart_defines")
 
 resolve_flutter_sdk_info = _resolve_flutter_sdk_info
+
+# rules_dart 0.7.2 exports COPY_TO_DIRECTORY_TOOLCHAINS as a plain string
+# ("@bazel_lib//lib:copy_to_directory_toolchain_type"), which Bazel resolves in
+# the calling repository's repo mapping rather than rules_dart's. Canonicalize
+# any "@bazel_lib//" string to "@@bazel_lib+//" so rules_flutter does not need
+# its own bazel_dep on bazel_lib when building against rules_dart 0.7.2, while
+# rules_dart 0.8.0+ passes Label("//dart:copy_toolchain_type") through untouched.
+COPY_TO_DIRECTORY_TOOLCHAINS = [
+    "@@bazel_lib+" + t[len("@bazel_lib"):] if type(t) == "string" and t.startswith("@bazel_lib//") else t
+    for t in _DART_COPY_TO_DIRECTORY_TOOLCHAINS
+]
 
 def make_web_wrapper_main_content(original_import, registrant_import = None):
     """Generate a web wrapper main.dart that uses ui_web.bootstrapEngine().

@@ -40,11 +40,6 @@ bazel_dep(name = "rules_dart", version = "0.7.2")
 bazel_dep(name = "rules_python", version = "2.4.0")
 bazel_dep(name = "yaml.bzl", version = "0.1.2")
 
-# Provides the copy_to_directory toolchain that rules_dart's source-set
-# co-location (colocate_packages) uses to assemble a package's hand-written +
-# generated files into one directory for the kernel compile.
-bazel_dep(name = "bazel_lib", version = "3.7.2")
-
 bazel_dep(name = "rules_multitool", version = "1.11.1", dev_dependency = True)
 bazel_dep(name = "buildifier_prebuilt", version = "10.1.0", dev_dependency = True)
 bazel_dep(name = "bazelrc-preset.bzl", version = "1.9.2", dev_dependency = True)

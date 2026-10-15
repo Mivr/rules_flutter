@@ -3,8 +3,7 @@
 This is the base compilation step shared by all Flutter platform targets.
 """
 
-load("@rules_dart//dart:utils.bzl", "COPY_TO_DIRECTORY_TOOLCHAINS")
-load("//flutter/private:common.bzl", "AGENT_EXTENSIONS_ATTR", "KERNEL_COMPILE_ATTRS", "flutter_compile_kernel", "resolve_flutter_sdk_info")
+load("//flutter/private:common.bzl", "AGENT_EXTENSIONS_ATTR", "COPY_TO_DIRECTORY_TOOLCHAINS", "KERNEL_COMPILE_ATTRS", "flutter_compile_kernel", "resolve_flutter_sdk_info")
 
 def _flutter_kernel_target_impl(ctx):
     flutter_sdk_info = resolve_flutter_sdk_info(ctx)

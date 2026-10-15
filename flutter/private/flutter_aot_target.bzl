@@ -7,8 +7,7 @@ flutter_application.bzl). Supports macOS/iOS (Mach-O .dylib) and other
 platforms (ELF .so).
 """
 
-load("@rules_dart//dart:utils.bzl", "COPY_TO_DIRECTORY_TOOLCHAINS")
-load("//flutter/private:common.bzl", "FLUTTER_APPLICATION_ATTRS", "KERNEL_COMPILE_ATTRS", "PLATFORM_CONSTRAINT_ATTRS", "flutter_compile_kernel", "resolve_flutter_sdk_info")
+load("//flutter/private:common.bzl", "COPY_TO_DIRECTORY_TOOLCHAINS", "FLUTTER_APPLICATION_ATTRS", "KERNEL_COMPILE_ATTRS", "PLATFORM_CONSTRAINT_ATTRS", "flutter_compile_kernel", "resolve_flutter_sdk_info")
 load("//flutter/private:flutter_aot_compile.bzl", "flutter_aot_elf_action", "flutter_aot_macho_action")
 
 def _flutter_aot_target_impl(ctx):
