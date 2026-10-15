@@ -48,6 +48,7 @@ load(
     "make_web_wrapper_main_content",
     "merge_dart_defines",
     "resolve_dev_generated_sources",
+    "resolve_exec_dart",
     "resolve_flutter_sdk_info",
     "shader_sources",
 )
@@ -432,6 +433,7 @@ def _flutter_web_bundle_impl(ctx):
     # flutter.js does the registering: it waits for the new worker to activate
     # (with a timeout) before booting the app, and — given only a version — it
     # registers nothing unless the visitor already has a worker to replace.
+    exec_dart = resolve_exec_dart(ctx, flutter_sdk_info)
     load_args = service_worker_load_args(ctx.attr.pwa)
     if ctx.attr.compiler == "dart2wasm":
         # Primary: dart2wasm. Outputs are declared under a subdirectory with
@@ -445,7 +447,7 @@ def _flutter_web_bundle_impl(ctx):
             output_wasm_map = ctx.actions.declare_file(ctx.label.name + "_wasm/main.dart.wasm.map")
         flutter_dart2wasm_action(
             ctx = ctx,
-            dart = flutter_sdk_info.dart,
+            dart = exec_dart,
             flutter_sdk_files = flutter_sdk_info.dart2wasm_files,
             dart2wasm_platform_dill = ctx.file._dart2wasm_platform_dill,
             main_dart = entrypoint,
@@ -467,7 +469,7 @@ def _flutter_web_bundle_impl(ctx):
         output_js_fallback_dir = ctx.actions.declare_directory(ctx.label.name + "_dart2js_fallback")
         flutter_dart2js_action(
             ctx = ctx,
-            dart = flutter_sdk_info.dart,
+            dart = exec_dart,
             flutter_sdk_files = flutter_sdk_info.dart2js_files,
             web_sdk_files = dart2js_web_sdk_files,
             dart2js_platform_dill = ctx.file._dart2js_platform_dill,
@@ -501,7 +503,7 @@ def _flutter_web_bundle_impl(ctx):
         output_js_dir = ctx.actions.declare_directory(ctx.label.name + "_dart2js")
         flutter_dart2js_action(
             ctx = ctx,
-            dart = flutter_sdk_info.dart,
+            dart = exec_dart,
             flutter_sdk_files = flutter_sdk_info.dart2js_files,
             web_sdk_files = dart2js_web_sdk_files,
             dart2js_platform_dill = ctx.file._dart2js_platform_dill,
@@ -1511,6 +1513,7 @@ build knows which served file is a native module.
     toolchains = [
         "@rules_flutter//flutter:toolchain_type",
         config_common.toolchain_type("@rules_flutter//flutter/private:product_tools_toolchain_type", mandatory = False),
+        config_common.toolchain_type("@rules_dart//dart:exec_tools_toolchain_type", mandatory = False),
     ] + COPY_TO_DIRECTORY_TOOLCHAINS,
     doc = "Builds a Flutter web application (WASM or JS) with all deployment artifacts.",
 )

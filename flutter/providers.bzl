@@ -20,7 +20,8 @@ declare `toolchains = ["@rules_flutter//flutter:toolchain_type"] + FLUTTER_OPTIO
     fields = {
         "version": "str: The Flutter SDK version string (e.g. `3.41.2`).",
         "engine_revision": "str: The engine commit hash.",
-        "dart": "File: The `dart` executable from the Flutter-bundled Dart SDK.",
+        "dart": "File: Deprecated. The `dart` executable from the Flutter-bundled Dart SDK. " +
+                "Prefer `@rules_dart//dart:exec_tools_toolchain_type` (`resolve_exec_dart(ctx)`).",
         "dartaotruntime": "File: The `dartaotruntime` executable for running AOT snapshots.",
         "gen_snapshot": "File or None: The `gen_snapshot` AOT compiler binary (resolved via `@rules_flutter//flutter:aot_toolchain_type` and `resolve_flutter_sdk_info`).",
         "flutter_tester": "File or None: The `flutter_tester` binary — a headless Flutter engine " +
@@ -59,6 +60,8 @@ FLUTTER_OPTIONAL_TOOLCHAINS = [
     config_common.toolchain_type("@rules_flutter//flutter/private:desktop_engine_toolchain_type", mandatory = False),
     config_common.toolchain_type("@rules_flutter//flutter/private:material_icons_toolchain_type", mandatory = False),
 ]
+
+_DART_EXEC_TOOLS_TOOLCHAIN_TYPE = "@rules_dart//dart:exec_tools_toolchain_type"
 
 def _lookup_sub_toolchain(ctx, private_type, public_type):
     if private_type in ctx.toolchains:
@@ -121,6 +124,28 @@ def resolve_flutter_sdk_info(ctx):
         fields["material_icons_font"] = getattr(material_tc, "material_icons_font", None)
 
     return FlutterSdkInfo(**fields)
+
+def resolve_exec_dart(ctx, flutter_sdk_info = None):
+    """Resolves the host `dart` executable from `@rules_dart//dart:exec_tools_toolchain_type`.
+
+    Falls back to `flutter_sdk_info.dart` when the Dart exec-tools toolchain is
+    not declared or not resolved (for example in unit tests with synthetic
+    toolchains).
+
+    Args:
+      ctx: Rule context.
+      flutter_sdk_info: Optional pre-resolved `FlutterSdkInfo` for the fallback path.
+
+    Returns:
+      The `dart` executable `File`.
+    """
+    if _DART_EXEC_TOOLS_TOOLCHAIN_TYPE in ctx.toolchains:
+        dart_tc = ctx.toolchains[_DART_EXEC_TOOLS_TOOLCHAIN_TYPE]
+        if dart_tc and getattr(dart_tc, "dart_sdk_info", None) and dart_tc.dart_sdk_info.dart:
+            return dart_tc.dart_sdk_info.dart
+    if flutter_sdk_info == None:
+        flutter_sdk_info = resolve_flutter_sdk_info(ctx)
+    return flutter_sdk_info.dart
 
 FlutterInfo = provider(
     doc = """The channels a Flutter library contributes to its consumers.

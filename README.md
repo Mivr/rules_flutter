@@ -1281,7 +1281,7 @@ sdk = resolve_flutter_sdk_info(ctx)
 |---|---|---|
 | `version` | `str` | The Flutter SDK version, for example `"3.47.6"`. |
 | `engine_revision` | `str` | The engine commit hash. |
-| `dart` | `File` | The `dart` executable from the bundled Dart SDK. |
+| `dart` | `File` | Deprecated. The `dart` executable from the bundled Dart SDK; prefer `@rules_dart//dart:exec_tools_toolchain_type`. |
 | `dartaotruntime` | `File` | The runtime for AOT snapshots. |
 | `gen_snapshot` | `File` or `None` | The AOT compiler (resolved via `@rules_flutter//flutter:aot_toolchain_type`). |
 | `frontend_server` | `File` | `frontend_server_aot.dart.snapshot`, for kernel compilation. |
@@ -1289,7 +1289,7 @@ sdk = resolve_flutter_sdk_info(ctx)
 | `platform_kernel_dill_product` | `File` or `None` | `platform_strong_product.dill`, the release platform kernel (resolved via `@rules_flutter//flutter:product_tools_toolchain_type`). |
 | `patched_sdk` | `Target` | The Flutter-patched Dart SDK root. |
 | `icu_data` | `File` | `icudtl.dat`. |
-| `tool_files` | `depset[File]` | Everything needed to run the build tools, for action inputs. |
+| `tool_files` | `depset[File]` | Deprecated. All files in the bundled Dart SDK and patched SDK; prefer `@rules_dart//dart:exec_tools_toolchain_type` or the action-specific `dart_*_files` sets. |
 | `dart_vm_files` | `depset[File]` | Minimal Dart SDK files needed to run the `dart` VM on a snapshot (`bin/dart`, `bin/dartvm`). |
 | `dart_pub_files` | `depset[File]` | Minimal Dart SDK files needed for `dart pub` (`bin/dart`, `bin/dartaotruntime`, `bin/snapshots/dartdev_aot.dart.snapshot`, `version`). |
 | `dart2wasm_files` | `depset[File]` | Minimal Dart SDK files needed for `dart compile wasm` (`bin/dart`, `bin/dartaotruntime`, `bin/snapshots/dart2wasm_product.snapshot`, `bin/wasm-opt`). |

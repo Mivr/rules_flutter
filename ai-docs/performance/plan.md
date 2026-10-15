@@ -14,7 +14,7 @@ before/after numbers from the benchmark (item 0.2).
 
 ## Phase 1: Flutter-only work (no overlap with rules_dart)
 
-Landed: H0 (`d36f9e7`), T1 (`7ba01b7`), 1.2 (`280bfb9`), 1.3 (`14e5844`), 1.1 (`aa6944e`), D1 (`ea4da34`), D2 (`6e742d6`).
+Landed: H0 (`d36f9e7`), T1 (`7ba01b7`), 1.2 (`280bfb9`), 1.3 (`14e5844`), 1.1 (`aa6944e`), D1 (`ea4da34`), D2 (`6e742d6`), T2.
 
 Order: H0 and T1 first (H0 is small; T1 changes who owns the SDK-input work), then 1.2, 1.1, D1/D2, T2, 1.3, 1.4. Nothing lands before the 0.2 baseline is recorded.
 
@@ -23,7 +23,7 @@ Order: H0 and T1 first (H0 is small; T1 changes who owns the SDK-input work), th
 | H0  | **Hermetic downloads.** Every repository download, whether SDK, engine artifact or pub package, is pinned by sha256, and a missing checksum fails the fetch. Today `flutter/repositories.bzl` reads `checksums.get(path, "")`, so an artifact missing from `ARTIFACT_CHECKSUMS` downloads unverified; the Android engine and Android `gen_snapshot` artifacts are missing for every version. Fill the table (extend `tools/update_flutter_version`) and make the lookups strict. `flutter.pub` hosted packages need `sha256` in the lock. | Landed (`d36f9e7`) |
 | T1  | **One Dart SDK: registration.** The engine repository declares a rules_dart `dart_toolchain` over its `dart-sdk/`, using the 0.7.2 attributes only. Its version is read from `dart-sdk/version`, and it has cross variants mirroring rules_dart's. `@flutter_toolchains` registers them for `@rules_dart//dart:toolchain_type` and `:exec_tools_toolchain_type`, mirroring rules_dart's registration matrix (host, exec tools, desktop cross). Verify with `--toolchain_resolution_debug` that Flutter's wins, and on a fresh output base that `rules_dart++dart+dart_*` is never fetched. | Landed (`7ba01b7`) |
 | T1b | **One Dart SDK: trimmed file sets.** Declare the engine repo's Dart toolchain with rules_dart's SDK macro (`compile_files`, `runtime_files`, `analyze_files`). Without them a rules_dart newer than 0.7.2 gives Flutter workspaces the whole SDK for every Dart action. Lands with the rules_dart bump. | T1; ask E (rules_dart #18); ask D |
-| T2  | **One Dart SDK: use it.** Flutter's build-step scripts and tools take `dart` from rules_dart's exec-tools toolchain instead of `FlutterSdkInfo.dart`/`tool_files`, and `flutter_sdk_binary` likewise. `FlutterSdkInfo.dart`/`tool_files` are deprecated (they are public API). `dartaotruntime`, `frontend_server` and the platform dills stay engine-sourced (`decisions.md`). | T1; best after 1.2 |
+| T2  | **One Dart SDK: use it.** Flutter's build-step scripts and tools take `dart` from rules_dart's exec-tools toolchain instead of `FlutterSdkInfo.dart`/`tool_files`, and `flutter_sdk_binary` likewise. `FlutterSdkInfo.dart`/`tool_files` are deprecated (they are public API). `dartaotruntime`, `frontend_server` and the platform dills stay engine-sourced (`decisions.md`). | Landed |
 | 1.1 | **Engine inputs and test runfiles.** Each Flutter action takes only the engine files it opens. `flutter_test` runfiles carry `flutter_tester`, ICU, the kernel and the assets, not the SDK. With T, the Dart part comes from `DartSdkInfo.compile_files`/`runtime_files` once the pin allows (ask E). The kernel compile needs only the engine `dartaotruntime`, frontend_server and platform dill. | Landed (`aa6944e`) |
 | 1.2 | **Compiled build-step tools.** `kernel_filter`, `compile_shader`, `generate_asset_manifest`, `bundle_app`, the mergers and `web_template` become exec-configured `dart_binary` (`compile_mode = "exe"`), as `flutter_test_runner` already is. First find out why they were deliberately left as scripts.                                                                                                         | Landed (`280bfb9`) |
 | 1.3 | **SDK and package shaders once per platform.** Compile shaders where they are declared, through an aspect keyed by the target platform, instead of under every consuming test's or app's output path.                                                                                                                                                                                                         | Landed (`14e5844`) |
@@ -33,12 +33,14 @@ Order: H0 and T1 first (H0 is small; T1 changes who owns the SDK-input work), th
 
 ## Phase 2: adopt rules_dart's mechanisms once they land
 
+Landed: 2.4 (`4d86a32`).
+
 | #   | Item                                                                                                                                                                                                                                                 | Depends on                   |
 | --- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------- |
 | 2.1 | **Modular compilation for `flutter_test`** (debug apps later). Per-library modules compiled with `--target flutter` against `flutter_patched_sdk/vm_outline_strong.dill`; the test compiles an entry module and links. Removes the per-test recompile of `package:flutter`. Release and profile stay whole-program. | Ask A; rules_dart plan #16   |
 | 2.2 | **Stable source URIs in `FlutterKernelCompile`**, so outputs are byte-identical across machines and downstream actions hit a shared remote cache.                                                                                                       | Ask C (agreed: `org-dartlang-app`, rules_dart's path rule) |
 | 2.3 | **Analyzer summaries for Flutter targets.**                                                                                                                                                                                                          | Ask B; rules_dart plan #17   |
-| 2.4 | **Drop rules_flutter's `bazel_lib` dependency** once rules_dart no longer needs `copy_to_directory`.                                                                                                                                                  | Ask H; rules_dart plan #11   |
+| 2.4 | **Drop rules_flutter's `bazel_lib` dependency** once rules_dart no longer needs `copy_to_directory`.                                                                                                                                                  | Landed (`4d86a32`)           |
 
 ## Housekeeping
 

@@ -1,7 +1,7 @@
 """Unit tests for engine helpers and provider definitions."""
 
 load("@bazel_skylib//lib:unittest.bzl", "asserts", "unittest")
-load("//flutter:providers.bzl", "FlutterSdkInfo", "resolve_flutter_sdk_info")
+load("//flutter:providers.bzl", "FlutterSdkInfo", "resolve_exec_dart", "resolve_flutter_sdk_info")
 load("//flutter/private:engine_helpers.bzl", "dart_binary_name", "dartaotruntime_binary_name", "engine_arch_for_os", "platform_to_arch", "platform_to_os")
 
 def _provider_exists_test_impl(ctx):
@@ -80,6 +80,63 @@ def _resolve_flutter_sdk_info_test_impl(ctx):
     asserts.equals(env, "MaterialIcons-Regular.otf", merged.material_icons_font)
     return unittest.end(env)
 
+def _resolve_exec_dart_test_impl(ctx):
+    env = unittest.begin(ctx)
+    raw = FlutterSdkInfo(
+        version = "3.41.2",
+        engine_revision = "abc123",
+        dart = "flutter_dart_bin",
+        dartaotruntime = "dartaotruntime_bin",
+        gen_snapshot = None,
+        flutter_tester = None,
+        frontend_server = "frontend_server_snap",
+        platform_kernel_dill = "platform_strong.dill",
+        platform_kernel_dill_product = None,
+        patched_sdk = "patched_sdk_target",
+        icu_data = "icudtl.dat",
+        tool_files = depset([]),
+        dart_vm_files = depset([]),
+        dart_pub_files = depset([]),
+        dart2wasm_files = depset([]),
+        dart2js_files = depset([]),
+        engine_library = None,
+        const_finder = None,
+        font_subset = None,
+        impellerc = None,
+        shader_lib = [],
+        material_icons_font = None,
+        vm_isolate_snapshot = None,
+        isolate_snapshot = None,
+        target_os = "linux",
+        target_arch = "x64",
+        linux_sysroot = None,
+    )
+    with_exec_tc = struct(
+        toolchains = {
+            "@rules_flutter//flutter:toolchain_type": struct(flutter_sdk_info = raw),
+            "@rules_dart//dart:exec_tools_toolchain_type": struct(
+                dart_sdk_info = struct(dart = "exec_dart_bin"),
+            ),
+        },
+    )
+    asserts.equals(env, "exec_dart_bin", resolve_exec_dart(with_exec_tc, raw))
+
+    with_none_exec_tc = struct(
+        toolchains = {
+            "@rules_flutter//flutter:toolchain_type": struct(flutter_sdk_info = raw),
+            "@rules_dart//dart:exec_tools_toolchain_type": None,
+        },
+    )
+    asserts.equals(env, "flutter_dart_bin", resolve_exec_dart(with_none_exec_tc, raw))
+
+    without_exec_tc = struct(
+        toolchains = {
+            "@rules_flutter//flutter:toolchain_type": struct(flutter_sdk_info = raw),
+        },
+    )
+    asserts.equals(env, "flutter_dart_bin", resolve_exec_dart(without_exec_tc))
+    return unittest.end(env)
+
 def _dart_binary_name_test_impl(ctx):
     env = unittest.begin(ctx)
     asserts.equals(env, "dart", dart_binary_name("darwin-arm64"))
@@ -117,6 +174,7 @@ _t1_test = unittest.make(_dart_binary_name_test_impl)
 _t2_test = unittest.make(_platform_mapping_test_impl)
 _t3_test = unittest.make(_engine_arch_for_os_test_impl)
 _t4_test = unittest.make(_resolve_flutter_sdk_info_test_impl)
+_t5_test = unittest.make(_resolve_exec_dart_test_impl)
 
 def toolchain_test_suite(name):
-    unittest.suite(name, _t0_test, _t1_test, _t2_test, _t3_test, _t4_test)
+    unittest.suite(name, _t0_test, _t1_test, _t2_test, _t3_test, _t4_test, _t5_test)

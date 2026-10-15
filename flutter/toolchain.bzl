@@ -4,10 +4,12 @@ load(
     "//flutter:providers.bzl",
     "FlutterSdkInfo",
     _FLUTTER_OPTIONAL_TOOLCHAINS = "FLUTTER_OPTIONAL_TOOLCHAINS",
+    _resolve_exec_dart = "resolve_exec_dart",
     _resolve_flutter_sdk_info = "resolve_flutter_sdk_info",
 )
 
 FLUTTER_OPTIONAL_TOOLCHAINS = _FLUTTER_OPTIONAL_TOOLCHAINS
+resolve_exec_dart = _resolve_exec_dart
 resolve_flutter_sdk_info = _resolve_flutter_sdk_info
 
 def _flutter_toolchain_impl(ctx):

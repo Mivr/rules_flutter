@@ -8,7 +8,7 @@ flutter_application, flutter_android_bundle, and flutter_ios_application.
 load("@bazel_skylib//rules:common_settings.bzl", "BuildSettingInfo")
 load("@rules_dart//dart:providers.bzl", "DartInfo")
 load("@rules_dart//dart:utils.bzl", "collect_packages", "collect_transitive_srcs", "derive_lib_root", "generate_dev_package_config", _DART_COPY_TO_DIRECTORY_TOOLCHAINS = "COPY_TO_DIRECTORY_TOOLCHAINS")
-load("//flutter:providers.bzl", "FlutterCompiledShadersInfo", "FlutterInfo", "FlutterNativeLibraryInfo", "FlutterSdkInfo", _resolve_flutter_sdk_info = "resolve_flutter_sdk_info")
+load("//flutter:providers.bzl", "FlutterCompiledShadersInfo", "FlutterInfo", "FlutterNativeLibraryInfo", "FlutterSdkInfo", _resolve_exec_dart = "resolve_exec_dart", _resolve_flutter_sdk_info = "resolve_flutter_sdk_info")
 load("//flutter/private:app_entrypoint.bzl", "APP_SCHEME", "app_main_location", "app_scheme_location", "app_scheme_sources", "compile_package_config", "resolve_kernel_entrypoint", "synthesize_app_package", "with_root")
 load("//flutter/private:flutter_asset_bundle.bzl", "flutter_asset_bundle_action")
 load("//flutter/private:flutter_compile.bzl", "flutter_kernel_compile_action")
@@ -19,6 +19,7 @@ load("//flutter/private:native_sources.bzl", "native_sources_aspect")
 load("//flutter/private:plugin_registrant.bzl", "generate_dart_plugin_registrant", "generate_dev_plugin_registrants")
 load("//flutter/private:validation.bzl", "validate_dart_defines")
 
+resolve_exec_dart = _resolve_exec_dart
 resolve_flutter_sdk_info = _resolve_flutter_sdk_info
 
 # rules_dart 0.7.2 exports COPY_TO_DIRECTORY_TOOLCHAINS as a plain string
@@ -744,7 +745,7 @@ def flutter_build_assets(ctx, flutter_sdk_info, output_dir, compiled_shaders = {
 
     return flutter_asset_bundle_action(
         ctx = ctx,
-        dart = flutter_sdk_info.dart if tree_shake_icons else None,
+        dart = resolve_exec_dart(ctx, flutter_sdk_info) if tree_shake_icons else None,
         flutter_sdk_files = flutter_sdk_info.dart_vm_files if tree_shake_icons else None,
         assets = all_assets,
         fonts = fonts,
