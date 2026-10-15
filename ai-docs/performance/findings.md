@@ -374,3 +374,48 @@ What it costs and what remains:
   `rules_dart`'s standalone SDK is not fetched). Bazel's repository cache is
   content-addressed by sha256, so the shared Dart SDK archive is downloaded at
   most once over the network but extracted twice on disk (plan D1/D2).
+
+## Trimmed SDK action inputs and test runfiles (plan 1.1, `aa6944e`)
+
+Each Flutter action now declares only the host SDK / engine files it actually
+opens (`dart_vm_files`, `dart_pub_files`, `dart2wasm_files`, `dart2js_files`),
+and `flutter_test` drops `flutter_sdk_info.tool_files` from its runfiles.
+Verified in a hardlinked non-symlinked sandbox (`hermetic_replay.py`, where
+`readlink("/proc/self/exe")` cannot escape into the full external repository).
+
+| Metric | Before (`1.3`) | After (`1.1`, `aa6944e`) |
+| --- | --- | --- |
+| `flutter_test` runfiles (`//:impeller_shader_test`) | 1,055 files / 772.1 MiB | **6 files / 121.6 MiB** (-1,049 files, -650.5 MiB) |
+| `FlutterAotElf` / `FlutterAotMacho` SDK inputs | 1,050 files (`tool_files`) | **0 files** (`gen_snapshot` only) |
+| `FlutterAssetBundle` SDK inputs (debug / test) | 1,050 files (`tool_files`) | **0 files** (`inputs=3` total in `hello_world`) |
+| `FlutterAssetBundle` SDK inputs (`-c opt` icon tree-shaking) | 1,050 files (`tool_files`) | **4 files** (`dart` + 3 `dart_vm_files`) |
+| `FlutterDart2Wasm` SDK + web inputs | 2,645 files (`tool_files` + `web_sdk`) | **12 files** (11 `dart2wasm_files` + `dart2wasm_platform.dill`) |
+| `FlutterDart2JS` SDK + web inputs | 2,645 files (`tool_files` + `web_sdk`) | **520 files** (8 `dart2js_files` + `dart2js_platform.dill` + 511 `web-sdk/lib/**`) |
+| `@flutter_web_sdk//:web_sdk` filegroup | 1,595 files (754.4 MiB) | **542 files (44.0 MiB)** |
+| `@rules_flutter//flutter:pub` SDK runfiles | 1,050 files (`tool_files`) | **4 files** (`dart_pub_files`) |
+
+## Single Dart SDK extraction and lazy artifact repositories (plans D1 & D2, `ea4da34`, `6e742d6`)
+
+- **D1 (`ea4da34`):** `@flutter_web_sdk` no longer downloads or extracts a
+  second copy of the host Dart SDK (`dart-sdk/`). Instead, it rewrites the
+  relative `"../dart-sdk/` include in `web-sdk/libraries.json` to reference the
+  sibling host engine repository's `dart-sdk/` directory under `external/`, and
+  aliases the DDC runtime helpers and `dart-sdk/lib/libraries.json` from the
+  host repository. Every workspace now extracts `dart-sdk/bin/dart` at most
+  **once** (`find <output_base>/external -path '*dart-sdk/bin/*' -name dart` = 1).
+- **D2 (`6e742d6`):** Mode-specific and feature-specific Flutter archives
+  (`flutter_patched_sdk_product.zip`, `material_fonts.zip`, `font-subset.zip`,
+  darwin release `artifacts.zip`, and desktop engines/sysroots) now live in
+  dedicated lazy repositories backed by optional sub-toolchains
+  (`product_tools_toolchain_type`, `aot_toolchain_type`,
+  `desktop_engine_toolchain_type`, `material_icons_toolchain_type`) gated by
+  compilation mode and merged via `resolve_flutter_sdk_info(ctx)`.
+
+Measured on a fresh `--output_base` and fresh `--repository_cache` on `linux-x64`:
+
+| Build scenario | Network download (before -> after) | Extracted `external/` (before -> after) |
+| --- | --- | --- |
+| Single `flutter_test` (`//:hello_test`) | 584.9 MB -> **529.1 MB** (-55.8 MB) | 1,115.2 MB -> **841.9 MB** (-273.3 MB, -27.8%) |
+| Web bundle (`e2e/web_example //:app`) | 615.8 MB -> **566.5 MB** (-49.3 MB) | 1,891.5 MB -> **967.9 MB** (-923.7 MB, -50.1%) |
+| Linux debug bundle (`//:hello_world_linux`) | 584.4 MB -> **567.0 MB** (-17.4 MB) | 1,104.0 MB -> **1,057.1 MB** (-47.0 MB) |
+
