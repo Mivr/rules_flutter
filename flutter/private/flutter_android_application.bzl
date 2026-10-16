@@ -48,7 +48,10 @@ load("//flutter:providers.bzl", "FlutterApplicationInfo")
 load("//flutter/private:common.bzl", "ANDROID_ABIS", "android_elf_machine_for_abi", "android_platform_for_abi", "compute_android_jni_path")
 
 def _android_platform_transition_impl(_settings, attr):
-    return {"//command_line_option:platforms": [android_platform_for_abi(attr.android_abi)]}
+    return {
+        "//command_line_option:platforms": [android_platform_for_abi(attr.android_abi)],
+        "//command_line_option:dynamic_mode": "off",
+    }
 
 # Builds the bundle and everything behind it (the flutter_application, its
 # AOT compile, FFI cc deps, Native Assets) for the Android platform matching
@@ -56,11 +59,20 @@ def _android_platform_transition_impl(_settings, attr):
 # is always derived from it, so the jar's lib/<abi>/ layout and the code inside
 # it cannot disagree — including when android_binary's own split transition
 # (--android_platforms) already re-configured this target.
+# Also normalizes `dynamic_mode = "off"` to match android_binary's split
+# transition (`deps`), so reaching the bundle via `android_binary.assets`
+# (`dynamic_mode = "default"`) and `android_binary.deps` (`dynamic_mode = "off"`)
+# collapses to a single configuration instead of building the application twice.
 _android_platform_transition = transition(
     implementation = _android_platform_transition_impl,
     inputs = [],
-    outputs = ["//command_line_option:platforms"],
+    outputs = [
+        "//command_line_option:platforms",
+        "//command_line_option:dynamic_mode",
+    ],
 )
+
+android_platform_transition = _android_platform_transition
 
 # Shell function validating that a native library is an ELF shared object
 # with the expected e_machine (2 bytes little-endian at offset 18). Android's

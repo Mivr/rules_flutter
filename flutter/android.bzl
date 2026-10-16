@@ -538,6 +538,7 @@ def flutter_android_app(
     _flutter_android_registrant(
         name = "__%s_registrant_src" % name,
         application = application,
+        android_abi = _short_abi_to_full(android_abi),
         tags = tags,
     )
 

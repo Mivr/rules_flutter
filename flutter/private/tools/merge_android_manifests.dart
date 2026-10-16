@@ -61,7 +61,14 @@ class OverlayPermission {
   /// The `android:name` value, e.g. `android.permission.INTERNET`.
   final String name;
 
-  OverlayPermission(this.element, this.name);
+  /// Whether this element carries `tools:node="remove"`.
+  final bool isRemove;
+
+  OverlayPermission(this.element, this.name, {this.isRemove = false});
+
+  OverlayPermission withElement(String newElement) => newElement == element
+      ? this
+      : OverlayPermission(newElement, name, isRemove: isRemove);
 }
 
 Never _reject(String overlayPath, String detail) {
@@ -83,11 +90,11 @@ class _Scanner {
 
   bool get atEnd => pos >= text.length;
 
-  /// Consumes whitespace, comments, and (at position 0) the XML declaration.
+  /// Consumes whitespace, UTF-8 BOM, comments, and XML processing instructions.
   void skipInsignificant() {
     while (!atEnd) {
       final c = text[pos];
-      if (c == ' ' || c == '\t' || c == '\r' || c == '\n') {
+      if (c == ' ' || c == '\t' || c == '\r' || c == '\n' || c == '\uFEFF') {
         pos++;
       } else if (text.startsWith('<!--', pos)) {
         final end = text.indexOf('-->', pos + 4);
@@ -95,8 +102,8 @@ class _Scanner {
           throw const FormatException('unterminated comment');
         }
         pos = end + 3;
-      } else if (pos == 0 && text.startsWith('<?xml', pos)) {
-        final end = text.indexOf('?>', pos);
+      } else if (text.startsWith('<?', pos)) {
+        final end = text.indexOf('?>', pos + 2);
         if (end == -1) {
           throw const FormatException('unterminated XML declaration');
         }
@@ -251,22 +258,27 @@ List<OverlayPermission> parseOverlayPermissions(
         'and <uses-permission-sdk-23> may appear.',
       );
     }
-    if (attrs.length != 1 || !attrs.containsKey('android:name')) {
-      final extras = attrs.keys.where((k) => k != 'android:name');
-      if (extras.isNotEmpty) {
-        rejectAt(
-          '<$name> carries attribute "${extras.first}"; exactly one '
-          'android:name attribute is supported.',
-        );
-      }
+    if (!attrs.containsKey('android:name')) {
       rejectAt('<$name> is missing its android:name attribute.');
+    }
+    var isRemove = false;
+    for (final key in attrs.keys) {
+      if (key == 'android:name') continue;
+      if (key == 'tools:node' && attrs[key] == 'remove') {
+        isRemove = true;
+        continue;
+      }
+      rejectAt(
+        '<$name> carries attribute "$key"; exactly one '
+        'android:name attribute is supported.',
+      );
     }
     final value = attrs['android:name']!;
     checkNoPlaceholder(value, 'the android:name attribute');
     if (value.isEmpty) {
       rejectAt('<$name> has an empty android:name attribute.');
     }
-    permissions.add(OverlayPermission(name, value));
+    permissions.add(OverlayPermission(name, value, isRemove: isRemove));
     if (!selfClosing) {
       // Allow only an immediately-following matching close tag (with
       // insignificant content between) — permission elements have no body.
@@ -313,24 +325,112 @@ int _baseInsertionPoint(String baseXml, String basePath) {
   return scanner.pos;
 }
 
-/// The `android:name` values of every `<uses-permission>` /
-/// `<uses-permission-sdk-23>` the base already declares. Comments are
-/// excluded; the rest of the base is scanned leniently (we only need names,
-/// never a full parse).
-Set<String> _basePermissionNames(String baseXml) {
-  final withoutComments = baseXml.replaceAll(
-    RegExp(r'<!--.*?-->', dotAll: true),
-    '',
-  );
-  final names = <String>{};
-  final tag = RegExp(r'<uses-permission(?:-sdk-23)?[\s/>]([^>]*)>?');
-  final nameAttr = RegExp('android:name\\s*=\\s*["\']([^"\']*)["\']');
-  for (final match in tag.allMatches(withoutComments)) {
-    final attrText = match.group(1) ?? '';
-    final name = nameAttr.firstMatch(attrText)?.group(1);
-    if (name != null) names.add(name);
+class _BasePermission {
+  final String element;
+  final String name;
+  final int? maxSdkVersion;
+  final bool isRemove;
+  final int spanStart;
+  final int spanEnd;
+
+  _BasePermission({
+    required this.element,
+    required this.name,
+    required this.maxSdkVersion,
+    required this.isRemove,
+    required this.spanStart,
+    required this.spanEnd,
+  });
+}
+
+/// Scans root-level `<uses-permission>` and `<uses-permission-sdk-23>`
+/// declarations in [baseXml] starting at [insertAt] (just after the root
+/// `<manifest ...>` open tag).
+List<_BasePermission> _scanBasePermissions(String baseXml, int insertAt) {
+  final scanner = _Scanner(baseXml)..pos = insertAt;
+  final permissions = <_BasePermission>[];
+  var depth = 1;
+  while (depth > 0) {
+    scanner.skipInsignificant();
+    if (scanner.atEnd) break;
+    final text = scanner.text;
+    if (text[scanner.pos] != '<') {
+      final next = text.indexOf('<', scanner.pos);
+      scanner.pos = next == -1 ? text.length : next;
+      continue;
+    }
+    if (text.startsWith('<![CDATA[', scanner.pos)) {
+      final end = text.indexOf(']]>', scanner.pos);
+      scanner.pos = end == -1 ? text.length : end + 3;
+      continue;
+    }
+    if (text.startsWith('<?', scanner.pos) ||
+        text.startsWith('<!', scanner.pos)) {
+      final end = text.indexOf('>', scanner.pos);
+      scanner.pos = end == -1 ? text.length : end + 1;
+      continue;
+    }
+    final tagStart = scanner.pos;
+    final (name, attrs, selfClosing, isEnd) = scanner.readTag();
+    if (isEnd) {
+      depth--;
+      continue;
+    }
+    if (depth == 1 && _permissionElements.contains(name)) {
+      var tagEnd = scanner.pos;
+      if (!selfClosing) {
+        final afterOpen = scanner.pos;
+        scanner.skipInsignificant();
+        if (!scanner.atEnd &&
+            text[scanner.pos] == '<' &&
+            !text.startsWith('<!', scanner.pos) &&
+            !text.startsWith('<?', scanner.pos)) {
+          final (closeName, _, _, closeIsEnd) = scanner.readTag();
+          if (closeIsEnd && closeName == name) {
+            tagEnd = scanner.pos;
+          } else {
+            scanner.pos = afterOpen;
+            depth++;
+          }
+        } else {
+          scanner.pos = afterOpen;
+          depth++;
+        }
+      }
+      var lineStart = tagStart;
+      while (lineStart > insertAt &&
+          (text[lineStart - 1] == ' ' || text[lineStart - 1] == '\t')) {
+        lineStart--;
+      }
+      final atLineStart = lineStart > 0 && text[lineStart - 1] == '\n';
+      var lineEnd = tagEnd;
+      if (lineEnd < text.length && text[lineEnd] == '\r') lineEnd++;
+      final hasTrailingNewline = lineEnd < text.length && text[lineEnd] == '\n';
+      if (hasTrailingNewline) lineEnd++;
+      final spanStart = (atLineStart && hasTrailingNewline)
+          ? lineStart
+          : tagStart;
+      final spanEnd = (atLineStart && hasTrailingNewline) ? lineEnd : tagEnd;
+
+      final permName = attrs['android:name'];
+      if (permName != null && permName.isNotEmpty) {
+        final maxSdkStr = attrs['android:maxSdkVersion'];
+        permissions.add(
+          _BasePermission(
+            element: name,
+            name: permName,
+            maxSdkVersion: maxSdkStr == null ? null : int.tryParse(maxSdkStr),
+            isRemove: attrs['tools:node'] == 'remove',
+            spanStart: spanStart,
+            spanEnd: spanEnd,
+          ),
+        );
+      }
+    } else if (!selfClosing) {
+      depth++;
+    }
   }
-  return names;
+  return permissions;
 }
 
 /// A `<uses-permission>` taken from a library manifest, with the `android:*`
@@ -342,9 +442,21 @@ class LibraryPermission {
   /// The `android:*` attributes, `android:name` among them, in source order.
   final Map<String, String> attributes;
 
-  LibraryPermission(this.element, this.attributes);
+  /// Whether this element carries `tools:node="remove"`.
+  final bool isRemove;
+
+  LibraryPermission(this.element, this.attributes, {this.isRemove = false});
 
   String get name => attributes['android:name']!;
+
+  int? get maxSdkVersion {
+    final value = attributes['android:maxSdkVersion'];
+    return value == null ? null : int.tryParse(value);
+  }
+
+  LibraryPermission withElement(String newElement) => newElement == element
+      ? this
+      : LibraryPermission(newElement, attributes, isRemove: isRemove);
 
   String render() {
     final attrs = attributes.entries
@@ -397,7 +509,16 @@ List<LibraryPermission> parseLibraryPermissions(
     }
     if (depth == 1 && _permissionElements.contains(name)) {
       if (attrs['tools:node'] == 'remove') {
-        // A removal directive for the merger, not a declaration.
+        final permissionName = attrs['android:name'];
+        if (permissionName != null && permissionName.isNotEmpty) {
+          permissions.add(
+            LibraryPermission(
+              name,
+              {'android:name': permissionName},
+              isRemove: true,
+            ),
+          );
+        }
       } else {
         final kept = <String, String>{
           for (final e in attrs.entries)
@@ -434,6 +555,39 @@ List<LibraryPermission> parseLibraryPermissions(
   return permissions;
 }
 
+bool _isNarrowerMaxSdk(int? existingMaxSdk, int? incomingMaxSdk) {
+  if (existingMaxSdk == null) return false;
+  if (incomingMaxSdk == null) return true;
+  return existingMaxSdk < incomingMaxSdk;
+}
+
+bool _coversMaxSdk(int? existingMaxSdk, int? incomingMaxSdk) =>
+    !_isNarrowerMaxSdk(existingMaxSdk, incomingMaxSdk);
+
+String _broaderElement(String a, String b) =>
+    (a == 'uses-permission' || b == 'uses-permission')
+    ? 'uses-permission'
+    : 'uses-permission-sdk-23';
+
+String _removeSpans(String text, List<(int, int)> spans) {
+  if (spans.isEmpty) return text;
+  final sorted = [...spans]..sort((a, b) => a.$1.compareTo(b.$1));
+  final buffer = StringBuffer();
+  var cursor = 0;
+  for (final (start, end) in sorted) {
+    if (start > cursor) {
+      buffer.write(text.substring(cursor, start));
+    }
+    if (end > cursor) {
+      cursor = end;
+    }
+  }
+  if (cursor < text.length) {
+    buffer.write(text.substring(cursor));
+  }
+  return buffer.toString();
+}
+
 /// Merges [overlayXml]'s permissions into [baseXml], returning the merged
 /// manifest text. Throws [FormatException] when the overlay violates the
 /// strict contract or the base has no `<manifest>` root.
@@ -449,16 +603,81 @@ String mergeManifests({
       ? const <OverlayPermission>[]
       : parseOverlayPermissions(overlayXml, overlayPath!);
   final insertAt = _baseInsertionPoint(baseXml, basePath);
-  final seen = _basePermissionNames(baseXml);
+  final basePermissions = _scanBasePermissions(baseXml, insertAt);
 
-  final lines = <String>[];
-  for (final permission in overlayPermissions) {
-    if (!seen.add(permission.name)) continue;
-    lines.add('<${permission.element} android:name="${permission.name}"/>');
+  final spansToRemove = <(int, int)>[];
+  final removedByBase = <String>{};
+  final removedByOverlay = <String>{};
+  final activeBase = <String, List<_BasePermission>>{};
+
+  for (final perm in basePermissions) {
+    if (perm.isRemove) {
+      spansToRemove.add((perm.spanStart, perm.spanEnd));
+      removedByBase.add(perm.name);
+    } else {
+      (activeBase[perm.name] ??= <_BasePermission>[]).add(perm);
+    }
   }
+
+  int? baseMaxSdkFor(List<_BasePermission> perms) {
+    int? best = -1;
+    for (final p in perms) {
+      if (p.maxSdkVersion == null) return null;
+      if (best != null && p.maxSdkVersion! > best) {
+        best = p.maxSdkVersion;
+      }
+    }
+    return best;
+  }
+
+  void stripBasePermissions(String name) {
+    final perms = activeBase.remove(name);
+    if (perms != null) {
+      for (final p in perms) {
+        spansToRemove.add((p.spanStart, p.spanEnd));
+      }
+    }
+  }
+
+  final overlayAdded = <String, OverlayPermission>{};
+  for (final permission in overlayPermissions) {
+    if (permission.isRemove) {
+      removedByOverlay.add(permission.name);
+      overlayAdded.remove(permission.name);
+      stripBasePermissions(permission.name);
+      continue;
+    }
+    removedByOverlay.remove(permission.name);
+    removedByBase.remove(permission.name);
+    var effective = permission;
+    final basePerms = activeBase[permission.name];
+    if (basePerms != null) {
+      final baseMaxSdk = baseMaxSdkFor(basePerms);
+      if (_coversMaxSdk(baseMaxSdk, null)) {
+        continue;
+      }
+      var elem = permission.element;
+      for (final bp in basePerms) {
+        elem = _broaderElement(elem, bp.element);
+      }
+      effective = permission.withElement(elem);
+      stripBasePermissions(permission.name);
+    }
+    final earlier = overlayAdded[permission.name];
+    if (earlier == null) {
+      overlayAdded[permission.name] = effective;
+    } else if (earlier.element != effective.element) {
+      overlayAdded[permission.name] = earlier.withElement(
+        _broaderElement(earlier.element, effective.element),
+      );
+    }
+  }
+
   // Libraries in the order given; the first declaration of a name wins,
-  // except that one without maxSdkVersion replaces one with it, since the
-  // app then needs the permission at every SDK level.
+  // except that one with a broader maxSdkVersion (or without maxSdkVersion)
+  // replaces a narrower one, since the app then needs the permission up to
+  // that higher (or unbounded) SDK level.
+  final removedByLibraries = <String>{};
   final fromLibraries = <String, LibraryPermission>{};
   for (final MapEntry(key: path, value: xml) in libraries.entries) {
     for (final permission in parseLibraryPermissions(
@@ -466,18 +685,58 @@ String mergeManifests({
       path,
       placeholders: placeholders,
     )) {
-      if (seen.contains(permission.name)) continue;
+      if (permission.isRemove) {
+        removedByLibraries.add(permission.name);
+        fromLibraries.remove(permission.name);
+        continue;
+      }
+      if (removedByOverlay.contains(permission.name) ||
+          removedByBase.contains(permission.name) ||
+          removedByLibraries.contains(permission.name) ||
+          overlayAdded.containsKey(permission.name)) {
+        continue;
+      }
+      var effective = permission;
+      final basePerms = activeBase[permission.name];
+      if (basePerms != null) {
+        final baseMaxSdk = baseMaxSdkFor(basePerms);
+        if (_coversMaxSdk(baseMaxSdk, permission.maxSdkVersion)) {
+          continue;
+        }
+        var elem = permission.element;
+        for (final bp in basePerms) {
+          elem = _broaderElement(elem, bp.element);
+        }
+        effective = permission.withElement(elem);
+        stripBasePermissions(permission.name);
+      }
       final earlier = fromLibraries[permission.name];
-      if (earlier == null ||
-          (earlier.attributes.containsKey('android:maxSdkVersion') &&
-              !permission.attributes.containsKey('android:maxSdkVersion'))) {
-        fromLibraries[permission.name] = permission;
+      if (earlier == null) {
+        fromLibraries[permission.name] = effective;
+      } else if (_isNarrowerMaxSdk(
+        earlier.maxSdkVersion,
+        effective.maxSdkVersion,
+      )) {
+        fromLibraries[permission.name] = effective.withElement(
+          _broaderElement(earlier.element, effective.element),
+        );
+      } else if (earlier.maxSdkVersion == effective.maxSdkVersion &&
+          earlier.element != effective.element) {
+        fromLibraries[permission.name] = earlier.withElement(
+          _broaderElement(earlier.element, effective.element),
+        );
       }
     }
   }
-  lines.addAll(fromLibraries.values.map((p) => p.render()));
+
+  final lines = <String>[
+    for (final permission in overlayAdded.values)
+      '<${permission.element} android:name="${permission.name}"/>',
+    for (final permission in fromLibraries.values) permission.render(),
+  ];
+  final strippedBaseXml = _removeSpans(baseXml, spansToRemove);
   // An overlay always leaves its provenance, even when it adds nothing.
-  if (lines.isEmpty && overlayXml == null) return baseXml;
+  if (lines.isEmpty && overlayXml == null) return strippedBaseXml;
 
   final sources = [?overlayPath, if (libraries.isNotEmpty) 'library manifests'];
   final inserted = StringBuffer()
@@ -489,9 +748,9 @@ String mergeManifests({
     inserted.write('\n    $line');
   }
 
-  return baseXml.substring(0, insertAt) +
+  return strippedBaseXml.substring(0, insertAt) +
       inserted.toString() +
-      baseXml.substring(insertAt);
+      strippedBaseXml.substring(insertAt);
 }
 
 void main(List<String> args) {
