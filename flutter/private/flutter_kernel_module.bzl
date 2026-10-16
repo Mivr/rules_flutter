@@ -142,12 +142,14 @@ def _flutter_kernel_module_aspect_impl(target, ctx):
     )
     base_dill = None
     base_keys = None
+    base_kmods = depset()
     for k in dep_kernels:
         kd = getattr(k, "base_dill", None)
         kk = getattr(k, "base_keys", None)
         if kd != None and kk != None:
             base_dill = kd
             base_keys = kk
+            base_kmods = getattr(k, "base_kmods", depset())
             break
     if not own_srcs:
         return [
@@ -164,6 +166,8 @@ def _flutter_kernel_module_aspect_impl(target, ctx):
                     edges = edges,
                     base_dill = base_dill,
                     base_keys = base_keys,
+                    base_kmods = base_kmods,
+                    unseeded_base_kmods = depset(),
                 ),
             ),
         ]
@@ -194,11 +198,7 @@ def _flutter_kernel_module_aspect_impl(target, ctx):
     if package_name == "flutter_test" and hasattr(ctx.executable, "_kernel_link"):
         base_dill = ctx.actions.declare_file(target.label.name + ".flutter_base.dill")
         base_keys = ctx.actions.declare_file(target.label.name + ".flutter_base.keys")
-        seed_modules = [kmod] + [
-            k.kmod
-            for k in dep_kernels
-            if k.kmod != None and k.kmod.basename == "flutter.flutter.kmod"
-        ]
+        seed_modules = [kmod] + dep_closure.to_list()
         kernel_link_action(
             ctx,
             dep_closure,
@@ -207,6 +207,7 @@ def _flutter_kernel_module_aspect_impl(target, ctx):
             seed_modules = seed_modules,
             write_keys = base_keys,
         )
+        base_kmods = depset(direct = [kmod], transitive = [dep_closure])
     return [
         FlutterKernelModuleInfo(
             kernel_info = DartKernelInfo(
@@ -221,6 +222,8 @@ def _flutter_kernel_module_aspect_impl(target, ctx):
                 edges = edges,
                 base_dill = base_dill,
                 base_keys = base_keys,
+                base_kmods = base_kmods,
+                unseeded_base_kmods = depset(),
             ),
         ),
     ]
@@ -359,14 +362,24 @@ def compile_flutter_modular_test_kernel(
     )
     base_dill = None
     base_keys = None
+    base_kmods = depset()
     for k in dep_kernels:
         kd = getattr(k, "base_dill", None)
         kk = getattr(k, "base_keys", None)
         if kd != None and kk != None:
             base_dill = kd
             base_keys = kk
+            base_kmods = getattr(k, "base_kmods", depset())
             break
-    kernel_link_action(ctx, dep_closure, entry, output, base_keys = base_keys)
+    link_dep_closure = dep_closure
+    if base_dill != None and base_keys != None:
+        base_kmod_paths = {f.path: True for f in base_kmods.to_list()}
+        if base_kmod_paths:
+            link_dep_closure = depset(
+                [f for f in dep_closure.to_list() if f.path not in base_kmod_paths],
+                order = "postorder",
+            )
+    kernel_link_action(ctx, link_dep_closure, entry, output, base_keys = base_keys)
     return base_dill
 
 def compile_flutter_modular_web_kernel(
