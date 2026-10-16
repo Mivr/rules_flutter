@@ -74,7 +74,6 @@ filegroup(
     srcs = glob([
         "web-sdk/canvaskit/**",
         "web-sdk/flutter_js/**",
-        "web-sdk/lib/**",
         "web-sdk/libraries.json",
     ]) + ["@{host_repo}//:dart-sdk/lib/libraries.json"],
     visibility = ["//visibility:public"],

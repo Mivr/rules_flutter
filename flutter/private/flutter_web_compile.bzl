@@ -103,7 +103,7 @@ def default_dart2js_optimization_level(mode):
         return 4
     fail("unknown web build mode: %s" % mode)
 
-def default_dart2wasm_optimization_level(mode):
+def default_dart2wasm_optimization_level(mode, compilation_mode = "opt"):
     """The `-O` level a dart2wasm compile takes in a build mode.
 
     Upstream `WasmCompilerConfig.optimizationLevelForBuildMode`: 0 in debug, 2
@@ -112,17 +112,23 @@ def default_dart2wasm_optimization_level(mode):
     marginal, and 2 is the highest level that uses only sound optimizations.
     The two compilers therefore disagree about their release level, which is
     why this is a per-compiler answer rather than one shared number.
+    In Bazel `fastbuild` mode, release defaults to 0 so inner-loop builds keep
+    full dart2wasm TFA tree-shaking and minification without paying the 22s+
+    multi-pass `wasm-opt` binaryen penalty; `-c opt` and `profile` use 2.
 
     Args:
         mode: A `web_build_mode` value.
+        compilation_mode: Bazel `COMPILATION_MODE` ("fastbuild", "dbg", "opt").
 
     Returns:
         The optimization level as an int.
     """
     if mode == "debug":
         return 0
-    if mode == "profile" or mode == "release":
+    if mode == "profile":
         return 2
+    if mode == "release":
+        return 0 if compilation_mode == "fastbuild" else 2
     fail("unknown web build mode: %s" % mode)
 
 def resolve_web_optimization_level(level, mode_default):
@@ -240,7 +246,7 @@ def flutter_dart2wasm_action(
     # Optimization.
     args.add("-O%d" % resolve_web_optimization_level(
         optimization_level,
-        default_dart2wasm_optimization_level(mode),
+        default_dart2wasm_optimization_level(mode, ctx.var.get("COMPILATION_MODE", "fastbuild")),
     ))
     args.add("--strip-wasm" if (mode == "release" and strip_wasm) else "--no-strip-wasm")
     args.add("--minify" if resolve_web_minify(minify, mode) else "--no-minify")
@@ -355,6 +361,7 @@ def flutter_dart2js_action(
 
     # libraries.json is one level above the kernel/ directory containing the dill.
     # The web SDK's libraries.json includes the Dart SDK's via a relative path.
+    args.add("--platform-binaries=" + dart2js_platform_dill.dirname)
     args.add("--libraries-spec=" + dart2js_platform_dill.dirname + "/../libraries.json")
 
     # Package config.

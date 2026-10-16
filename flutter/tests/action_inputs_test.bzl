@@ -267,6 +267,8 @@ def _web_inputs_test_impl(ctx):
             "dart2js_platform.dill",
             "dart2js_aot.dart.snapshot",
             "dartdevc",
+            "gen_snapshot",
+            ".sym",
             "analysis_server",
         ],
         "FlutterDart2Wasm",
@@ -291,6 +293,8 @@ def _web_inputs_test_impl(ctx):
         [
             "/patched-sdk/",
             "/web-sdk/canvaskit/",
+            "/web-sdk/lib/",
+            "dart-sdk/lib/_internal/dart2js_platform.dill",
             "dart2wasm_platform.dill",
             "dart2wasm_product.snapshot",
             "dartdevc",

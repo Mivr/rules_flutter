@@ -432,7 +432,7 @@ def _flutter_web_bundle_impl(ctx):
     dart2js_web_sdk_files = [
         f
         for f in web_sdk_file_list
-        if "/web-sdk/lib/" in f.path or f.path.endswith("/libraries.json")
+        if f.path.endswith("/libraries.json")
     ]
     compile_outputs = []  # Files (wasm, mjs, wasm.map)
     compile_copies = []  # Bundle copy entries for compile_outputs

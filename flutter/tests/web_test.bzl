@@ -230,6 +230,24 @@ def _assert_optimization_level(env, action, expected):
         "%s must state exactly one optimization level" % action.mnemonic,
     )
 
+def _assert_dart2js_platform_binaries(env, action):
+    """Assert dart2js receives `--platform-binaries=<.../web-sdk/kernel>`."""
+    if action == None:
+        return
+    flags = [a for a in action.argv if a.startswith("--platform-binaries=")]
+    asserts.equals(
+        env,
+        1,
+        len(flags),
+        "FlutterDart2JS must state --platform-binaries once: %s" % action.argv,
+    )
+    if flags:
+        asserts.true(
+            env,
+            flags[0].endswith("/web-sdk/kernel"),
+            "--platform-binaries must point at web-sdk/kernel, got %r" % flags[0],
+        )
+
 def _default_basenames(env):
     target = analysistest.target_under_test(env)
     return [f.basename for f in target[DefaultInfo].files.to_list()]
@@ -390,6 +408,7 @@ def _opt_web_defines_test_impl(ctx):
         present = ["-Ddart.vm.product=true", "--minify", "--native-null-assertions"],
         absent_substrings = ["enable-asserts", "dart.vm.profile"],
     )
+    _assert_dart2js_platform_binaries(env, _action(env, "FlutterDart2JS"))
 
     # The release levels, and the reason they differ: dart2js goes to 4, while
     # dart2wasm stops at 2 because that is the highest level using only sound
@@ -425,6 +444,43 @@ def _opt_web_defines_test_impl(ctx):
 _opt_web_defines_test = analysistest.make(
     _opt_web_defines_test_impl,
     config_settings = {"//command_line_option:compilation_mode": "opt"},
+)
+
+def _fastbuild_web_defines_test_impl(ctx):
+    """A `fastbuild` web build is release-shaped, with dart2wasm at `-O0`.
+
+    `fastbuild` keeps release defines (`-Ddart.vm.product=true`), minification,
+    WASM symbol stripping, and `toString()` body dropping, while defaulting
+    `FlutterDart2Wasm` to `-O0` so inner-loop builds keep full dart2wasm TFA
+    tree-shaking without paying the multi-pass `wasm-opt` binaryen penalty.
+    """
+    env = analysistest.begin(ctx)
+    _assert_argv(
+        env,
+        _action(env, "FlutterDart2Wasm"),
+        present = [
+            "-Ddart.vm.product=true",
+            "--minify",
+            "--strip-wasm",
+            "--extra-compiler-option=--delete-tostring-package-uri=dart:ui",
+            "--extra-compiler-option=--delete-tostring-package-uri=package:flutter",
+        ],
+        absent_substrings = ["enable-asserts", "dart.vm.profile"],
+    )
+    _assert_argv(
+        env,
+        _action(env, "FlutterDart2JS"),
+        present = ["-Ddart.vm.product=true", "--minify", "--native-null-assertions"],
+        absent_substrings = ["enable-asserts", "dart.vm.profile"],
+    )
+    _assert_dart2js_platform_binaries(env, _action(env, "FlutterDart2JS"))
+    _assert_optimization_level(env, _action(env, "FlutterDart2Wasm"), 0)
+    _assert_optimization_level(env, _action(env, "FlutterDart2JS"), 4)
+    return analysistest.end(env)
+
+_fastbuild_web_defines_test = analysistest.make(
+    _fastbuild_web_defines_test_impl,
+    config_settings = {"//command_line_option:compilation_mode": "fastbuild"},
 )
 
 def _dev_config_test_impl(ctx):
@@ -1463,6 +1519,10 @@ def web_test_suite(name):
 
     _dbg_web_defines_test(
         name = name + "_dbg_defines",
+        target_under_test = ":_web_fixture",
+    )
+    _fastbuild_web_defines_test(
+        name = name + "_fastbuild_defines",
         target_under_test = ":_web_fixture",
     )
     _opt_web_defines_test(
