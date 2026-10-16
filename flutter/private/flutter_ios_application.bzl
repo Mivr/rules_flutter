@@ -21,7 +21,7 @@ load("@bazel_skylib//lib:dicts.bzl", "dicts")
 # (it accepts a single .framework). This is the same helper that rule uses.
 # buildifier: disable=bzl-visibility
 load("@rules_apple//apple/internal:framework_import_support.bzl", "framework_import_support")
-load("//flutter:providers.bzl", "FlutterApplicationInfo")
+load("//flutter:providers.bzl", "FlutterApplicationInfo", "resolve_exec_dart_vm")
 load("//flutter/private:constants.bzl", "IOS_MINIMUM_OS_VERSION")
 load("//flutter/private:flutter_native_assets.bzl", "native_asset_framework_name")
 
@@ -147,15 +147,33 @@ def _flutter_ios_framework_impl(ctx):
         minimum_os_version = minimum_os_version,
     ))
 
+    dart_exe, dart_vm_files = resolve_exec_dart_vm(ctx, flutter_sdk_info)
+
     if app_info.aot_output:
         # Release mode: AOT binary + flutter_assets.
         dylib = app_info.aot_output
 
-        # Copy the dylib and rewrite its LC_BUILD_VERSION with vtool.
-        ctx.actions.run_shell(
-            command = 'cp "$1" "$2" && xcrun vtool -set-build-version "$3" "$4" "$4" -replace -output "$2" "$2"',
-            arguments = [dylib.path, framework_binary.path, vtool_platform, minimum_os_version],
-            inputs = [dylib],
+        # Copy the dylib and rewrite its LC_BUILD_VERSION with macho_edit.
+        ctx.actions.run(
+            executable = dart_exe,
+            arguments = [
+                ctx.executable._macho_edit.path,
+                "patch",
+                "--input",
+                dylib.path,
+                "--output",
+                framework_binary.path,
+                "--platform",
+                vtool_platform,
+                "--min-os",
+                minimum_os_version,
+                "--sdk-version",
+                minimum_os_version,
+            ],
+            inputs = depset(
+                direct = [dylib, ctx.executable._macho_edit],
+                transitive = [dart_vm_files],
+            ),
             outputs = [framework_binary],
             mnemonic = "FlutterIOSRetagDylib",
             progress_message = "Retagging App dylib for %s (min %s)" % (vtool_platform, minimum_os_version),
@@ -171,18 +189,46 @@ def _flutter_ios_framework_impl(ctx):
             progress_message = "Copying flutter_assets into App.framework",
         )
 
-        return [DefaultInfo(files = depset([framework_binary, framework_plist, framework_assets]))]
+        framework_files = [framework_binary, framework_plist, framework_assets]
+        return [
+            DefaultInfo(files = depset(framework_files)),
+            framework_import_support.framework_import_info_with_dependencies(
+                build_archs = [apple_support.target_arch_from_rule_ctx(ctx)],
+                deps = [],
+                framework_imports = framework_files,
+            ),
+        ]
     else:
         # Debug mode: stub binary + flutter_assets with kernel_blob.bin.
         kernel_dill = app_info.kernel_dill
 
-        sdk = "iphoneos" if is_device else "iphonesimulator"
+        target_arch = apple_support.target_arch_from_rule_ctx(ctx)
+        stub_arch = "arm64" if target_arch == "arm64" else "x86_64"
 
         # Create a stub dylib — rules_apple's framework processor requires a
         # binary file. bundle_only=True prevents linking so it's never loaded.
-        ctx.actions.run_shell(
-            command = 'echo "" | xcrun -sdk "$1" clang -shared -o "$2" -x c - && xcrun vtool -set-build-version "$3" "$4" "$4" -replace -output "$2" "$2"',
-            arguments = [sdk, framework_binary.path, vtool_platform, minimum_os_version],
+        ctx.actions.run(
+            executable = dart_exe,
+            arguments = [
+                ctx.executable._macho_edit.path,
+                "stub",
+                "--output",
+                framework_binary.path,
+                "--arch",
+                stub_arch,
+                "--platform",
+                vtool_platform,
+                "--min-os",
+                minimum_os_version,
+                "--sdk-version",
+                minimum_os_version,
+                "--install-name",
+                "@rpath/App.framework/App",
+            ],
+            inputs = depset(
+                direct = [ctx.executable._macho_edit],
+                transitive = [dart_vm_files],
+            ),
             outputs = [framework_binary],
             mnemonic = "FlutterIOSStubDylib",
             progress_message = "Creating stub App.framework binary for debug mode",
@@ -217,7 +263,15 @@ def _flutter_ios_framework_impl(ctx):
             progress_message = "Assembling debug App.framework with kernel and VM snapshots",
         )
 
-        return [DefaultInfo(files = depset([framework_binary, framework_plist, framework_assets]))]
+        framework_files = [framework_binary, framework_plist, framework_assets]
+        return [
+            DefaultInfo(files = depset(framework_files)),
+            framework_import_support.framework_import_info_with_dependencies(
+                build_archs = [apple_support.target_arch_from_rule_ctx(ctx)],
+                deps = [],
+                framework_imports = framework_files,
+            ),
+        ]
 
 flutter_ios_framework = rule(
     implementation = _flutter_ios_framework_impl,
@@ -233,9 +287,17 @@ flutter_ios_framework = rule(
                 doc = "Minimum iOS deployment target version.",
                 default = IOS_MINIMUM_OS_VERSION,
             ),
+            "_macho_edit": attr.label(
+                default = Label("//flutter/private/tools:macho_edit"),
+                executable = True,
+                cfg = "exec",
+            ),
         },
     ),
-    toolchains = ["@rules_flutter//flutter:toolchain_type"],
+    toolchains = [
+        "@rules_flutter//flutter:toolchain_type",
+        config_common.toolchain_type("@rules_dart//dart:exec_tools_toolchain_type", mandatory = False),
+    ],
     doc = "Assembles Flutter artifacts into App.framework for iOS (release: AOT binary + assets; debug: assets + kernel).",
 )
 
@@ -286,6 +348,8 @@ def _flutter_ios_native_frameworks_impl(ctx):
     dylibs = list(app_info.native_libs) + app_info.bundled_code_assets.to_list()
     minimum_os_version = ctx.attr.minimum_os_version
 
+    dart_exe, dart_vm_files = resolve_exec_dart_vm(ctx) if dylibs else (None, None)
+
     framework_files = []
     seen = {}
     for dylib in dylibs:
@@ -302,14 +366,23 @@ def _flutter_ios_native_frameworks_impl(ctx):
 
         # Copy the dylib into the framework and rewrite its install name so the
         # dynamic linker resolves it from the embedded framework via @rpath.
-        ctx.actions.run_shell(
-            command = 'cp "$1" "$2" && xcrun install_name_tool -id "$3" "$2"',
+        ctx.actions.run(
+            executable = dart_exe,
             arguments = [
+                ctx.executable._macho_edit.path,
+                "patch",
+                "--input",
                 dylib.path,
+                "--output",
                 binary.path,
+                "--install-name",
                 "@rpath/%s.framework/%s" % (name, name),
+                "--allow-non-macho",
             ],
-            inputs = [dylib],
+            inputs = depset(
+                direct = [dylib, ctx.executable._macho_edit],
+                transitive = [dart_vm_files],
+            ),
             outputs = [binary],
             mnemonic = "FlutterIOSNativeAssetFramework",
             progress_message = "Wrapping %s into %s.framework" % (dylib.basename, name),
@@ -347,8 +420,17 @@ flutter_ios_native_frameworks = rule(
                 doc = "Minimum iOS deployment target version (framework Info.plist).",
                 default = IOS_MINIMUM_OS_VERSION,
             ),
+            "_macho_edit": attr.label(
+                default = Label("//flutter/private/tools:macho_edit"),
+                executable = True,
+                cfg = "exec",
+            ),
         },
     ),
+    toolchains = [
+        "@rules_flutter//flutter:toolchain_type",
+        config_common.toolchain_type("@rules_dart//dart:exec_tools_toolchain_type", mandatory = False),
+    ],
     doc = "Wraps native plugin/native-asset dylibs in signed .frameworks for iOS bundling.",
 )
 

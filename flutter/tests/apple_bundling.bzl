@@ -6,7 +6,7 @@ per fixture would cost minutes and need a device SDK.
 """
 
 load("@bazel_skylib//lib:unittest.bzl", "analysistest", "asserts")
-load("//flutter:providers.bzl", "FlutterApplicationInfo")
+load("//flutter:providers.bzl", "FlutterApplicationInfo", "resolve_exec_dart_vm")
 
 def _fake_application_impl(ctx):
     """Placeholder outputs, every one declared under this target's name.
@@ -17,17 +17,43 @@ def _fake_application_impl(ctx):
     A path named in both `native_libs` and `code_assets` is one File: the shape
     of one library arriving by both routes.
     """
+    dart_exe, dart_vm_files = resolve_exec_dart_vm(ctx) if ctx.attr.macho_aot else (None, None)
+
     libs = {}
     for path in ctx.attr.native_libs + ctx.attr.code_assets:
         if path not in libs:
             lib = ctx.actions.declare_file("%s/%s" % (ctx.label.name, path))
-            ctx.actions.write(lib, "%s %s" % (ctx.label, path))
+            if ctx.attr.macho_aot:
+                ctx.actions.run(
+                    executable = dart_exe,
+                    arguments = [
+                        ctx.executable._macho_edit.path,
+                        "stub",
+                        "--output",
+                        lib.path,
+                        "--arch",
+                        "arm64",
+                        "--platform",
+                        "ios",
+                        "--min-os",
+                        "13.0",
+                        "--install-name",
+                        "@rpath/libplaceholder.dylib",
+                    ],
+                    inputs = depset(
+                        direct = [ctx.executable._macho_edit],
+                        transitive = [dart_vm_files],
+                    ),
+                    outputs = [lib],
+                )
+            else:
+                ctx.actions.write(lib, "%s %s" % (ctx.label, path))
             libs[path] = lib
 
-    # Debug carries a kernel and no AOT dylib; release the reverse. Which one
-    # a fixture wants is not cosmetic: a release Apple framework retags its
-    # dylib with `vtool`, which rejects a placeholder that is not a Mach-O, so
-    # a fixture that will actually be *built* has to be a debug one.
+    # Debug carries a kernel and no AOT dylib; release the reverse. When
+    # `macho_aot = True`, the release fixture synthesizes a valid 64-bit Mach-O
+    # dylib via `macho_edit.dart stub` so `FlutterIOSRetagDylib` can parse and
+    # re-tag it in a real `build_test`.
     if ctx.attr.debug:
         aot_output = None
         kernel_dill = ctx.actions.declare_file(ctx.label.name + "/app.dill")
@@ -35,7 +61,31 @@ def _fake_application_impl(ctx):
     else:
         kernel_dill = None
         aot_output = ctx.actions.declare_file(ctx.label.name + "/app.so")
-        ctx.actions.write(aot_output, str(ctx.label))
+        if ctx.attr.macho_aot:
+            ctx.actions.run(
+                executable = dart_exe,
+                arguments = [
+                    ctx.executable._macho_edit.path,
+                    "stub",
+                    "--output",
+                    aot_output.path,
+                    "--arch",
+                    "arm64",
+                    "--platform",
+                    "macos",
+                    "--min-os",
+                    "13.0",
+                    "--install-name",
+                    "@rpath/App.framework/App",
+                ],
+                inputs = depset(
+                    direct = [ctx.executable._macho_edit],
+                    transitive = [dart_vm_files],
+                ),
+                outputs = [aot_output],
+            )
+        else:
+            ctx.actions.write(aot_output, str(ctx.label))
 
     flutter_assets = ctx.actions.declare_directory(ctx.label.name + "/flutter_assets")
     ctx.actions.run_shell(
@@ -58,8 +108,18 @@ fake_application = rule(
     attrs = {
         "code_assets": attr.string_list(),
         "debug": attr.bool(default = False),
+        "macho_aot": attr.bool(default = False),
         "native_libs": attr.string_list(),
+        "_macho_edit": attr.label(
+            default = Label("//flutter/private/tools:macho_edit"),
+            executable = True,
+            cfg = "exec",
+        ),
     },
+    toolchains = [
+        "@rules_flutter//flutter:toolchain_type",
+        config_common.toolchain_type("@rules_dart//dart:exec_tools_toolchain_type", mandatory = False),
+    ],
     doc = "A fake FlutterApplicationInfo for tests over Apple bundling rules.",
 )
 

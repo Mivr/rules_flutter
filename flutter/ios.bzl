@@ -58,7 +58,7 @@ Two tiers of API:
 
 load("@bazel_skylib//rules:build_test.bzl", "build_test")
 load("@bazel_skylib//rules:expand_template.bzl", "expand_template")
-load("@rules_apple//apple:apple.bzl", "apple_dynamic_framework_import", "apple_dynamic_xcframework_import")
+load("@rules_apple//apple:apple.bzl", "apple_dynamic_xcframework_import")
 load("@rules_apple//apple:ios.bzl", "ios_application")
 load("@rules_apple//apple:versioning.bzl", "apple_bundle_version")
 load("@rules_swift//swift:swift.bzl", "swift_library")
@@ -178,19 +178,9 @@ def flutter_ios_framework_gen(name, application, minimum_os_version = IOS_MINIMU
     )
 
     _flutter_ios_framework_rule(
-        name = "__%s_framework" % name,
+        name = name,
         application = "__%s_intermediates" % name,
         minimum_os_version = minimum_os_version,
-        tags = tags,
-    )
-
-    apple_dynamic_framework_import(
-        name = name,
-        framework_imports = ["__%s_framework" % name],
-        bundle_only = select({
-            Label("@rules_flutter//flutter/private:dbg"): True,
-            "//conditions:default": False,
-        }),
         tags = tags,
         **kwargs
     )
@@ -508,23 +498,11 @@ def flutter_ios_app(
         tags = tags,
     )
 
-    # 3. Assemble App.framework from the AOT dylib.
+    # 3. Assemble App.framework from the AOT dylib (or debug stub + kernel).
     _flutter_ios_framework_rule(
         name = "__%s_app_framework" % name,
         application = "__%s_intermediates" % name,
         minimum_os_version = minimum_os_version,
-        tags = tags,
-    )
-
-    # 4. Wrap App.framework as dynamic framework import.
-    # Debug: bundle_only=True embeds framework without linking (no binary).
-    apple_dynamic_framework_import(
-        name = "__%s_app_bundle" % name,
-        framework_imports = ["__%s_app_framework" % name],
-        bundle_only = select({
-            Label("@rules_flutter//flutter/private:dbg"): True,
-            "//conditions:default": False,
-        }),
         tags = tags,
     )
 
@@ -660,7 +638,7 @@ def flutter_ios_app(
         resources = resources + ["__%s_privacy_manifests" % name],
         deps = [
             "__%s_runner" % name,
-            "__%s_app_bundle" % name,
+            "__%s_app_framework" % name,
             "__%s_native_frameworks" % name,
         ],
         tags = tags,

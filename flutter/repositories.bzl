@@ -555,10 +555,27 @@ def flutter_register_toolchains(name, **kwargs):
             gen_snapshot_label = ""
 
             if target_platform.startswith("ios"):
-                # iOS gen_snapshot is bundled in the iOS engine artifact.
-                gen_snapshot_label = "@{ios_engine}//:gen_snapshot_arm64".format(
-                    ios_engine = name + "_ios_engine",
-                )
+                if host_platform.startswith("darwin"):
+                    if target_platform == "ios-arm64":
+                        # iOS arm64 gen_snapshot is bundled in the iOS engine artifact.
+                        gen_snapshot_label = "@{ios_engine}//:gen_snapshot_arm64".format(
+                            ios_engine = name + "_ios_engine",
+                        )
+                    else:
+                        # Simulator x64 uses the host x64 gen_snapshot.
+                        gen_snapshot_label = "@{host_repo}//:host-tools/gen_snapshot".format(
+                            host_repo = name + "_" + host_platform,
+                        )
+                else:
+                    # On Linux hosts, the Android cross gen_snapshot for the same target
+                    # architecture is a Linux ELF binary compiled for that target CPU and
+                    # natively supports --snapshot_kind=app-aot-macho-dylib.
+                    target_arch = target_platform.split("-")[1]
+                    gen_snapshot_label = "@{name}_cross_{host_platform}_android-{arch}//:gen_snapshot".format(
+                        name = name,
+                        host_platform = host_platform,
+                        arch = target_arch,
+                    )
             else:
                 artifact_host = gen_snapshot_host_platform(host_platform)
                 gen_snapshot_path = gen_snapshot_cross_artifact_path(target_platform, "release", artifact_host)
@@ -611,9 +628,13 @@ def flutter_register_toolchains(name, **kwargs):
             desktop_engine_targets.append(target_key)
     for _host_platform, desktop_targets in DESKTOP_CROSS_PAIRS.items():
         for target_platform in desktop_targets:
-            if target_platform not in desktop_engine_seen:
-                desktop_engine_seen[target_platform] = True
-                desktop_engine_targets.append(target_platform)
+            os_prefix = target_platform.split("-")[0]
+            target_os = PLATFORM_PREFIX_TO_OS[os_prefix]
+            engine_arch = engine_arch_for_os(target_os, target_platform.split("-")[1])
+            target_key = "{}-{}".format(os_prefix, engine_arch)
+            if target_key not in desktop_engine_seen:
+                desktop_engine_seen[target_key] = True
+                desktop_engine_targets.append(target_key)
 
     for target_platform in desktop_engine_targets:
         target_os = PLATFORM_PREFIX_TO_OS[target_platform.split("-")[0]]
@@ -653,7 +674,21 @@ def flutter_register_toolchains(name, **kwargs):
             if target_platform.startswith("linux-"):
                 sysroot_repo_name = name + "_linux_sysroot_" + target_platform.split("-")[1]
 
-            engine_debug_repo_name = name + "_desktop_engine_" + target_platform + "_debug"
+            os_prefix = target_platform.split("-")[0]
+            target_os = PLATFORM_PREFIX_TO_OS[os_prefix]
+            target_arch = target_platform.split("-")[1]
+            engine_arch = engine_arch_for_os(target_os, target_arch)
+            engine_target_key = "{}-{}".format(os_prefix, engine_arch)
+
+            engine_debug_repo_name = name + "_desktop_engine_" + engine_target_key + "_debug"
+
+            gen_snapshot_label = ""
+            if host_platform.startswith("linux") and target_platform.startswith("darwin-"):
+                gen_snapshot_label = "@{name}_cross_{host_platform}_android-{arch}//:gen_snapshot".format(
+                    name = name,
+                    host_platform = host_platform,
+                    arch = target_arch,
+                )
 
             flutter_desktop_cross_repo(
                 name = name + "_desktop_cross_" + host_platform + "_" + target_platform,
@@ -662,9 +697,10 @@ def flutter_register_toolchains(name, **kwargs):
                 host_platform = host_platform,
                 target_platform = target_platform,
                 host_repo_name = name + "_" + host_platform,
-                engine_repo_name = name + "_desktop_engine_" + target_platform,
+                engine_repo_name = name + "_desktop_engine_" + engine_target_key,
                 engine_debug_repo_name = engine_debug_repo_name,
                 sysroot_repo_name = sysroot_repo_name,
+                gen_snapshot_label = gen_snapshot_label,
             )
 
     # Web SDK repo (lazy — only downloaded when web targets are built).

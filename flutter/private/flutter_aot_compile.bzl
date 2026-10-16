@@ -52,9 +52,7 @@ def flutter_aot_macho_action(
         strip = True,
         extra_flags = [],
         extra_outputs = [],
-        install_name = "@rpath/App.framework/App",
-        min_os_version = None,
-        rpath = "@executable_path/Frameworks,@loader_path/Frameworks"):
+        install_name = "@rpath/App.framework/App"):
     """AOT compile to Mach-O dylib. Used for macOS and iOS.
 
     Args:
@@ -66,13 +64,7 @@ def flutter_aot_macho_action(
         extra_flags: Additional gen_snapshot flags.
         extra_outputs: Additional output Files (e.g. debug info).
         install_name: Mach-O LC_ID_DYLIB install name.
-        min_os_version: Minimum OS deployment target (e.g. "15.0" for iOS, "12.0" for macOS).
-        rpath: Comma-separated rpath entries for LC_RPATH.
     """
     macho_flags = list(extra_flags)
     macho_flags.append("--macho-install-name=" + install_name)
-    if min_os_version:
-        macho_flags.append("--macho-min-os-version=" + min_os_version)
-    if rpath:
-        macho_flags.append("--macho-rpath=" + rpath)
     _flutter_aot_action(ctx, gen_snapshot, kernel_dill, output, "app-aot-macho-dylib", "--macho", strip, macho_flags, extra_outputs, "FlutterAotMacho")

@@ -82,26 +82,32 @@ TARGET_PLATFORMS = {
             "@platforms//cpu:aarch64",
         ],
     ),
+    "ios-x64": struct(
+        compatible_with = [
+            "@platforms//os:ios",
+            "@platforms//cpu:x86_64",
+        ],
+    ),
 }
 
 # Desktop cross-platform pairs: host → list of desktop targets.
 # Desktop targets ARE host platforms (they use HOST_PLATFORMS for constraints).
-# These only support debug/JIT mode — gen_snapshot cannot cross-compile between
-# desktop OSes for AOT.
+# Linux/Windows targets only support debug/JIT mode across desktop OSes;
+# Linux → macOS also supports AOT via Mach-O generation in gen_snapshot.
 DESKTOP_CROSS_PAIRS = {
     "darwin-arm64": ["linux-x64", "windows-x64"],
     "darwin-x64": ["linux-x64", "windows-x64"],
-    "linux-x64": ["darwin-x64", "windows-x64"],
-    "linux-arm64": ["darwin-x64", "windows-x64"],
+    "linux-x64": ["darwin-arm64", "darwin-x64", "windows-x64"],
+    "linux-arm64": ["darwin-arm64", "darwin-x64", "windows-x64"],
     "windows-x64": ["darwin-x64", "linux-x64"],
 }
 
 # Which (host, target) cross-compilation pairs are supported.
 CROSS_COMPILATION_PAIRS = {
-    "darwin-arm64": ["android-arm64", "android-x64", "ios-arm64"],
-    "darwin-x64": ["android-arm64", "android-x64", "ios-arm64"],
-    "linux-x64": ["android-arm64", "android-x64"],
-    "linux-arm64": ["android-arm64", "android-x64"],
+    "darwin-arm64": ["android-arm64", "android-x64", "ios-arm64", "ios-x64"],
+    "darwin-x64": ["android-arm64", "android-x64", "ios-arm64", "ios-x64"],
+    "linux-x64": ["android-arm64", "android-x64", "ios-arm64", "ios-x64"],
+    "linux-arm64": ["android-arm64", "android-x64", "ios-arm64", "ios-x64"],
     "windows-x64": ["android-arm64", "android-x64"],
 }
 

@@ -1,10 +1,49 @@
 """Unit and analysis tests for iOS application validation and bundling."""
 
-load("@bazel_skylib//lib:unittest.bzl", "asserts", "unittest")
+load("@bazel_skylib//lib:unittest.bzl", "analysistest", "asserts", "unittest")
 load("@bazel_skylib//rules:build_test.bzl", "build_test")
-load("//flutter/private:flutter_ios_application.bzl", "flutter_ios_framework")
+load("//flutter/private:flutter_ios_application.bzl", "flutter_ios_framework", "flutter_ios_native_frameworks")
 load("//flutter/private:ios_entitlements.bzl", "resolve_ios_entitlements")
 load(":apple_bundling.bzl", "fake_application", "outputs_under_target_dir_test")
+
+def _ios_device_transition_impl(_settings, _attr):
+    return {"//command_line_option:platforms": str(Label("//flutter/platforms:ios_arm64"))}
+
+_ios_device_transition = transition(
+    implementation = _ios_device_transition_impl,
+    inputs = [],
+    outputs = ["//command_line_option:platforms"],
+)
+
+def _platform_target_impl(ctx):
+    files = []
+    for t in ctx.attr.targets:
+        files.append(t[DefaultInfo].files)
+    return [DefaultInfo(files = depset(transitive = files))]
+
+_ios_device_targets = rule(
+    implementation = _platform_target_impl,
+    attrs = {
+        "targets": attr.label_list(cfg = _ios_device_transition, mandatory = True),
+    },
+)
+
+def _simulator_fastbuild_refused_impl(ctx):
+    env = analysistest.begin(ctx)
+    asserts.expect_failure(
+        env,
+        "The iOS simulator runs debug builds only, and this is a fastbuild build.",
+    )
+    return analysistest.end(env)
+
+_simulator_fastbuild_refused_test = analysistest.make(
+    _simulator_fastbuild_refused_impl,
+    expect_failure = True,
+    config_settings = {
+        "//command_line_option:compilation_mode": "fastbuild",
+        "//command_line_option:platforms": str(Label("//flutter/platforms:ios_x64")),
+    },
+)
 
 _DISCOVERED = "ios/Runner/Runner.entitlements"
 
@@ -67,9 +106,6 @@ def _bundling_tests(name):
       The test target names.
     """
 
-    # Debug fakes: a release framework retags its dylib with `vtool`, which
-    # rejects a placeholder that is not a Mach-O, and the build_test below
-    # really builds these.
     for app in ["_fake_app", "_fake_app_other"]:
         fake_application(
             name = name + app,
@@ -82,16 +118,45 @@ def _bundling_tests(name):
             tags = ["manual"],
         )
 
-    # macOS-only, both of them, and not because of `xcrun`: there is no
-    # Linux-host-to-iOS Flutter toolchain (`CROSS_COMPILATION_PAIRS` in
-    # `toolchains_repo.bzl`), so the rule cannot even be analysed on the runner
-    # that sweeps this workspace. `target_compatible_with` is what keeps that
-    # from being an error there — an incompatible test is skipped without its
-    # dependencies being analysed.
+    # Release-mode fixture with a synthetic Mach-O AOT dylib and native dylib,
+    # transitioned to //flutter/platforms:ios_arm64 so `FlutterIOSRetagDylib`
+    # and `FlutterIOSNativeAssetFramework` run via `macho_edit.dart` on both
+    # Linux and macOS hosts.
+    fake_application(
+        name = name + "_fake_release_app",
+        debug = False,
+        macho_aot = True,
+        native_libs = ["libfoo.dylib"],
+        code_assets = ["libbar.dylib"],
+        tags = ["manual"],
+    )
+    flutter_ios_framework(
+        name = name + "_fake_release_app_framework",
+        application = name + "_fake_release_app",
+        tags = ["manual"],
+    )
+    flutter_ios_native_frameworks(
+        name = name + "_fake_release_app_native_frameworks",
+        application = name + "_fake_release_app",
+        tags = ["manual"],
+    )
+    _ios_device_targets(
+        name = name + "_release_device_targets",
+        targets = [
+            name + "_fake_release_app_framework",
+            name + "_fake_release_app_native_frameworks",
+        ],
+        tags = ["manual"],
+    )
+
     outputs_under_target_dir_test(
         name = name + "_framework_outputs_under_target_dir",
         target_under_test = name + "_fake_app_framework",
-        target_compatible_with = ["@platforms//os:macos"],
+    )
+
+    _simulator_fastbuild_refused_test(
+        name = name + "_simulator_fastbuild_refused",
+        target_under_test = name + "_fake_release_app_framework",
     )
 
     # Two different apps in one package, built together: any output the two
@@ -102,12 +167,13 @@ def _bundling_tests(name):
         targets = [
             name + "_fake_app_framework",
             name + "_fake_app_other_framework",
+            name + "_release_device_targets",
         ],
-        target_compatible_with = ["@platforms//os:macos"],
     )
 
     return [
         name + "_framework_outputs_under_target_dir",
+        name + "_simulator_fastbuild_refused",
         name + "_two_apps_one_package",
     ]
 
