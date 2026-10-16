@@ -13,6 +13,11 @@ load("//flutter/private:app_entrypoint.bzl", "APP_SCHEME", "app_main_location", 
 load("//flutter/private:flutter_asset_bundle.bzl", "flutter_asset_bundle_action")
 load("//flutter/private:flutter_compile.bzl", "flutter_kernel_compile_action")
 load("//flutter/private:flutter_info.bzl", "dedup_plugins")
+load(
+    "//flutter/private:flutter_kernel_module.bzl",
+    "compile_flutter_modular_app_kernel",
+    "flutter_modular_test_tools",
+)
 load("//flutter/private:flutter_library.bzl", "aggregate_pub_contributions", "build_pub_contributions")
 load("//flutter/private:flutter_shader_compile.bzl", "flutter_shader_compile_action")
 load("//flutter/private:native_sources.bzl", "native_sources_aspect")
@@ -361,25 +366,15 @@ def flutter_compile_kernel(ctx, flutter_sdk_info, aot = None, platform_dill = No
             colocate_inputs,
         )
 
-    pc = compile_kernel_package_config(
-        ctx,
-        packages,
-        colocate_inputs,
-        roots = {app_pkg_name: True} if app_pkg_name else None,
-    )
-    config_file = pc.config_file
-    all_srcs = pc.srcs
-    packages = pc.packages
-
     # Determine compilation mode from Bazel config.
     bazel_mode = ctx.var["COMPILATION_MODE"]
+    if aot == None:
+        aot = bazel_mode != "dbg"
     if platform_dill == None:
-        if bazel_mode == "dbg":
+        if not (aot or profile):
             platform_dill = flutter_sdk_info.platform_kernel_dill
         else:
             platform_dill = flutter_sdk_info.platform_kernel_dill_product
-    if aot == None:
-        aot = bazel_mode != "dbg"
 
     # AI-agent service-extension injection: in debug builds (non-AOT), if the
     # rule carries an `_agent_extensions_src` attr, stage the agent source next
@@ -433,14 +428,6 @@ def flutter_compile_kernel(ctx, flutter_sdk_info, aot = None, platform_dill = No
             native_agent_import = staged_native_agent.basename if staged_native_agent else None,
         )
 
-    # Resolve the kernel entrypoint: the user's main, keyed by its package:
-    # URI for hot-reload parity with the dev tool.
-    entrypoint_info = resolve_kernel_entrypoint(ctx, app_pkg_name, app_lib_root)
-    if registrant:
-        all_srcs = all_srcs + [registrant]
-    if staged_agent:
-        all_srcs = all_srcs + [staged_agent, staged_native_agent]
-
     # Collect extra frontend_server flags from build flag attrs.
     extra_frontend_flags = []
     if track_widget_creation:
@@ -482,29 +469,72 @@ def flutter_compile_kernel(ctx, flutter_sdk_info, aot = None, platform_dill = No
         }))
 
     kernel_dill = ctx.actions.declare_file(ctx.label.name + ".dill")
-    flutter_kernel_compile_action(
-        ctx = ctx,
-        dartaotruntime = flutter_sdk_info.dartaotruntime,
-        kernel_filter_tool = ctx.executable._kernel_filter_tool,
-        frontend_server = flutter_sdk_info.frontend_server,
-        platform_dill = platform_dill,
-        main = entrypoint_info.file,
-        entrypoint_uri = entrypoint_info.uri,
-        srcs = all_srcs,
-        package_config = config_file,
-        output = kernel_dill,
-        aot = aot,
-        defines = all_defines,
-        target = frontend_server_target,
-        extra_flags = extra_frontend_flags,
-        native_assets_manifest = native_assets_manifest,
-        dart_plugin_registrant_uri = registrant_location.uri if registrant_location else None,
-        filesystem_roots = with_root(
-            with_root([], registrant_location.root if registrant_location else None),
-            entrypoint_info.root,
-        ),
-        recorded_uses = recorded_uses,
-    )
+    modular_tools = None
+    if (not aot and not profile and
+        frontend_server_target == "flutter" and
+        not registrant and not staged_agent and
+        not native_assets_manifest and not recorded_uses and
+        not extra_frontend_flags and not all_defines):
+        own_files = [ctx.file.main] + [f for f in ctx.files.srcs if f != ctx.file.main]
+        modular_tools = flutter_modular_test_tools(
+            ctx,
+            flutter_sdk_info,
+            own_files,
+            packages,
+            [],
+        )
+
+    if modular_tools != None:
+        config_file = None
+        compile_flutter_modular_app_kernel(
+            ctx,
+            flutter_sdk_info,
+            modular_tools,
+            app_lib_root,
+            packages,
+            kernel_dill,
+            platform_dill,
+        )
+    else:
+        pc = compile_kernel_package_config(
+            ctx,
+            packages,
+            colocate_inputs,
+            roots = {app_pkg_name: True} if app_pkg_name else None,
+        )
+        config_file = pc.config_file
+        all_srcs = pc.srcs
+        if registrant:
+            all_srcs = all_srcs + [registrant]
+        if staged_agent:
+            all_srcs = all_srcs + [staged_agent, staged_native_agent]
+
+        # Resolve the kernel entrypoint: the user's main, keyed by its package:
+        # URI for hot-reload parity with the dev tool.
+        entrypoint_info = resolve_kernel_entrypoint(ctx, app_pkg_name, app_lib_root)
+        flutter_kernel_compile_action(
+            ctx = ctx,
+            dartaotruntime = flutter_sdk_info.dartaotruntime,
+            kernel_filter_tool = ctx.executable._kernel_filter_tool,
+            frontend_server = flutter_sdk_info.frontend_server,
+            platform_dill = platform_dill,
+            main = entrypoint_info.file,
+            entrypoint_uri = entrypoint_info.uri,
+            srcs = all_srcs,
+            package_config = config_file,
+            output = kernel_dill,
+            aot = aot,
+            defines = all_defines,
+            target = frontend_server_target,
+            extra_flags = extra_frontend_flags,
+            native_assets_manifest = native_assets_manifest,
+            dart_plugin_registrant_uri = registrant_location.uri if registrant_location else None,
+            filesystem_roots = with_root(
+                with_root([], registrant_location.root if registrant_location else None),
+                entrypoint_info.root,
+            ),
+            recorded_uses = recorded_uses,
+        )
     return struct(
         kernel_dill = kernel_dill,
         package_config = config_file,

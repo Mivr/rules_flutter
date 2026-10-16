@@ -39,6 +39,7 @@ bzl_library(
         ":flutter_asset_bundle",
         ":flutter_compile",
         ":flutter_info",
+        ":flutter_kernel_module",
         ":flutter_shader_compile",
         ":validation",
         "//flutter:providers",
@@ -298,6 +299,9 @@ bzl_library(
     visibility = ["//flutter:__subpackages__"],
     deps = [
         ":common",
+        ":flutter_kernel_module",
+        "@rules_dart//dart:providers",
+        "@rules_dart//dart:utils",
     ],
 )
 
