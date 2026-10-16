@@ -20,7 +20,7 @@ so we skip the frontend_server kernel compilation step used by desktop/mobile.
 """
 
 load("@rules_dart//dart:providers.bzl", "DartInfo")
-load("@rules_dart//dart:utils.bzl", "MODULAR_KERNEL_ATTRS", "MODULAR_KERNEL_TOOLCHAINS", "collect_packages", "collect_transitive_srcs", "dart_analyzable_info_with_package", "derive_lib_root", "generate_dev_package_config")
+load("@rules_dart//dart:utils.bzl", "MODULAR_KERNEL_TOOLCHAINS", "collect_packages", "collect_transitive_srcs", "dart_analyzable_info_with_package", "derive_lib_root", "generate_dev_package_config")
 load("//flutter:providers.bzl", "FlutterInfo", "FlutterNativeLibraryInfo")
 load(
     "//flutter/private:app_entrypoint.bzl",
@@ -57,6 +57,7 @@ load("//flutter/private:flutter_compile.bzl", "flutter_kernel_compile_action")
 load("//flutter/private:flutter_info.bzl", "dedup_plugins")
 load(
     "//flutter/private:flutter_kernel_module.bzl",
+    "MODULAR_KERNEL_ATTRS",
     "compile_flutter_modular_web_kernel",
     "flutter_kernel_module_aspect",
     "flutter_modular_test_tools",
@@ -323,6 +324,8 @@ def _flutter_web_bundle_impl(ctx):
     # the same way the native kernel path switches on COMPILATION_MODE.
     mode = web_build_mode(ctx)
     is_debug = mode == "debug"
+    is_profile = mode == "profile"
+    is_opt = ctx.var["COMPILATION_MODE"] == "opt"
 
     # Step 1: Collect sources, generate package config, handle plugin registrant.
     # dart compile wasm/js take .dart source directly (not kernel .dill).
@@ -552,7 +555,16 @@ def _flutter_web_bundle_impl(ctx):
             ctx.file.main.short_path,
         )
         from_dill = None
-        if (not ctx.attr.enable_experiments and
+        # Modular `.flutter.kmod` modules are compiled against the non-product
+        # platform dill without `-Ddart.vm.product=true` or
+        # `-Ddart.vm.profile=true`, so CFE folds `kReleaseMode` and
+        # `kProfileMode` to `false` inside `const` expressions in `.flutter.kmod`
+        # and strips source text. Passing `--from-dill` to `frontend_server` does
+        # not re-evaluate already-folded constants, so `-c opt` and `profile`
+        # builds must compile the icon tree-shaking kernel from source.
+        if (not is_opt and
+            not is_profile and
+            not ctx.attr.enable_experiments and
             not user_defines and
             entrypoint_uri != None and
             flutter_sdk_info.platform_kernel_dill_product != None):

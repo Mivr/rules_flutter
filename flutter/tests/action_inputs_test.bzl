@@ -117,6 +117,19 @@ def _flutter_test_defines_fallback_test_impl(ctx):
     asserts.equals(env, [], modular_links, "flutter_test with own defines must fall back from DartKernelLink")
     return analysistest.end(env)
 
+def _comma_defines_fallback_test_impl(ctx):
+    """When global `extra_dart_defines` contain a comma, modular kernel compilation falls back to `FlutterKernelCompile`."""
+    env = analysistest.begin(ctx)
+    compile_action = _find_action(env, ["FlutterKernelCompile"])
+    asserts.true(
+        env,
+        "-DFOO=a,b" in compile_action.argv,
+        "expected -DFOO=a,b in FlutterKernelCompile argv, got %s" % compile_action.argv,
+    )
+    modular_links = [a for a in analysistest.target_actions(env) if a.mnemonic == "DartKernelLink"]
+    asserts.equals(env, [], modular_links, "comma-containing extra_dart_defines must fall back from DartKernelLink")
+    return analysistest.end(env)
+
 def _application_opt_inputs_test_impl(ctx):
     """In `-c opt`, AOT takes no SDK tree and asset bundling takes only the VM."""
     env = analysistest.begin(ctx)
@@ -408,6 +421,14 @@ def _dart_toolchain_inputs_test_impl(ctx):
 
 _flutter_test_runfiles_test = analysistest.make(_flutter_test_runfiles_test_impl)
 _flutter_test_defines_fallback_test = analysistest.make(_flutter_test_defines_fallback_test_impl)
+_flutter_comma_defines_fallback_test = analysistest.make(
+    _comma_defines_fallback_test_impl,
+    config_settings = {str(Label("//flutter:extra_dart_defines")): ["FOO=a,b"]},
+)
+_dart_comma_defines_fallback_test = analysistest.make(
+    _comma_defines_fallback_test_impl,
+    config_settings = {str(Label("@rules_dart//dart:extra_dart_defines")): ["FOO=a,b"]},
+)
 _application_opt_inputs_test = analysistest.make(
     _application_opt_inputs_test_impl,
     config_settings = {"//command_line_option:compilation_mode": "opt"},
@@ -520,6 +541,22 @@ def action_inputs_test_suite(name):
         name = name + "_flutter_test_defines_fallback",
         target_under_test = ":_inputs_flutter_test_defines",
     )
+    _flutter_comma_defines_fallback_test(
+        name = name + "_flutter_test_comma_defines_fallback",
+        target_under_test = ":_inputs_flutter_test",
+    )
+    _dart_comma_defines_fallback_test(
+        name = name + "_flutter_test_dart_comma_defines_fallback",
+        target_under_test = ":_inputs_flutter_test",
+    )
+    _flutter_comma_defines_fallback_test(
+        name = name + "_kernel_target_comma_defines_fallback",
+        target_under_test = ":_inputs_kernel_target",
+    )
+    _dart_comma_defines_fallback_test(
+        name = name + "_kernel_target_dart_comma_defines_fallback",
+        target_under_test = ":_inputs_kernel_target",
+    )
     _application_opt_inputs_test(
         name = name + "_application_opt",
         target_under_test = ":_inputs_application",
@@ -566,6 +603,10 @@ def action_inputs_test_suite(name):
         tests = [
             ":" + name + "_flutter_test_runfiles",
             ":" + name + "_flutter_test_defines_fallback",
+            ":" + name + "_flutter_test_comma_defines_fallback",
+            ":" + name + "_flutter_test_dart_comma_defines_fallback",
+            ":" + name + "_kernel_target_comma_defines_fallback",
+            ":" + name + "_kernel_target_dart_comma_defines_fallback",
             ":" + name + "_application_opt",
             ":" + name + "_application_opt_fonts",
             ":" + name + "_application_dbg",

@@ -868,7 +868,7 @@ _experiments_test = analysistest.make(
 )
 
 def _font_icon_tree_shake_test_impl(ctx):
-    """A release web build with fonts pre-links a modular dill for icon tree-shaking."""
+    """A fastbuild web build with fonts pre-links a modular dill for icon tree-shaking."""
     env = analysistest.begin(ctx)
     _action(env, "DartKernel")
     link_action = _action(env, "DartKernelLink")
@@ -883,6 +883,29 @@ def _font_icon_tree_shake_test_impl(ctx):
 
 _font_icon_tree_shake_test = analysistest.make(
     _font_icon_tree_shake_test_impl,
+    config_settings = {"//command_line_option:compilation_mode": "fastbuild"},
+)
+
+def _font_icon_tree_shake_opt_test_impl(ctx):
+    """An `-c opt` web build compiles the icon tree-shaking dill from source so `kReleaseMode` folds to `true`."""
+    env = analysistest.begin(ctx)
+    asserts.equals(
+        env,
+        [],
+        [a for a in analysistest.target_actions(env) if a.mnemonic == "DartKernelLink"],
+        "an -c opt web build must not link a debug modular dill for icon tree-shaking",
+    )
+    kernel_action = _action(env, "FlutterKernelCompile")
+    _assert_argv(
+        env,
+        kernel_action,
+        present = ["-Ddart.vm.product=true", "--no-embed-source-text"],
+        absent_substrings = ["--from-dill"],
+    )
+    return analysistest.end(env)
+
+_font_icon_tree_shake_opt_test = analysistest.make(
+    _font_icon_tree_shake_opt_test_impl,
     config_settings = {"//command_line_option:compilation_mode": "opt"},
 )
 
@@ -1614,6 +1637,10 @@ def web_test_suite(name):
     )
     _font_icon_tree_shake_test(
         name = name + "_font_icon_tree_shake",
+        target_under_test = ":_web_font_fixture",
+    )
+    _font_icon_tree_shake_opt_test(
+        name = name + "_font_icon_tree_shake_opt",
         target_under_test = ":_web_font_fixture",
     )
     build_test(

@@ -16,8 +16,8 @@ load("@rules_dart//dart:providers.bzl", "DartInfo", "DartKernelInfo")
 load(
     "@rules_dart//dart:utils.bzl",
     "KERNEL_MODULE_ATTRS",
-    "MODULAR_KERNEL_ATTRS",
     "MODULAR_KERNEL_TOOLCHAINS",
+    _DART_MODULAR_KERNEL_ATTRS = "MODULAR_KERNEL_ATTRS",
     "collect_transitive_srcs",
     "duplicated_source",
     "first_per_package",
@@ -44,17 +44,42 @@ FlutterKernelModuleInfo = provider(
     },
 )
 
+MODULAR_KERNEL_ATTRS = _DART_MODULAR_KERNEL_ATTRS | {
+    "_extra_dart_defines": attr.label(
+        default = Label("//flutter:extra_dart_defines"),
+        providers = [BuildSettingInfo],
+    ),
+    "_extra_dart_defines_from_dart": attr.label(
+        default = Label("@rules_dart//dart:extra_dart_defines"),
+        providers = [BuildSettingInfo],
+    ),
+}
+
+def _global_extra_defines(ctx):
+    defines = []
+    if hasattr(ctx.attr, "_extra_dart_defines") and ctx.attr._extra_dart_defines != None:
+        defines.extend(ctx.attr._extra_dart_defines[BuildSettingInfo].value)
+    if hasattr(ctx.attr, "_extra_dart_defines_from_dart") and ctx.attr._extra_dart_defines_from_dart != None:
+        defines.extend(ctx.attr._extra_dart_defines_from_dart[BuildSettingInfo].value)
+    return defines
+
+def _has_comma_defines(ctx):
+    return any(["," in d for d in _global_extra_defines(ctx)])
+
 def _kernel_worker_defines(ctx):
-    """Returns `--@rules_flutter//flutter:extra_dart_defines` entries supported by `kernel_worker`.
+    """Returns global `extra_dart_defines` entries supported by `kernel_worker`.
 
     `kernel_worker`'s `ArgParser` declares `-D` / `--define` with `package:args`'s
     default `splitCommas: true`, so a define whose value contains `,` (such as
     `e2e/hello_world/.bazelrc`'s `E2E_FLAG=from,flag`) would be split at the
     comma and rejected with `FormatException: no value given to -D option`.
+    When any global define contains `,`, `_has_comma_defines(ctx)` disables
+    modular kernel compilation so targets fall back to whole-program
+    `frontend_server` compilation instead of silently dropping the define.
     """
     return [
         d
-        for d in ctx.attr._extra_dart_defines[BuildSettingInfo].value
+        for d in _global_extra_defines(ctx)
         if "," not in d
     ]
 
@@ -94,7 +119,7 @@ def _flutter_kernel_module_aspect_impl(target, ctx):
     if own_srcs and (not package_name or own_record == None or any([not f.short_path.startswith(prefix) for f in own_srcs])):
         opaque = True
 
-    if opaque or not enabled or tools == None or flutter_sdk_info == None or flutter_sdk_info.platform_kernel_dill == None:
+    if opaque or not enabled or _has_comma_defines(ctx) or tools == None or flutter_sdk_info == None or flutter_sdk_info.platform_kernel_dill == None:
         return [FlutterKernelModuleInfo(kernel_info = no_kernel_module())]
 
     dep_kernels = [
@@ -236,6 +261,10 @@ flutter_kernel_module_aspect = aspect(
             default = Label("//flutter:extra_dart_defines"),
             providers = [BuildSettingInfo],
         ),
+        "_extra_dart_defines_from_dart": attr.label(
+            default = Label("@rules_dart//dart:extra_dart_defines"),
+            providers = [BuildSettingInfo],
+        ),
     },
     toolchains = [
         "@rules_flutter//flutter:toolchain_type",
@@ -258,7 +287,7 @@ def flutter_modular_test_tools(ctx, flutter_sdk_info, own_files, packages, nativ
       must fall back to whole-program `FlutterKernelCompile`.
     """
     enabled = ctx.attr._modular_kernel[BuildSettingInfo].value if hasattr(ctx.attr, "_modular_kernel") else True
-    if not enabled or flutter_sdk_info == None or flutter_sdk_info.platform_kernel_dill == None:
+    if not enabled or _has_comma_defines(ctx) or flutter_sdk_info == None or flutter_sdk_info.platform_kernel_dill == None:
         return None
     tools = kernel_tools_for(ctx)
     if tools == None:

@@ -1009,6 +1009,10 @@ PLATFORM_CONSTRAINT_ATTRS = {
     "_x86_64_constraint": attr.label(
         default = "@platforms//cpu:x86_64",
     ),
+    "_extra_dart_defines_from_dart": attr.label(
+        doc = "The @rules_dart//dart:extra_dart_defines build setting, appended alongside //flutter:extra_dart_defines.",
+        default = Label("@rules_dart//dart:extra_dart_defines"),
+    ),
 }
 
 def launch_build_args(target_platform, is_simulator, is_arm64, is_x86_64):
@@ -1090,10 +1094,14 @@ EXTRA_DART_DEFINES_ATTR = {
         doc = "The //flutter:extra_dart_defines build setting, appended after the target's own `defines`.",
         default = Label("//flutter:extra_dart_defines"),
     ),
+    "_extra_dart_defines_from_dart": attr.label(
+        doc = "The @rules_dart//dart:extra_dart_defines build setting, appended alongside //flutter:extra_dart_defines.",
+        default = Label("@rules_dart//dart:extra_dart_defines"),
+    ),
 }
 
 def merge_dart_defines(ctx):
-    """Merge a target's `defines` attr with the extra_dart_defines flag.
+    """Merge a target's `defines` attr with the extra_dart_defines flags.
 
     Flag values come after attr values, so on a duplicated key the command
     line wins (the compilers take the last -D). The flag validates its own
@@ -1106,7 +1114,10 @@ def merge_dart_defines(ctx):
         The merged list of KEY=VALUE define strings.
     """
     validate_dart_defines(ctx.attr.defines, "defines attribute of %s" % ctx.label)
-    return list(ctx.attr.defines) + ctx.attr._extra_dart_defines[BuildSettingInfo].value
+    extra = list(ctx.attr._extra_dart_defines[BuildSettingInfo].value)
+    if hasattr(ctx.attr, "_extra_dart_defines_from_dart") and ctx.attr._extra_dart_defines_from_dart != None:
+        extra.extend(ctx.attr._extra_dart_defines_from_dart[BuildSettingInfo].value)
+    return list(ctx.attr.defines) + extra
 
 # The attrs `flutter_compile_kernel` reads off its caller's `ctx`. Every rule
 # that calls it spreads this bundle wholesale rather than naming the members,
