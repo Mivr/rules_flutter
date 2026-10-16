@@ -355,7 +355,7 @@ def _flutter_windows_bundle_impl(ctx):
     config_file = ctx.actions.declare_file(ctx.label.name + "_bundle_config.json")
     ctx.actions.write(config_file, json.encode(config))
 
-    inputs = [config_file, flutter_assets, icu_data, runner_binary] + extra_inputs + native_libs + engine_files
+    inputs = [config_file, flutter_assets, icu_data, runner_binary] + extra_inputs + native_libs + engine_runtime_files
 
     dart_exe, dart_vm_files = resolve_exec_dart_vm(ctx, flutter_sdk_info)
     ctx.actions.run(

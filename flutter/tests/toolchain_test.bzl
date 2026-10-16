@@ -78,6 +78,25 @@ def _resolve_flutter_sdk_info_test_impl(ctx):
     asserts.equals(env, "libflutter_linux_gtk.so", merged.engine_library)
     asserts.equals(env, "sysroot_files", merged.linux_sysroot)
     asserts.equals(env, "MaterialIcons-Regular.otf", merged.material_icons_font)
+
+    mock_ctx_font_subset_tc = struct(
+        toolchains = {
+            "@rules_flutter//flutter:toolchain_type": struct(flutter_sdk_info = raw),
+            "@rules_flutter//flutter/private:product_tools_toolchain_type": struct(
+                platform_kernel_dill_product = "product.dill",
+                const_finder = None,
+                font_subset = None,
+            ),
+            "@rules_flutter//flutter/private:font_subset_toolchain_type": struct(
+                const_finder = "lazy_const_finder.snap",
+                font_subset = "lazy_font_subset",
+            ),
+        },
+    )
+    merged_lazy = resolve_flutter_sdk_info(mock_ctx_font_subset_tc)
+    asserts.equals(env, "product.dill", merged_lazy.platform_kernel_dill_product)
+    asserts.equals(env, "lazy_const_finder.snap", merged_lazy.const_finder)
+    asserts.equals(env, "lazy_font_subset", merged_lazy.font_subset)
     return unittest.end(env)
 
 def _resolve_exec_dart_test_impl(ctx):

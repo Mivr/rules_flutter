@@ -61,7 +61,7 @@ load(
     "flutter_kernel_module_aspect",
     "flutter_modular_test_tools",
 )
-load("//flutter/private:flutter_library.bzl", "aggregate_pub_contributions")
+load("//flutter/private:flutter_library.bzl", "aggregate_pub_contributions", "resolve_font_subset_tools")
 load(
     "//flutter/private:flutter_web_compile.bzl",
     "flutter_dart2js_action",
@@ -540,10 +540,11 @@ def _flutter_web_bundle_impl(ctx):
     # Web targets don't otherwise need a kernel (they use dart2wasm/dart2js),
     # so we compile one specifically for const_finder to analyze IconData constants.
     fonts, _ = aggregate_pub_contributions(ctx.attr.deps)
+    const_finder, font_subset = resolve_font_subset_tools(ctx.attr.deps, flutter_sdk_info) if fonts else (None, None)
+    has_font_tree_shake = bool(fonts) and const_finder != None and font_subset != None
+    has_experiment_kernel = bool(ctx.attr.enable_experiments) and flutter_sdk_info.platform_kernel_dill_product != None
     kernel_dill = None
-    if (ctx.attr.tree_shake_icons and not is_debug and
-        (bool(fonts) or bool(ctx.attr.enable_experiments)) and
-        flutter_sdk_info.const_finder != None and flutter_sdk_info.font_subset != None):
+    if ctx.attr.tree_shake_icons and not is_debug and (has_font_tree_shake or has_experiment_kernel):
         kernel_dill = ctx.actions.declare_file(ctx.label.name + "_icon_tree_shaking.dill")
         entrypoint_uri = app_main_package_uri(
             ctx.attr.package_name,

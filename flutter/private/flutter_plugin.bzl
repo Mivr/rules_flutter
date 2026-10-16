@@ -162,6 +162,7 @@ def _flutter_plugin_impl(ctx):
     # bundled assets — same shape as flutter_library). asset_pkg uses the
     # rule's `package_name` attr verbatim (empty = bare paths).
     asset_pkg = ctx.attr.package_name
+    font_subset_tc = ctx.toolchains["@rules_flutter//flutter/private:font_subset_toolchain_type"] if "@rules_flutter//flutter/private:font_subset_toolchain_type" in ctx.toolchains else None
     extra_pub_fonts, extra_pub_assets, extra_pub_shaders = build_pub_contributions(
         asset_pkg,
         ctx.attr.fonts_json,
@@ -169,6 +170,8 @@ def _flutter_plugin_impl(ctx):
         ctx.attr.pkg_assets,
         ctx.attr.pkg_shaders,
         ctx.files.shader_includes,
+        const_finder = font_subset_tc.const_finder if font_subset_tc else None,
+        font_subset = font_subset_tc.font_subset if font_subset_tc else None,
     )
 
     # `resources` names the non-Dart remainder of `lib/`; a Dart source there
@@ -222,9 +225,7 @@ def _flutter_plugin_impl(ctx):
         ),
     ]
 
-flutter_plugin = rule(
-    implementation = _flutter_plugin_impl,
-    attrs = {
+_FLUTTER_PLUGIN_ATTRS = {
         "_sky_engine": SKY_ENGINE_ATTR,
         "srcs": attr.label_list(
             doc = "Dart source files for the plugin's public API.",
@@ -342,6 +343,26 @@ flutter_plugin = rule(
             doc = "Map of shader File label -> package-relative path (mirrors `flutter.shaders`). Same shape as `flutter_library.pkg_shaders`.",
             allow_files = True,
         ),
-    },
+}
+
+flutter_plugin_rule = rule(
+    implementation = _flutter_plugin_impl,
+    attrs = _FLUTTER_PLUGIN_ATTRS,
     doc = "Declares a Flutter plugin with platform metadata and optional native dependencies.",
 )
+
+flutter_plugin_with_fonts_rule = rule(
+    implementation = _flutter_plugin_impl,
+    attrs = _FLUTTER_PLUGIN_ATTRS,
+    toolchains = [
+        config_common.toolchain_type("@rules_flutter//flutter/private:font_subset_toolchain_type", mandatory = False),
+    ],
+    doc = "Declares a Flutter plugin with font families, resolving font-subset tools lazily.",
+)
+
+def flutter_plugin(**kwargs):
+    """Declares a Flutter plugin with platform metadata and optional native dependencies."""
+    if kwargs.get("fonts_json"):
+        flutter_plugin_with_fonts_rule(**kwargs)
+    else:
+        flutter_plugin_rule(**kwargs)

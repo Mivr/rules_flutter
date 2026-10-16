@@ -249,6 +249,7 @@ load(
     "@rules_flutter//flutter:toolchain.bzl",
     "flutter_aot_toolchain",
     "flutter_desktop_engine_toolchain",
+    "flutter_font_subset_toolchain",
     "flutter_product_tools_toolchain",
     "flutter_toolchain",
 )
@@ -420,6 +421,15 @@ flutter_toolchain(
 
 flutter_product_tools_toolchain(
     name = "product_tools_toolchain",
+    platform_kernel_dill_product = select({{
+        "@rules_flutter//flutter/private:dbg": None,
+        "//conditions:default": ":patched-sdk-product/flutter_patched_sdk_product/platform_strong.dill",
+    }}),
+    visibility = ["//visibility:public"],
+)
+
+flutter_font_subset_toolchain(
+    name = "font_subset_toolchain",
     const_finder = select({{
         "@rules_flutter//flutter/private:dbg": None,
         "//conditions:default": ":font-subset-tools/const_finder.dart.snapshot",
@@ -427,10 +437,6 @@ flutter_product_tools_toolchain(
     font_subset = select({{
         "@rules_flutter//flutter/private:dbg": None,
         "//conditions:default": ":font-subset-tools/font-subset{exe_suffix}",
-    }}),
-    platform_kernel_dill_product = select({{
-        "@rules_flutter//flutter/private:dbg": None,
-        "//conditions:default": ":patched-sdk-product/flutter_patched_sdk_product/platform_strong.dill",
     }}),
     visibility = ["//visibility:public"],
 )

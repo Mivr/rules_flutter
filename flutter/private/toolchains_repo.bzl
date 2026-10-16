@@ -135,6 +135,14 @@ toolchain(
 )
 
 toolchain(
+    name = "{platform}_font_subset_toolchain",
+    exec_compatible_with = {compatible_with},
+    toolchain = "@{user_repository_name}_{platform}//:font_subset_toolchain",
+    toolchain_type = "@rules_flutter//flutter/private:font_subset_toolchain_type",
+    visibility = ["//visibility:public"],
+)
+
+toolchain(
     name = "{platform}_aot_toolchain",
     exec_compatible_with = {compatible_with},
     target_compatible_with = {compatible_with},

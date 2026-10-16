@@ -37,6 +37,12 @@ alias(
     visibility = ["//visibility:public"],
 )
 
+alias(
+    name = "font_subset_toolchain_type",
+    actual = "//flutter/private:font_subset_toolchain_type",
+    visibility = ["//visibility:public"],
+)
+
 # Compilation mode config_settings used by select() in macros.
 config_setting(
     name = "release",

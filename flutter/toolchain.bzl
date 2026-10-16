@@ -256,3 +256,24 @@ flutter_material_icons_toolchain = rule(
     },
     doc = "Lazy sub-toolchain providing the `MaterialIcons-Regular.otf` font.",
 )
+
+def _flutter_font_subset_toolchain_impl(ctx):
+    return [platform_common.ToolchainInfo(
+        const_finder = ctx.file.const_finder,
+        font_subset = ctx.file.font_subset,
+    )]
+
+flutter_font_subset_toolchain = rule(
+    implementation = _flutter_font_subset_toolchain_impl,
+    attrs = {
+        "const_finder": attr.label(
+            doc = "The `const_finder.dart.snapshot` for icon tree shaking.",
+            allow_single_file = True,
+        ),
+        "font_subset": attr.label(
+            doc = "The `font-subset` binary for font subsetting.",
+            allow_single_file = True,
+        ),
+    },
+    doc = "Lazy sub-toolchain providing the `const_finder` and `font-subset` icon tree-shaking tools.",
+)

@@ -31,6 +31,11 @@ toolchain_type(
     visibility = ["//visibility:public"],
 )
 
+toolchain_type(
+    name = "font_subset_toolchain_type",
+    visibility = ["//visibility:public"],
+)
+
 bzl_library(
     name = "common",
     srcs = ["common.bzl"],

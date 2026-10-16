@@ -133,11 +133,25 @@ def _application_opt_inputs_test_impl(ctx):
 
     asset_action = _find_action(env, ["FlutterAssetBundle"])
     asset_paths = _input_paths(asset_action)
+    _assert_no_path_contains(
+        env,
+        asset_paths,
+        ["/dart-sdk/", "/patched-sdk/", "const_finder", "font-subset", ".dill"],
+        "fontless release FlutterAssetBundle",
+    )
+    return analysistest.end(env)
+
+def _application_opt_fonts_inputs_test_impl(ctx):
+    """In `-c opt` with fonts, asset bundling stages the Dart VM and font-subset tools."""
+    env = analysistest.begin(ctx)
+
+    asset_action = _find_action(env, ["FlutterAssetBundle"])
+    asset_paths = _input_paths(asset_action)
     _assert_some_path_contains(
         env,
         asset_paths,
-        ["const_finder.dart.snapshot", "font-subset", "/dart-sdk/bin/dart"],
-        "release FlutterAssetBundle",
+        ["const_finder.dart.snapshot", "font-subset", "/dart-sdk/bin/dart", ".dill"],
+        "font-bearing release FlutterAssetBundle",
     )
     _assert_no_path_contains(
         env,
@@ -148,7 +162,7 @@ def _application_opt_inputs_test_impl(ctx):
             "/dart-sdk/bin/snapshots/",
             "/dart-sdk/bin/utils/",
         ],
-        "release FlutterAssetBundle",
+        "font-bearing release FlutterAssetBundle",
     )
     return analysistest.end(env)
 
@@ -394,6 +408,10 @@ _application_opt_inputs_test = analysistest.make(
     _application_opt_inputs_test_impl,
     config_settings = {"//command_line_option:compilation_mode": "opt"},
 )
+_application_opt_fonts_inputs_test = analysistest.make(
+    _application_opt_fonts_inputs_test_impl,
+    config_settings = {"//command_line_option:compilation_mode": "opt"},
+)
 _application_dbg_inputs_test = analysistest.make(
     _application_dbg_inputs_test_impl,
     config_settings = {"//command_line_option:compilation_mode": "dbg"},
@@ -435,6 +453,13 @@ def _setup_fixtures():
         name = "_inputs_application",
         package_name = _PACKAGE,
         main = _MAIN,
+        tags = ["manual"],
+    )
+    flutter_application(
+        name = "_inputs_application_with_fonts",
+        package_name = _PACKAGE,
+        main = _MAIN,
+        deps = ["//flutter:material_icons"],
         tags = ["manual"],
     )
     flutter_asset_bundle(
@@ -495,6 +520,10 @@ def action_inputs_test_suite(name):
         name = name + "_application_opt",
         target_under_test = ":_inputs_application",
     )
+    _application_opt_fonts_inputs_test(
+        name = name + "_application_opt_fonts",
+        target_under_test = ":_inputs_application_with_fonts",
+    )
     _application_dbg_inputs_test(
         name = name + "_application_dbg",
         target_under_test = ":_inputs_application",
@@ -534,6 +563,7 @@ def action_inputs_test_suite(name):
             ":" + name + "_flutter_test_runfiles",
             ":" + name + "_flutter_test_defines_fallback",
             ":" + name + "_application_opt",
+            ":" + name + "_application_opt_fonts",
             ":" + name + "_application_dbg",
             ":" + name + "_asset_bundle",
             ":" + name + "_aot_target",

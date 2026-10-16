@@ -59,6 +59,7 @@ FLUTTER_OPTIONAL_TOOLCHAINS = [
     config_common.toolchain_type("@rules_flutter//flutter/private:aot_toolchain_type", mandatory = False),
     config_common.toolchain_type("@rules_flutter//flutter/private:desktop_engine_toolchain_type", mandatory = False),
     config_common.toolchain_type("@rules_flutter//flutter/private:material_icons_toolchain_type", mandatory = False),
+    config_common.toolchain_type("@rules_flutter//flutter/private:font_subset_toolchain_type", mandatory = False),
 ]
 
 _DART_EXEC_TOOLS_TOOLCHAIN_TYPE = "@rules_dart//dart:exec_tools_toolchain_type"
@@ -101,8 +102,13 @@ def resolve_flutter_sdk_info(ctx):
         "@rules_flutter//flutter/private:material_icons_toolchain_type",
         "@rules_flutter//flutter:material_icons_toolchain_type",
     )
+    font_subset_tc = _lookup_sub_toolchain(
+        ctx,
+        "@rules_flutter//flutter/private:font_subset_toolchain_type",
+        "@rules_flutter//flutter:font_subset_toolchain_type",
+    )
 
-    if not product_tc and not aot_tc and not desktop_tc and not material_tc:
+    if not product_tc and not aot_tc and not desktop_tc and not material_tc and not font_subset_tc:
         return info
 
     fields = {
@@ -114,6 +120,10 @@ def resolve_flutter_sdk_info(ctx):
         for k in ("platform_kernel_dill_product", "const_finder", "font_subset"):
             if not fields.get(k):
                 fields[k] = getattr(product_tc, k, None)
+    if font_subset_tc:
+        for k in ("const_finder", "font_subset"):
+            if not fields.get(k):
+                fields[k] = getattr(font_subset_tc, k, None)
     if aot_tc and not fields.get("gen_snapshot"):
         fields["gen_snapshot"] = getattr(aot_tc, "gen_snapshot", None)
     if desktop_tc:

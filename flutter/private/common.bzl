@@ -18,7 +18,7 @@ load(
     "compile_flutter_modular_app_kernel",
     "flutter_modular_test_tools",
 )
-load("//flutter/private:flutter_library.bzl", "aggregate_pub_contributions", "build_pub_contributions")
+load("//flutter/private:flutter_library.bzl", "aggregate_pub_contributions", "build_pub_contributions", "resolve_font_subset_tools")
 load("//flutter/private:flutter_shader_compile.bzl", "flutter_shader_compile_action")
 load("//flutter/private:native_sources.bzl", "native_sources_aspect")
 load("//flutter/private:plugin_registrant.bzl", "generate_dart_plugin_registrant", "generate_dev_plugin_registrants")
@@ -770,13 +770,17 @@ def flutter_build_assets(ctx, flutter_sdk_info, output_dir, compiled_shaders = {
 
     license_files = ctx.files.license_files
 
-    # Icon tree shaking: enabled only in non-debug mode with tree_shake_icons=True.
+    const_finder, font_subset = resolve_font_subset_tools(ctx.attr.deps, flutter_sdk_info) if fonts else (None, None)
+
+    # Icon tree shaking: enabled only in non-debug mode with tree_shake_icons=True
+    # when the dependency graph actually contributes at least one font family.
     tree_shake_icons = (
         ctx.attr.tree_shake_icons and
+        bool(fonts) and
         not is_debug and
         kernel_dill != None and
-        flutter_sdk_info.const_finder != None and
-        flutter_sdk_info.font_subset != None
+        const_finder != None and
+        font_subset != None
     )
 
     return flutter_asset_bundle_action(
@@ -787,8 +791,8 @@ def flutter_build_assets(ctx, flutter_sdk_info, output_dir, compiled_shaders = {
         fonts = fonts,
         license_files = license_files,
         output_dir = output_dir,
-        const_finder = flutter_sdk_info.const_finder if tree_shake_icons else None,
-        font_subset = flutter_sdk_info.font_subset if tree_shake_icons else None,
+        const_finder = const_finder if tree_shake_icons else None,
+        font_subset = font_subset if tree_shake_icons else None,
         kernel_dill = kernel_dill if tree_shake_icons else None,
         extra_asset_copies = extra_asset_copies,
     )
