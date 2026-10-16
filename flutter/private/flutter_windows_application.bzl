@@ -21,7 +21,7 @@ Output bundle structure:
 
 load("//flutter:providers.bzl", "FlutterApplicationInfo")
 load("//flutter/private:cc_runner_compile.bzl", "compile_and_link_runner")
-load("//flutter/private:common.bzl", "compute_desktop_bundle_copies", "resolve_flutter_sdk_info")
+load("//flutter/private:common.bzl", "compute_desktop_bundle_copies", "resolve_exec_dart_vm", "resolve_flutter_sdk_info")
 load("//flutter/private:engine_helpers.bzl", "find_engine_header_dir")
 
 # =============================================================================
@@ -357,14 +357,17 @@ def _flutter_windows_bundle_impl(ctx):
 
     inputs = [config_file, flutter_assets, icu_data, runner_binary] + extra_inputs + native_libs + engine_files
 
+    dart_exe, dart_vm_files = resolve_exec_dart_vm(ctx, flutter_sdk_info)
     ctx.actions.run(
-        executable = ctx.executable._bundle_tool,
+        executable = dart_exe,
         arguments = [
+            ctx.executable._bundle_tool.path,
             "--config",
             config_file.path,
         ],
         inputs = depset(
-            direct = inputs,
+            direct = inputs + [ctx.executable._bundle_tool],
+            transitive = [dart_vm_files],
         ),
         outputs = [bundle_dir],
         mnemonic = "FlutterWindowsBundle",

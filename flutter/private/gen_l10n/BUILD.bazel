@@ -12,8 +12,9 @@ exports_files(
 
 dart_binary(
     name = "gen_l10n",
-    compile_mode = "exe",
+    compile_mode = "kernel",
     main = "main.dart",
+    modular_kernel = False,
     visibility = ["//flutter:__subpackages__"],
     deps = ["@flutter_gen_l10n//:gen_l10n"],
 )

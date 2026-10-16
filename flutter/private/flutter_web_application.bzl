@@ -49,6 +49,7 @@ load(
     "merge_dart_defines",
     "resolve_dev_generated_sources",
     "resolve_exec_dart",
+    "resolve_exec_dart_vm",
     "resolve_flutter_sdk_info",
     "shader_sources",
 )
@@ -801,14 +802,17 @@ def _flutter_web_bundle_impl(ctx):
     template_config_file = ctx.actions.declare_file(ctx.label.name + "_web_template_config.json")
     ctx.actions.write(template_config_file, json.encode(template_config))
 
+    dart_exe, dart_vm_files = resolve_exec_dart_vm(ctx, flutter_sdk_info)
     ctx.actions.run(
-        executable = ctx.executable._web_template_tool,
+        executable = dart_exe,
         arguments = [
+            ctx.executable._web_template_tool.path,
             "--config",
             template_config_file.path,
         ],
         inputs = depset(
-            direct = template_inputs + [template_config_file],
+            direct = template_inputs + [template_config_file, ctx.executable._web_template_tool],
+            transitive = [dart_vm_files],
         ),
         outputs = [index_html, bootstrap_js] + ([dev_bootstrap_js] if dev_bootstrap_js else []),
         mnemonic = "FlutterWebTemplate",
@@ -942,13 +946,15 @@ def _flutter_web_bundle_impl(ctx):
         all_inputs.append(service_worker_file)
 
     ctx.actions.run(
-        executable = ctx.executable._bundle_tool,
+        executable = dart_exe,
         arguments = [
+            ctx.executable._bundle_tool.path,
             "--config",
             bundle_config_file.path,
         ],
         inputs = depset(
-            direct = all_inputs,
+            direct = all_inputs + [ctx.executable._bundle_tool],
+            transitive = [dart_vm_files],
         ),
         outputs = [output_dir] + ([dump_info_file] if dump_info_file else []),
         mnemonic = "FlutterWebBundle",

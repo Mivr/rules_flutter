@@ -11,6 +11,8 @@ selected based on the target platform.
 # - Android/Linux/Windows: SKSL + GLES + GLES3 + Vulkan
 # - Web: SKSL only (with --json)
 # - flutter_tester (`flutter test`): SKSL + Vulkan, Impeller's backend there
+load("//flutter:providers.bzl", "resolve_exec_dart_vm")
+
 SHADER_PLATFORM_FLAGS = {
     "ios": ["--runtime-stage-metal"],
     "macos": ["--sksl", "--runtime-stage-metal"],
@@ -95,6 +97,7 @@ def flutter_shader_compile_action(
     inputs = [shader] + shader_lib + list(includes)
     retry_possible = "--sksl" in platform_flags and len(platform_flags) > 1
     if retry_possible:
+        dart_exe, dart_vm_files = resolve_exec_dart_vm(ctx)
         wrapper_args = ctx.actions.args()
         wrapper_args.add("--impellerc", impellerc)
         wrapper_args.add("--shader", shader.short_path)
@@ -102,9 +105,12 @@ def flutter_shader_compile_action(
             wrapper_args.add("--require-sksl")
         wrapper_args.add("--")
         ctx.actions.run(
-            executable = compile_tool,
-            arguments = [wrapper_args, args],
-            inputs = inputs + [impellerc],
+            executable = dart_exe,
+            arguments = [compile_tool.path, wrapper_args, args],
+            inputs = depset(
+                direct = inputs + [impellerc, compile_tool],
+                transitive = [dart_vm_files],
+            ),
             outputs = [output, spirv_output],
             mnemonic = "FlutterShaderCompile",
             progress_message = "Compiling shader %s for %s" % (shader.short_path, target_platform),

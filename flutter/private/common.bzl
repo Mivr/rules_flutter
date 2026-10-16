@@ -8,7 +8,7 @@ flutter_application, flutter_android_bundle, and flutter_ios_application.
 load("@bazel_skylib//rules:common_settings.bzl", "BuildSettingInfo")
 load("@rules_dart//dart:providers.bzl", "DartInfo")
 load("@rules_dart//dart:utils.bzl", "collect_packages", "collect_transitive_srcs", "derive_lib_root", "generate_dev_package_config", _DART_COPY_TO_DIRECTORY_TOOLCHAINS = "COPY_TO_DIRECTORY_TOOLCHAINS")
-load("//flutter:providers.bzl", "FlutterCompiledShadersInfo", "FlutterInfo", "FlutterNativeLibraryInfo", "FlutterSdkInfo", _resolve_exec_dart = "resolve_exec_dart", _resolve_flutter_sdk_info = "resolve_flutter_sdk_info")
+load("//flutter:providers.bzl", "FlutterCompiledShadersInfo", "FlutterInfo", "FlutterNativeLibraryInfo", "FlutterSdkInfo", _resolve_exec_dart = "resolve_exec_dart", _resolve_exec_dart_vm = "resolve_exec_dart_vm", _resolve_flutter_sdk_info = "resolve_flutter_sdk_info")
 load("//flutter/private:app_entrypoint.bzl", "APP_SCHEME", "app_main_location", "app_scheme_location", "app_scheme_sources", "compile_kernel_package_config", "resolve_kernel_entrypoint", "synthesize_app_package", "with_root")
 load("//flutter/private:flutter_asset_bundle.bzl", "flutter_asset_bundle_action")
 load("//flutter/private:flutter_compile.bzl", "flutter_kernel_compile_action")
@@ -20,6 +20,7 @@ load("//flutter/private:plugin_registrant.bzl", "generate_dart_plugin_registrant
 load("//flutter/private:validation.bzl", "validate_dart_defines")
 
 resolve_exec_dart = _resolve_exec_dart
+resolve_exec_dart_vm = _resolve_exec_dart_vm
 resolve_flutter_sdk_info = _resolve_flutter_sdk_info
 
 # rules_dart 0.7.2 exports COPY_TO_DIRECTORY_TOOLCHAINS as a plain string

@@ -147,6 +147,28 @@ def resolve_exec_dart(ctx, flutter_sdk_info = None):
         flutter_sdk_info = resolve_flutter_sdk_info(ctx)
     return flutter_sdk_info.dart
 
+def resolve_exec_dart_vm(ctx, flutter_sdk_info = None):
+    """Resolves `(dart_exe, runtime_files_depset)` for running a `.dill` tool on the exec platform.
+
+    Prefers `@rules_dart//dart:exec_tools_toolchain_type` (`dart_sdk_info.dart`
+    and `dart_sdk_info.runtime_files`), falling back to `flutter_sdk_info.dart`
+    and `flutter_sdk_info.dart_vm_files`.
+
+    Args:
+      ctx: Rule context.
+      flutter_sdk_info: Optional pre-resolved `FlutterSdkInfo` for the fallback path.
+
+    Returns:
+      A tuple `(dart_exe, runtime_files_depset)`.
+    """
+    if _DART_EXEC_TOOLS_TOOLCHAIN_TYPE in ctx.toolchains:
+        dart_tc = ctx.toolchains[_DART_EXEC_TOOLS_TOOLCHAIN_TYPE]
+        if dart_tc and getattr(dart_tc, "dart_sdk_info", None) and dart_tc.dart_sdk_info.dart:
+            return dart_tc.dart_sdk_info.dart, dart_tc.dart_sdk_info.runtime_files
+    if flutter_sdk_info == None:
+        flutter_sdk_info = resolve_flutter_sdk_info(ctx)
+    return flutter_sdk_info.dart, flutter_sdk_info.dart_vm_files
+
 FlutterInfo = provider(
     doc = """The channels a Flutter library contributes to its consumers.
 

@@ -227,6 +227,7 @@ bzl_library(
     name = "flutter_compile",
     srcs = ["flutter_compile.bzl"],
     visibility = ["//flutter:__subpackages__"],
+    deps = ["//flutter:providers"],
 )
 
 bzl_library(
@@ -265,6 +266,7 @@ bzl_library(
     name = "flutter_shader_compile",
     srcs = ["flutter_shader_compile.bzl"],
     visibility = ["//flutter:__subpackages__"],
+    deps = ["//flutter:providers"],
 )
 
 bzl_library(

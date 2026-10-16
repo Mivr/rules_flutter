@@ -5,6 +5,7 @@ Flutter compilation differs from vanilla Dart in that it uses:
 - The frontend_server_aot.dart.snapshot instead of `dart compile kernel`
 """
 
+load("//flutter:providers.bzl", "resolve_exec_dart_vm")
 load("//flutter/private:app_entrypoint.bzl", "APP_SCHEME")
 
 def flutter_kernel_compile_action(
@@ -174,11 +175,13 @@ def flutter_kernel_compile_action(
     if recorded_uses != None:
         outputs.append(recorded_uses)
 
+    dart_exe, dart_vm_files = resolve_exec_dart_vm(ctx)
     ctx.actions.run(
-        executable = kernel_filter_tool,
-        arguments = [args],
+        executable = dart_exe,
+        arguments = [kernel_filter_tool.path, args],
         inputs = depset(
-            direct = direct_inputs + [dartaotruntime],
+            direct = direct_inputs + [dartaotruntime, kernel_filter_tool],
+            transitive = [dart_vm_files],
         ),
         outputs = outputs,
         mnemonic = "FlutterKernelCompile",

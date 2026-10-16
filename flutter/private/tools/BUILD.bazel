@@ -37,15 +37,17 @@ dart_binary(
 
 dart_binary(
     name = "bundle_app",
-    compile_mode = "exe",
+    compile_mode = "kernel",
     main = "bundle_app.dart",
+    modular_kernel = False,
     visibility = ["//flutter:__subpackages__"],
 )
 
 dart_binary(
     name = "compile_shader",
-    compile_mode = "exe",
+    compile_mode = "kernel",
     main = "compile_shader.dart",
+    modular_kernel = False,
     visibility = ["//flutter:__subpackages__"],
 )
 
@@ -58,8 +60,9 @@ dart_binary(
 
 dart_binary(
     name = "kernel_filter",
-    compile_mode = "exe",
+    compile_mode = "kernel",
     main = "kernel_filter.dart",
+    modular_kernel = False,
     visibility = ["//flutter:__subpackages__"],
 )
 
@@ -79,8 +82,9 @@ dart_binary(
 
 dart_binary(
     name = "web_template",
-    compile_mode = "exe",
+    compile_mode = "kernel",
     main = "web_template.dart",
+    modular_kernel = False,
     visibility = ["//flutter:__subpackages__"],
 )
 
