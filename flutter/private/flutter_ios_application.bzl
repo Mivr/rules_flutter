@@ -180,10 +180,20 @@ def _flutter_ios_framework_impl(ctx):
         )
 
         # Copy flutter_assets into the framework.
-        ctx.actions.run_shell(
-            command = 'cp -RL "$1"/. "$2"',
-            arguments = [flutter_assets.path, framework_assets.path],
-            inputs = [flutter_assets],
+        ctx.actions.run(
+            executable = dart_exe,
+            arguments = [
+                ctx.executable._macho_edit.path,
+                "copy-assets",
+                "--src",
+                flutter_assets.path,
+                "--dst",
+                framework_assets.path,
+            ],
+            inputs = depset(
+                direct = [flutter_assets, ctx.executable._macho_edit],
+                transitive = [dart_vm_files],
+            ),
             outputs = [framework_assets],
             mnemonic = "FlutterIOSCopyAssets",
             progress_message = "Copying flutter_assets into App.framework",
@@ -248,23 +258,32 @@ def _flutter_ios_framework_impl(ctx):
         vm_snapshot = flutter_sdk_info.vm_isolate_snapshot
         iso_snapshot = flutter_sdk_info.isolate_snapshot
 
-        copy_cmd = 'cp -RL "$1"/. "$2" && cp "$3" "$2/kernel_blob.bin"'
-        copy_args = [flutter_assets.path, framework_assets.path, kernel_dill.path]
-        copy_inputs = [flutter_assets, kernel_dill]
+        copy_args = [
+            ctx.executable._macho_edit.path,
+            "copy-assets",
+            "--src",
+            flutter_assets.path,
+            "--dst",
+            framework_assets.path,
+            "--kernel-blob",
+            kernel_dill.path,
+        ]
+        copy_inputs = [flutter_assets, kernel_dill, ctx.executable._macho_edit]
 
         if vm_snapshot:
-            copy_cmd += ' && cp "$4" "$2/vm_snapshot_data"'
-            copy_args.append(vm_snapshot.path)
+            copy_args.extend(["--vm-snapshot-data", vm_snapshot.path])
             copy_inputs.append(vm_snapshot)
         if iso_snapshot:
-            copy_cmd += ' && cp "%s" "$2/isolate_snapshot_data"' % ("$5" if vm_snapshot else "$4")
-            copy_args.append(iso_snapshot.path)
+            copy_args.extend(["--isolate-snapshot-data", iso_snapshot.path])
             copy_inputs.append(iso_snapshot)
 
-        ctx.actions.run_shell(
-            command = copy_cmd,
+        ctx.actions.run(
+            executable = dart_exe,
             arguments = copy_args,
-            inputs = copy_inputs,
+            inputs = depset(
+                direct = copy_inputs,
+                transitive = [dart_vm_files],
+            ),
             outputs = [framework_assets],
             mnemonic = "FlutterIOSDebugAssets",
             progress_message = "Assembling debug App.framework with kernel and VM snapshots",

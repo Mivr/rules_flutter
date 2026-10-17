@@ -395,5 +395,134 @@ void main() {
 
       expect(dummyOut.readAsStringSync(), 'not a macho file');
     });
+
+    test('stub --type execute generates valid MH_EXECUTE Mach-O binary', () {
+      final execPath = '${tempDir.path}/Runner';
+      macho.main([
+        'stub',
+        '--type',
+        'execute',
+        '--output',
+        execPath,
+        '--arch',
+        'arm64',
+        '--platform',
+        'ios',
+        '--min-os',
+        '14.0',
+      ]);
+
+      final bytes = File(execPath).readAsBytesSync();
+      expect(macho.isMachO64(bytes), isTrue);
+      final bd = ByteData.sublistView(bytes);
+      expect(bd.getUint32(12, Endian.little), macho.mhExecute);
+      expect(bd.getUint32(24, Endian.little), macho.mhPie);
+      final cmds = macho.parseLoadCommands(bytes);
+      expect(cmds.where((c) => c.cmd == macho.lcIdDylib), isEmpty);
+      expect(cmds.where((c) => c.cmd == macho.lcBuildVersion).length, 1);
+      expect(cmds.where((c) => c.cmd == macho.lcRpath).length, 1);
+    });
+
+    test('copy-assets copies directory tree and optional debug snapshots', () {
+      final srcAssets = Directory('${tempDir.path}/src_assets/sub')
+        ..createSync(recursive: true);
+      File('${srcAssets.path}/a.txt').writeAsStringSync('hello');
+      final dill = File('${tempDir.path}/app.dill')..writeAsStringSync('dill');
+      final vmSnap = File('${tempDir.path}/vm.bin')..writeAsStringSync('vm');
+      final isoSnap = File('${tempDir.path}/iso.bin')..writeAsStringSync('iso');
+      final dstAssets = '${tempDir.path}/dst_assets';
+
+      macho.main([
+        'copy-assets',
+        '--src',
+        '${tempDir.path}/src_assets',
+        '--dst',
+        dstAssets,
+        '--kernel-blob',
+        dill.path,
+        '--vm-snapshot-data',
+        vmSnap.path,
+        '--isolate-snapshot-data',
+        isoSnap.path,
+      ]);
+
+      expect(File('$dstAssets/sub/a.txt').readAsStringSync(), 'hello');
+      expect(File('$dstAssets/kernel_blob.bin').readAsStringSync(), 'dill');
+      expect(File('$dstAssets/vm_snapshot_data').readAsStringSync(), 'vm');
+      expect(
+        File('$dstAssets/isolate_snapshot_data').readAsStringSync(),
+        'iso',
+      );
+    });
+
+    test(
+      'assemble-macos-framework builds versioned macOS App.framework layout',
+      () {
+        final binFile = File('${tempDir.path}/App_bin')
+          ..writeAsBytesSync([1, 2, 3, 4]);
+        final plistFile = File('${tempDir.path}/Info.plist')
+          ..writeAsStringSync('<plist/>');
+        final assetsDir = Directory('${tempDir.path}/flutter_assets')
+          ..createSync(recursive: true);
+        File('${assetsDir.path}/AssetManifest.bin').writeAsBytesSync([9, 9]);
+        final wrapperDir = '${tempDir.path}/wrapper';
+
+        macho.main([
+          'assemble-macos-framework',
+          '--binary',
+          binFile.path,
+          '--info-plist',
+          plistFile.path,
+          '--assets',
+          assetsDir.path,
+          '--output-dir',
+          wrapperDir,
+        ]);
+
+        final fwPath = '$wrapperDir/App.framework';
+        expect(File('$fwPath/Versions/A/App').readAsBytesSync(), [1, 2, 3, 4]);
+        expect(
+          File('$fwPath/Versions/A/Resources/Info.plist').readAsStringSync(),
+          '<plist/>',
+        );
+        expect(
+          File(
+            '$fwPath/Versions/A/Resources/flutter_assets/AssetManifest.bin',
+          ).readAsBytesSync(),
+          [9, 9],
+        );
+        expect(Link('$fwPath/Versions/Current').targetSync(), 'A');
+        expect(Link('$fwPath/App').targetSync(), 'Versions/Current/App');
+        expect(
+          Link('$fwPath/Resources').targetSync(),
+          'Versions/Current/Resources',
+        );
+      },
+    );
+
+    test(
+      'copy-files copies source files under basenames or explicit names',
+      () {
+        final f1 = File('${tempDir.path}/one/libadd.dylib')
+          ..parent.createSync(recursive: true)
+          ..writeAsStringSync('add');
+        final f2 = File('${tempDir.path}/two/libsub.dylib')
+          ..parent.createSync(recursive: true)
+          ..writeAsStringSync('sub');
+        final outDir = '${tempDir.path}/staged';
+
+        macho.main([
+          'copy-files',
+          '--output-dir',
+          outDir,
+          f1.path,
+          'libadd.dylib',
+          f2.path,
+        ]);
+
+        expect(File('$outDir/libadd.dylib').readAsStringSync(), 'add');
+        expect(File('$outDir/libsub.dylib').readAsStringSync(), 'sub');
+      },
+    );
   });
 }

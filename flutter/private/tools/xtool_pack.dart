@@ -1234,11 +1234,10 @@ void assembleBundle(BundleConfig config) {
     final executablePaths = <String>{};
 
     // 1. Copy main executable.
+    // Executable permissions (0755) are recorded directly in the ZIP central
+    // directory via executablePaths without spawning an external chmod process.
     final destExecPath = '${execDir.path}/${config.appName}';
     execFile.copySync(destExecPath);
-    if (!Platform.isWindows) {
-      Process.runSync('chmod', ['755', destExecPath]);
-    }
     executablePaths.add(
       isMacOS
           ? '$appRelPath/Contents/MacOS/${config.appName}'
@@ -1384,6 +1383,392 @@ void assembleBundle(BundleConfig config) {
 }
 
 // ---------------------------------------------------------------------------
+// 7. Darwin SDK resolution and Mach-O MH_EXECUTE runner compilation
+// ---------------------------------------------------------------------------
+
+int _packMachOVersion(String version) {
+  final parts = version.split('.');
+  final major = parts.isNotEmpty ? (int.tryParse(parts[0]) ?? 0) : 0;
+  final minor = parts.length > 1 ? (int.tryParse(parts[1]) ?? 0) : 0;
+  final patch = parts.length > 2 ? (int.tryParse(parts[2]) ?? 0) : 0;
+  return ((major & 0xffff) << 16) | ((minor & 0xff) << 8) | (patch & 0xff);
+}
+
+int _machOPlatformConstant(String platform) {
+  switch (platform) {
+    case 'macos':
+      return 1; // PLATFORM_MACOS
+    case 'ios':
+      return 2; // PLATFORM_IOS
+    case 'ios_sim':
+      return 7; // PLATFORM_IOSSIMULATOR
+    default:
+      throw ArgumentError('Unsupported platform: $platform');
+  }
+}
+
+Uint8List _encodeMachOLoadDylibCommand(String installName) {
+  final nameBytes = utf8.encode(installName);
+  const headerSize = 24;
+  final unpadded = headerSize + nameBytes.length + 1;
+  final cmdSize = (unpadded + 7) & ~7;
+  final bytes = Uint8List(cmdSize);
+  final bd = ByteData.sublistView(bytes);
+  bd.setUint32(0, 0x0c, Endian.little); // LC_LOAD_DYLIB
+  bd.setUint32(4, cmdSize, Endian.little);
+  bd.setUint32(8, headerSize, Endian.little); // name offset
+  bd.setUint32(12, 2, Endian.little); // timestamp
+  bd.setUint32(16, 0x00010000, Endian.little); // current_version 1.0.0
+  bd.setUint32(20, 0x00010000, Endian.little); // compatibility_version 1.0.0
+  bytes.setRange(headerSize, headerSize + nameBytes.length, nameBytes);
+  return bytes;
+}
+
+Uint8List _encodeMachORpathCommand(String rpath) {
+  final pathBytes = utf8.encode(rpath);
+  const headerSize = 12;
+  final unpadded = headerSize + pathBytes.length + 1;
+  final cmdSize = (unpadded + 7) & ~7;
+  final bytes = Uint8List(cmdSize);
+  final bd = ByteData.sublistView(bytes);
+  bd.setUint32(0, 0x8000001c, Endian.little); // LC_RPATH
+  bd.setUint32(4, cmdSize, Endian.little);
+  bd.setUint32(8, headerSize, Endian.little); // path offset
+  bytes.setRange(headerSize, headerSize + pathBytes.length, pathBytes);
+  return bytes;
+}
+
+Uint8List _encodeMachOBuildVersionCommand({
+  required int platform,
+  required int minos,
+  required int sdk,
+}) {
+  final bytes = Uint8List(24);
+  final bd = ByteData.sublistView(bytes);
+  bd.setUint32(0, 0x32, Endian.little); // LC_BUILD_VERSION
+  bd.setUint32(4, 24, Endian.little); // cmdsize
+  bd.setUint32(8, platform, Endian.little);
+  bd.setUint32(12, minos, Endian.little);
+  bd.setUint32(16, sdk, Endian.little);
+  bd.setUint32(20, 0, Endian.little); // ntools = 0
+  return bytes;
+}
+
+/// Synthesizes a 64-bit Mach-O `MH_EXECUTE` runner binary with
+/// `LC_BUILD_VERSION`, `LC_RPATH`, and `LC_LOAD_DYLIB` commands.
+Uint8List generateStubExecutableMachO({
+  required String platform,
+  String arch = 'arm64',
+  required String minimumOsVersion,
+  List<String> linkedFrameworkNames = const [],
+  List<String> metadataEntries = const [],
+}) {
+  final int cpuType;
+  final int cpuSubtype;
+  switch (arch) {
+    case 'arm64':
+      cpuType = 0x0100000c; // CPU_TYPE_ARM64
+      cpuSubtype = 0; // CPU_SUBTYPE_ARM64_ALL
+    case 'x86_64':
+      cpuType = 0x01000007; // CPU_TYPE_X86_64
+      cpuSubtype = 3; // CPU_SUBTYPE_X86_64_ALL
+    default:
+      throw ArgumentError('Unsupported architecture "$arch".');
+  }
+
+  final versionPacked = _packMachOVersion(minimumOsVersion);
+  final rpath = platform == 'macos'
+      ? '@executable_path/../Frameworks'
+      : '@executable_path/Frameworks';
+
+  final loadCommands = <Uint8List>[
+    _encodeMachOBuildVersionCommand(
+      platform: _machOPlatformConstant(platform),
+      minos: versionPacked,
+      sdk: versionPacked,
+    ),
+    _encodeMachORpathCommand(rpath),
+    for (final fw in linkedFrameworkNames)
+      _encodeMachOLoadDylibCommand('@rpath/$fw.framework/$fw'),
+  ];
+
+  final sizeofcmds = loadCommands.fold<int>(0, (s, c) => s + c.length);
+  final metadataText = metadataEntries.isEmpty
+      ? ''
+      : '${metadataEntries.join('\n')}\n';
+  final metadataBytes = utf8.encode(metadataText);
+  final paddedMetaLen = (metadataBytes.length + 7) & ~7;
+
+  final totalSize = 32 + sizeofcmds + paddedMetaLen;
+  final out = Uint8List(totalSize);
+  final bd = ByteData.sublistView(out);
+  bd.setUint32(0, 0xfeedfacf, Endian.little); // MH_MAGIC_64
+  bd.setInt32(4, cpuType, Endian.little);
+  bd.setInt32(8, cpuSubtype, Endian.little);
+  bd.setUint32(12, 0x2, Endian.little); // MH_EXECUTE
+  bd.setUint32(16, loadCommands.length, Endian.little);
+  bd.setUint32(20, sizeofcmds, Endian.little);
+  bd.setUint32(24, 0x00200001, Endian.little); // MH_NOUNDEFS | MH_PIE
+  bd.setUint32(28, 0, Endian.little); // reserved
+
+  var offset = 32;
+  for (final cmd in loadCommands) {
+    out.setRange(offset, offset + cmd.length, cmd);
+    offset += cmd.length;
+  }
+  if (metadataBytes.isNotEmpty) {
+    out.setRange(offset, offset + metadataBytes.length, metadataBytes);
+  }
+  return out;
+}
+
+/// Resolves the platform `.sdk` directory inside a `darwin.artifactbundle`
+/// directory for [platform] (`ios`, `ios_sim`, or `macos`).
+Directory resolveDarwinSdkPathFromArtifactBundle(
+  Directory sdkRoot,
+  String platform,
+) {
+  if (!sdkRoot.existsSync()) {
+    throw ArgumentError('SDK root directory does not exist: ${sdkRoot.path}');
+  }
+
+  final String sdkPrefix;
+  final String defaultDirName;
+  switch (platform) {
+    case 'ios':
+      sdkPrefix = 'iphoneos';
+      defaultDirName = 'iPhoneOS.sdk';
+    case 'ios_sim':
+      sdkPrefix = 'iphonesimulator';
+      defaultDirName = 'iPhoneSimulator.sdk';
+    case 'macos':
+      sdkPrefix = 'macosx';
+      defaultDirName = 'MacOSX.sdk';
+    default:
+      throw ArgumentError('Unsupported platform "$platform".');
+  }
+
+  final infoJsonFile = File('${sdkRoot.path}/info.json');
+  if (infoJsonFile.existsSync()) {
+    final decoded = jsonDecode(infoJsonFile.readAsStringSync());
+    if (decoded is Map<String, Object?>) {
+      final artifacts = decoded['artifacts'];
+      if (artifacts is Map<String, Object?>) {
+        for (final entry in artifacts.entries) {
+          final keyLower = entry.key.toLowerCase();
+          final val = entry.value;
+          if (val is Map<String, Object?>) {
+            final variants = val['variants'];
+            if (variants is List<Object?>) {
+              for (final v in variants) {
+                if (v is Map<String, Object?>) {
+                  final path = v['path'];
+                  if (path is String &&
+                      (keyLower.startsWith(sdkPrefix) ||
+                          path.toLowerCase().contains(sdkPrefix))) {
+                    final candidate = Directory('${sdkRoot.path}/$path');
+                    if (candidate.existsSync()) {
+                      return candidate;
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
+  final fallback = Directory('${sdkRoot.path}/$defaultDirName');
+  if (fallback.existsSync()) {
+    return fallback;
+  }
+
+  throw ArgumentError(
+    'Could not resolve Darwin SDK for platform "$platform" in ${sdkRoot.path}',
+  );
+}
+
+/// Configuration for compiling or synthesizing an iOS/macOS runner binary.
+class RunnerCompileConfig {
+  final String platform; // 'ios', 'ios_sim', or 'macos'
+  final String arch; // 'arm64' or 'x86_64'
+  final String appName;
+  final String minimumOsVersion;
+  final bool sdkAvailable;
+  final String? sdkRootPath;
+  final String? swiftcPath;
+  final String? clangPath;
+  final List<String> sourcePaths;
+  final List<String> headerPaths;
+  final List<String> modulemapPaths;
+  final List<String> frameworkPaths;
+  final String outputPath;
+
+  const RunnerCompileConfig({
+    required this.platform,
+    this.arch = 'arm64',
+    required this.appName,
+    required this.minimumOsVersion,
+    this.sdkAvailable = false,
+    this.sdkRootPath,
+    this.swiftcPath,
+    this.clangPath,
+    this.sourcePaths = const [],
+    this.headerPaths = const [],
+    this.modulemapPaths = const [],
+    this.frameworkPaths = const [],
+    required this.outputPath,
+  });
+}
+
+/// Compiles or synthesizes a Mach-O `MH_EXECUTE` runner binary from
+/// [RunnerCompileConfig].
+void compileRunner(RunnerCompileConfig config) {
+  if (config.platform != 'ios' &&
+      config.platform != 'ios_sim' &&
+      config.platform != 'macos') {
+    throw ArgumentError(
+      'Unsupported platform "${config.platform}". Expected ios, ios_sim, or macos.',
+    );
+  }
+
+  for (final src in config.sourcePaths) {
+    if (!File(src).existsSync()) {
+      throw ArgumentError('Runner source file does not exist: $src');
+    }
+  }
+  for (final hdr in config.headerPaths) {
+    if (!File(hdr).existsSync()) {
+      throw ArgumentError('Runner header file does not exist: $hdr');
+    }
+  }
+  for (final mm in config.modulemapPaths) {
+    if (!File(mm).existsSync()) {
+      throw ArgumentError('Runner modulemap file does not exist: $mm');
+    }
+  }
+
+  final resolvedFrameworkDirs = <Directory>[];
+  final linkedFrameworkNames = <String>[];
+  for (final fwInput in config.frameworkPaths) {
+    final dirs = resolveFrameworkDirectories(fwInput, config.platform);
+    for (final d in dirs) {
+      resolvedFrameworkDirs.add(d);
+      final base = d.uri.pathSegments.where((s) => s.isNotEmpty).last;
+      final fwName = base.endsWith('.framework')
+          ? base.substring(0, base.length - '.framework'.length)
+          : base;
+      if (!linkedFrameworkNames.contains(fwName)) {
+        linkedFrameworkNames.add(fwName);
+      }
+    }
+  }
+
+  Directory? resolvedSdkDir;
+  if (config.sdkAvailable &&
+      config.sdkRootPath != null &&
+      config.sdkRootPath!.isNotEmpty) {
+    resolvedSdkDir = resolveDarwinSdkPathFromArtifactBundle(
+      Directory(config.sdkRootPath!),
+      config.platform,
+    );
+  }
+
+  if (config.sdkAvailable &&
+      config.swiftcPath != null &&
+      config.swiftcPath!.isNotEmpty) {
+    final String targetTriple;
+    switch (config.platform) {
+      case 'ios':
+        targetTriple = '${config.arch}-apple-ios${config.minimumOsVersion}';
+      case 'ios_sim':
+        targetTriple =
+            '${config.arch}-apple-ios${config.minimumOsVersion}-simulator';
+      case 'macos':
+        targetTriple = '${config.arch}-apple-macos${config.minimumOsVersion}';
+      default:
+        throw StateError('Unreachable');
+    }
+
+    final swiftcArgs = <String>[
+      '-target',
+      targetTriple,
+      if (resolvedSdkDir != null) ...['-sdk', resolvedSdkDir.path],
+    ];
+
+    final seenFwParents = <String>{};
+    for (final fwDir in resolvedFrameworkDirs) {
+      final parentPath = fwDir.parent.path;
+      if (seenFwParents.add(parentPath)) {
+        swiftcArgs.addAll(['-F', parentPath]);
+      }
+    }
+    for (final fwName in linkedFrameworkNames) {
+      swiftcArgs.addAll(['-framework', fwName]);
+    }
+
+    final seenHeaderDirs = <String>{};
+    for (final hdr in config.headerPaths) {
+      final dirPath = File(hdr).parent.path;
+      if (seenHeaderDirs.add(dirPath)) {
+        swiftcArgs.addAll(['-I', dirPath]);
+      }
+    }
+    for (final mm in config.modulemapPaths) {
+      swiftcArgs.addAll(['-Xcc', '-fmodule-map-file=$mm']);
+    }
+
+    swiftcArgs.addAll([
+      ...config.sourcePaths,
+      '-emit-executable',
+      '-o',
+      config.outputPath,
+    ]);
+
+    File(config.outputPath).parent.createSync(recursive: true);
+    final result = Process.runSync(config.swiftcPath!, swiftcArgs);
+    if (result.exitCode != 0) {
+      throw ProcessException(
+        config.swiftcPath!,
+        swiftcArgs,
+        'swiftc failed (exit ${result.exitCode}):\n${result.stderr}',
+        result.exitCode,
+      );
+    }
+    return;
+  }
+
+  final metadataEntries = <String>[
+    'app=${config.appName}',
+    'platform=${config.platform}',
+    'arch=${config.arch}',
+    'sdk_available=${config.sdkAvailable}',
+    if (resolvedSdkDir != null)
+      'sdk=${resolvedSdkDir.uri.pathSegments.where((s) => s.isNotEmpty).last}',
+    for (final src in config.sourcePaths)
+      'source=${Uri.file(src).pathSegments.where((s) => s.isNotEmpty).last}',
+    for (final hdr in config.headerPaths)
+      'header=${Uri.file(hdr).pathSegments.where((s) => s.isNotEmpty).last}',
+    for (final mm in config.modulemapPaths)
+      'modulemap=${Uri.file(mm).pathSegments.where((s) => s.isNotEmpty).last}',
+    for (final fw in linkedFrameworkNames) 'framework=$fw',
+  ];
+
+  final machoBytes = generateStubExecutableMachO(
+    platform: config.platform,
+    arch: config.arch,
+    minimumOsVersion: config.minimumOsVersion,
+    linkedFrameworkNames: linkedFrameworkNames,
+    metadataEntries: metadataEntries,
+  );
+  final outFile = File(config.outputPath);
+  outFile.parent.createSync(recursive: true);
+  outFile.writeAsBytesSync(machoBytes);
+}
+
+// ---------------------------------------------------------------------------
 // CLI entrypoint
 // ---------------------------------------------------------------------------
 
@@ -1412,14 +1797,106 @@ Never _usageError(String message) {
   exit(1);
 }
 
+void _runCompileRunnerCli(List<String> args) {
+  String? platform;
+  String arch = 'arm64';
+  String? appName;
+  String minimumOsVersion = '14.0';
+  bool sdkAvailable = false;
+  String? sdkRootPath;
+  String? swiftcPath;
+  String? clangPath;
+  final sourcePaths = <String>[];
+  final headerPaths = <String>[];
+  final modulemapPaths = <String>[];
+  final frameworkPaths = <String>[];
+  String? outputPath;
+
+  for (var i = 0; i < args.length; i++) {
+    final arg = args[i];
+    String nextVal() {
+      if (i + 1 >= args.length) {
+        _usageError('Missing value for $arg.');
+      }
+      return args[++i];
+    }
+
+    switch (arg) {
+      case '--platform':
+        platform = nextVal();
+      case '--arch':
+        arch = nextVal();
+      case '--app-name':
+        appName = nextVal();
+      case '--minimum-os-version':
+        minimumOsVersion = nextVal();
+      case '--sdk-available':
+        sdkAvailable = nextVal().toLowerCase() == 'true';
+      case '--sdk-root':
+        sdkRootPath = nextVal();
+      case '--swiftc':
+        swiftcPath = nextVal();
+      case '--clang':
+        clangPath = nextVal();
+      case '--source':
+        sourcePaths.add(nextVal());
+      case '--header':
+        headerPaths.add(nextVal());
+      case '--modulemap':
+        modulemapPaths.add(nextVal());
+      case '--framework':
+        frameworkPaths.add(nextVal());
+      case '--output':
+        outputPath = nextVal();
+      default:
+        _usageError('Unrecognized argument for compile-runner: $arg');
+    }
+  }
+
+  if (platform == null || appName == null || outputPath == null) {
+    _usageError(
+      'Required flags for compile-runner: --platform, --app-name, --output.',
+    );
+  }
+
+  try {
+    compileRunner(
+      RunnerCompileConfig(
+        platform: platform,
+        arch: arch,
+        appName: appName,
+        minimumOsVersion: minimumOsVersion,
+        sdkAvailable: sdkAvailable,
+        sdkRootPath: sdkRootPath,
+        swiftcPath: swiftcPath,
+        clangPath: clangPath,
+        sourcePaths: sourcePaths,
+        headerPaths: headerPaths,
+        modulemapPaths: modulemapPaths,
+        frameworkPaths: frameworkPaths,
+        outputPath: outputPath,
+      ),
+    );
+  } on Object catch (e) {
+    stderr.writeln('xtool_pack compile-runner failed: $e');
+    exit(1);
+  }
+}
+
 void main(List<String> args) {
   if (args.isEmpty) {
-    _usageError('Missing subcommand (expected "bundle").');
+    _usageError('Missing subcommand (expected "bundle" or "compile-runner").');
   }
 
   final subcommand = args.first;
+  if (subcommand == 'compile-runner') {
+    _runCompileRunnerCli(args.sublist(1));
+    return;
+  }
   if (subcommand != 'bundle') {
-    _usageError('Unknown subcommand "$subcommand" (expected "bundle").');
+    _usageError(
+      'Unknown subcommand "$subcommand" (expected "bundle" or "compile-runner").',
+    );
   }
 
   String? platform;

@@ -21,8 +21,10 @@ const int cpuSubtypeX86_64All = 3;
 const int cpuTypeArm64 = 0x0000000c | cpuArchAbi64; // 0x0100000c
 const int cpuSubtypeArm64All = 0;
 
+const int mhExecute = 0x2;
 const int mhDylib = 0x6;
 const int mhNoReexportedDylibs = 0x00100000;
+const int mhPie = 0x00200000;
 
 // Load command constants.
 const int lcReqDyld = 0x80000000;
@@ -56,7 +58,10 @@ const int csHashTypeSha256 = 2;
 
 void main(List<String> args) {
   if (args.isEmpty) {
-    _usageError('Expected subcommand: "patch" or "stub".');
+    _usageError(
+      'Expected subcommand: "patch", "stub", "copy-assets", '
+      '"assemble-macos-framework", or "copy-files".',
+    );
   }
   final subcommand = args.first;
   final rest = args.sublist(1);
@@ -65,9 +70,16 @@ void main(List<String> args) {
       _runPatch(rest);
     case 'stub':
       _runStub(rest);
+    case 'copy-assets':
+      _runCopyAssets(rest);
+    case 'assemble-macos-framework':
+      _runAssembleMacosFramework(rest);
+    case 'copy-files':
+      _runCopyFiles(rest);
     default:
       _usageError(
-        'Unknown subcommand "$subcommand". Expected "patch" or "stub".',
+        'Unknown subcommand "$subcommand". Expected "patch", "stub", '
+        '"copy-assets", "assemble-macos-framework", or "copy-files".',
       );
   }
 }
@@ -172,6 +184,7 @@ void _runStub(List<String> args) {
   String? minOsStr;
   String? sdkVersionStr;
   String? installName;
+  var typeStr = 'dylib';
 
   for (var i = 0; i < args.length; i++) {
     final arg = args[i];
@@ -194,16 +207,23 @@ void _runStub(List<String> args) {
       case '--install-name':
         if (++i >= args.length) _usageError('--install-name requires a value');
         installName = args[i];
+      case '--type':
+        if (++i >= args.length) _usageError('--type requires a value');
+        typeStr = args[i];
       default:
         _usageError('Unknown flag for stub: $arg');
     }
+  }
+
+  if (typeStr != 'dylib' && typeStr != 'execute') {
+    _usageError('--type must be "dylib" or "execute", got "$typeStr"');
   }
 
   if (outputPath == null ||
       arch == null ||
       platformName == null ||
       minOsStr == null ||
-      installName == null) {
+      (typeStr == 'dylib' && installName == null)) {
     _usageError(
       'stub requires --output, --arch, --platform, --min-os, and --install-name',
     );
@@ -220,12 +240,221 @@ void _runStub(List<String> args) {
     platform: platform,
     minOs: minOs,
     sdkVersion: sdkVersion,
-    installName: installName,
+    installName: installName ?? '',
+    fileType: typeStr == 'execute' ? mhExecute : mhDylib,
   );
 
   final outFile = File(outputPath);
   outFile.parent.createSync(recursive: true);
   outFile.writeAsBytesSync(bytes);
+}
+
+void _copyDirDereferencingSync(Directory src, Directory dst) {
+  dst.createSync(recursive: true);
+  if (!src.existsSync()) return;
+  final children = src.listSync(followLinks: false)
+    ..sort((a, b) => a.path.compareTo(b.path));
+  for (final entity in children) {
+    final name = entity.uri.pathSegments.where((s) => s.isNotEmpty).last;
+    final destPath = '${dst.path}/$name';
+    if (entity is Link) {
+      final resolved = entity.resolveSymbolicLinksSync();
+      if (FileSystemEntity.isDirectorySync(resolved)) {
+        _copyDirDereferencingSync(Directory(resolved), Directory(destPath));
+      } else {
+        File(resolved).copySync(destPath);
+      }
+    } else if (entity is Directory) {
+      _copyDirDereferencingSync(entity, Directory(destPath));
+    } else if (entity is File) {
+      entity.copySync(destPath);
+    }
+  }
+}
+
+void _runCopyAssets(List<String> args) {
+  String? srcPath;
+  String? dstPath;
+  String? kernelBlobPath;
+  String? vmSnapshotPath;
+  String? isolateSnapshotPath;
+
+  for (var i = 0; i < args.length; i++) {
+    final arg = args[i];
+    switch (arg) {
+      case '--src':
+        if (++i >= args.length) _usageError('--src requires a value');
+        srcPath = args[i];
+      case '--dst':
+        if (++i >= args.length) _usageError('--dst requires a value');
+        dstPath = args[i];
+      case '--kernel-blob':
+        if (++i >= args.length) _usageError('--kernel-blob requires a value');
+        kernelBlobPath = args[i];
+      case '--vm-snapshot-data':
+        if (++i >= args.length) {
+          _usageError('--vm-snapshot-data requires a value');
+        }
+        vmSnapshotPath = args[i];
+      case '--isolate-snapshot-data':
+        if (++i >= args.length) {
+          _usageError('--isolate-snapshot-data requires a value');
+        }
+        isolateSnapshotPath = args[i];
+      default:
+        _usageError('Unknown flag for copy-assets: $arg');
+    }
+  }
+
+  if (srcPath == null || dstPath == null) {
+    _usageError('copy-assets requires --src and --dst');
+  }
+
+  final dstDir = Directory(dstPath);
+  _copyDirDereferencingSync(Directory(srcPath), dstDir);
+
+  if (kernelBlobPath != null && kernelBlobPath.isNotEmpty) {
+    File(kernelBlobPath).copySync('${dstDir.path}/kernel_blob.bin');
+  }
+  if (vmSnapshotPath != null && vmSnapshotPath.isNotEmpty) {
+    File(vmSnapshotPath).copySync('${dstDir.path}/vm_snapshot_data');
+  }
+  if (isolateSnapshotPath != null && isolateSnapshotPath.isNotEmpty) {
+    File(isolateSnapshotPath).copySync('${dstDir.path}/isolate_snapshot_data');
+  }
+}
+
+void _createSymlinkReplacingSync(String linkPath, String target) {
+  final link = Link(linkPath);
+  if (FileSystemEntity.typeSync(linkPath, followLinks: false) !=
+      FileSystemEntityType.notFound) {
+    link.deleteSync();
+  }
+  link.createSync(target);
+}
+
+void _runAssembleMacosFramework(List<String> args) {
+  String? binaryPath;
+  String? infoPlistPath;
+  String? assetsPath;
+  String? outputDirPath;
+  String? kernelBlobPath;
+  String? vmSnapshotPath;
+  String? isolateSnapshotPath;
+
+  for (var i = 0; i < args.length; i++) {
+    final arg = args[i];
+    switch (arg) {
+      case '--binary':
+        if (++i >= args.length) _usageError('--binary requires a value');
+        binaryPath = args[i];
+      case '--info-plist':
+        if (++i >= args.length) _usageError('--info-plist requires a value');
+        infoPlistPath = args[i];
+      case '--assets':
+        if (++i >= args.length) _usageError('--assets requires a value');
+        assetsPath = args[i];
+      case '--output-dir':
+        if (++i >= args.length) _usageError('--output-dir requires a value');
+        outputDirPath = args[i];
+      case '--kernel-blob':
+        if (++i >= args.length) _usageError('--kernel-blob requires a value');
+        kernelBlobPath = args[i];
+      case '--vm-snapshot-data':
+        if (++i >= args.length) {
+          _usageError('--vm-snapshot-data requires a value');
+        }
+        vmSnapshotPath = args[i];
+      case '--isolate-snapshot-data':
+        if (++i >= args.length) {
+          _usageError('--isolate-snapshot-data requires a value');
+        }
+        isolateSnapshotPath = args[i];
+      default:
+        _usageError('Unknown flag for assemble-macos-framework: $arg');
+    }
+  }
+
+  if (binaryPath == null ||
+      infoPlistPath == null ||
+      assetsPath == null ||
+      outputDirPath == null) {
+    _usageError(
+      'assemble-macos-framework requires --binary, --info-plist, --assets, '
+      'and --output-dir',
+    );
+  }
+
+  final fwDir = outputDirPath.endsWith('.framework')
+      ? Directory(outputDirPath)
+      : Directory('$outputDirPath/App.framework');
+  final versionADir = Directory('${fwDir.path}/Versions/A');
+  final resourcesDir = Directory('${versionADir.path}/Resources');
+  final assetsDestDir = Directory('${resourcesDir.path}/flutter_assets');
+  assetsDestDir.createSync(recursive: true);
+
+  File(binaryPath).copySync('${versionADir.path}/App');
+  File(infoPlistPath).copySync('${resourcesDir.path}/Info.plist');
+  _copyDirDereferencingSync(Directory(assetsPath), assetsDestDir);
+
+  if (kernelBlobPath != null && kernelBlobPath.isNotEmpty) {
+    File(kernelBlobPath).copySync('${assetsDestDir.path}/kernel_blob.bin');
+  }
+  if (vmSnapshotPath != null && vmSnapshotPath.isNotEmpty) {
+    File(vmSnapshotPath).copySync('${assetsDestDir.path}/vm_snapshot_data');
+  }
+  if (isolateSnapshotPath != null && isolateSnapshotPath.isNotEmpty) {
+    File(
+      isolateSnapshotPath,
+    ).copySync('${assetsDestDir.path}/isolate_snapshot_data');
+  }
+
+  _createSymlinkReplacingSync('${fwDir.path}/Versions/Current', 'A');
+  _createSymlinkReplacingSync('${fwDir.path}/App', 'Versions/Current/App');
+  _createSymlinkReplacingSync(
+    '${fwDir.path}/Resources',
+    'Versions/Current/Resources',
+  );
+}
+
+void _runCopyFiles(List<String> args) {
+  String? outputDirPath;
+  final positional = <String>[];
+
+  for (var i = 0; i < args.length; i++) {
+    final arg = args[i];
+    if (arg == '--output-dir') {
+      if (++i >= args.length) _usageError('--output-dir requires a value');
+      outputDirPath = args[i];
+    } else if (arg.startsWith('--')) {
+      _usageError('Unknown flag for copy-files: $arg');
+    } else {
+      positional.add(arg);
+    }
+  }
+
+  if (outputDirPath == null) {
+    _usageError('copy-files requires --output-dir');
+  }
+
+  final outDir = Directory(outputDirPath)..createSync(recursive: true);
+  var i = 0;
+  while (i < positional.length) {
+    final srcPath = positional[i];
+    final String destName;
+    if (i + 1 < positional.length &&
+        !positional[i + 1].contains('/') &&
+        !File(positional[i + 1]).existsSync()) {
+      destName = positional[i + 1];
+      i += 2;
+    } else {
+      destName = Uri.file(
+        srcPath,
+      ).pathSegments.where((s) => s.isNotEmpty).last;
+      i += 1;
+    }
+    File(srcPath).copySync('${outDir.path}/$destName');
+  }
 }
 
 /// Returns true if [bytes] begins with a 64-bit little-endian Mach-O header.
@@ -674,13 +903,14 @@ void _resignEmbeddedCodeSignature(Uint8List bytes, LoadCommand codeSigLc) {
   }
 }
 
-/// Synthesizes a minimal valid 64-bit Mach-O `MH_DYLIB` stub binary.
+/// Synthesizes a minimal valid 64-bit Mach-O `MH_DYLIB` or `MH_EXECUTE` stub binary.
 Uint8List generateStubMachO({
   required String arch,
   required int platform,
   required int minOs,
   required int sdkVersion,
   required String installName,
+  int fileType = mhDylib,
 }) {
   final int cputype;
   final int cpusubtype;
@@ -714,7 +944,6 @@ Uint8List generateStubMachO({
   textBd.setUint32(64, 0, Endian.little); // nsects = 0
   textBd.setUint32(68, 0, Endian.little); // flags = 0
 
-  final idDylib = buildLcIdDylib(installName);
   final buildVersion = buildLcBuildVersion(
     platform: platform,
     minos: minOs,
@@ -723,8 +952,15 @@ Uint8List generateStubMachO({
 
   final commands = <LoadCommand>[
     LoadCommand(lcSegment64, textSeg),
-    idDylib,
+    if (fileType == mhDylib && installName.isNotEmpty)
+      buildLcIdDylib(installName),
     buildVersion,
+    if (fileType == mhExecute)
+      buildLcRpath(
+        platform == platformMacos
+            ? '@executable_path/../Frameworks'
+            : '@executable_path/Frameworks',
+      ),
   ];
 
   var sizeofcmds = 0;
@@ -737,10 +973,14 @@ Uint8List generateStubMachO({
   bd.setUint32(0, mhMagic64, Endian.little);
   bd.setUint32(4, cputype, Endian.little);
   bd.setUint32(8, cpusubtype, Endian.little);
-  bd.setUint32(12, mhDylib, Endian.little);
+  bd.setUint32(12, fileType, Endian.little);
   bd.setUint32(16, commands.length, Endian.little);
   bd.setUint32(20, sizeofcmds, Endian.little);
-  bd.setUint32(24, mhNoReexportedDylibs, Endian.little);
+  bd.setUint32(
+    24,
+    fileType == mhExecute ? mhPie : mhNoReexportedDylibs,
+    Endian.little,
+  );
   bd.setUint32(28, 0, Endian.little);
 
   var offset = mhHeaderSize64;

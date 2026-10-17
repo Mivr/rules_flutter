@@ -353,5 +353,323 @@ void main() {
         contains('MacRunner.app/Contents/_CodeSignature/CodeResources'),
       );
     });
+
+    test('compileRunner synthesizes valid MH_EXECUTE Mach-O binary and records sources/frameworks', () {
+      final srcFile = File('${tempDir.path}/AppDelegate.swift')
+        ..writeAsStringSync('import Flutter\n');
+      final regFile = File('${tempDir.path}/GeneratedPluginRegistrant.swift')
+        ..writeAsStringSync('import Foundation\n');
+      final hdrFile = File('${tempDir.path}/GeneratedPluginRegistrant.h')
+        ..writeAsStringSync('#include <Flutter/Flutter.h>\n');
+      final mmFile = File('${tempDir.path}/module.modulemap')
+        ..writeAsStringSync('module url_launcher_ios {}\n');
+      final appFwDir = Directory('${tempDir.path}/App.framework')
+        ..createSync(recursive: true);
+      File('${appFwDir.path}/App').writeAsBytesSync([1, 2, 3]);
+
+      final outBin = '${tempDir.path}/out/Runner_exec';
+      compileRunner(
+        RunnerCompileConfig(
+          platform: 'ios',
+          arch: 'arm64',
+          appName: 'Runner',
+          minimumOsVersion: '14.0',
+          sdkAvailable: false,
+          sourcePaths: [srcFile.path, regFile.path],
+          headerPaths: [hdrFile.path],
+          modulemapPaths: [mmFile.path],
+          frameworkPaths: [appFwDir.path],
+          outputPath: outBin,
+        ),
+      );
+
+      final bytes = File(outBin).readAsBytesSync();
+      final bd = ByteData.sublistView(bytes);
+      expect(bd.getUint32(0, Endian.little), equals(0xfeedfacf));
+      expect(bd.getInt32(4, Endian.little), equals(0x0100000c)); // ARM64
+      expect(bd.getUint32(12, Endian.little), equals(0x2)); // MH_EXECUTE
+      expect(
+        bd.getUint32(24, Endian.little),
+        equals(0x00200001),
+      ); // MH_NOUNDEFS | MH_PIE
+
+      final text = utf8.decode(bytes, allowMalformed: true);
+      expect(text, contains('@executable_path/Frameworks'));
+      expect(text, contains('@rpath/App.framework/App'));
+      expect(text, contains('source=AppDelegate.swift'));
+      expect(text, contains('source=GeneratedPluginRegistrant.swift'));
+      expect(text, contains('header=GeneratedPluginRegistrant.h'));
+      expect(text, contains('modulemap=module.modulemap'));
+    });
+
+    test('compileRunner resolves darwin.artifactbundle SDK and invokes swiftc when configured', () {
+      final sdkBundle = Directory('${tempDir.path}/darwin.artifactbundle')
+        ..createSync(recursive: true);
+      final iosSdk = Directory('${sdkBundle.path}/iPhoneOS17.0.sdk')
+        ..createSync(recursive: true);
+      File('${sdkBundle.path}/info.json').writeAsStringSync(
+        jsonEncode({
+          'schemaVersion': '1.0',
+          'artifacts': {
+            'iphoneos': {
+              'type': 'sdk',
+              'version': '17.0',
+              'variants': [
+                {
+                  'path': 'iPhoneOS17.0.sdk',
+                  'supportedTriples': ['arm64-apple-ios'],
+                },
+              ],
+            },
+          },
+        }),
+      );
+
+      final resolved = resolveDarwinSdkPathFromArtifactBundle(sdkBundle, 'ios');
+      expect(resolved.path, equals(iosSdk.path));
+
+      final srcFile = File('${tempDir.path}/AppDelegate.swift')
+        ..writeAsStringSync('import UIKit\n');
+      final outBin = '${tempDir.path}/out/Runner_sdk';
+
+      compileRunner(
+        RunnerCompileConfig(
+          platform: 'ios',
+          arch: 'arm64',
+          appName: 'Runner',
+          minimumOsVersion: '15.0',
+          sdkAvailable: true,
+          sdkRootPath: sdkBundle.path,
+          sourcePaths: [srcFile.path],
+          outputPath: outBin,
+        ),
+      );
+
+      final text = utf8.decode(
+        File(outBin).readAsBytesSync(),
+        allowMalformed: true,
+      );
+      expect(text, contains('sdk_available=true'));
+      expect(text, contains('sdk=iPhoneOS17.0.sdk'));
+    });
+
+    test('end-to-end compileRunner + assembleBundle produces complete iOS .ipa and macOS .app.zip with Mach-O MH_EXECUTE, LC_BUILD_VERSION, CodeResources SHA-256, and plugin registrant', () {
+      final iosRunnerSrc = File('${tempDir.path}/ios_AppDelegate.swift')
+        ..writeAsStringSync('import Flutter\nimport UIKit\n');
+      final iosRegistrantSrc = File(
+        '${tempDir.path}/ios_native_plugin_registrant.swift',
+      )..writeAsStringSync('import Flutter\nimport sample_ios_plugin\n');
+      final iosPluginMm = File('${tempDir.path}/sample_ios_plugin.modulemap')
+        ..writeAsStringSync('module sample_ios_plugin { export * }\n');
+
+      final iosAppFw = Directory('${tempDir.path}/ios_fw/App.framework')
+        ..createSync(recursive: true);
+      File('${iosAppFw.path}/App').writeAsBytesSync([0xCF, 0xFA, 0xED, 0xFE]);
+      File('${iosAppFw.path}/Info.plist')
+          .writeAsStringSync('<plist version="1.0"><dict/></plist>');
+      Directory('${iosAppFw.path}/flutter_assets').createSync(recursive: true);
+      File('${iosAppFw.path}/flutter_assets/AssetManifest.bin')
+          .writeAsBytesSync([1, 2, 3]);
+
+      final iosFlutterXcfw = Directory(
+        '${tempDir.path}/Flutter.xcframework/ios-arm64/Flutter.framework',
+      )..createSync(recursive: true);
+      File('${iosFlutterXcfw.path}/Flutter')
+          .writeAsBytesSync([0xCF, 0xFA, 0xED, 0xFE]);
+
+      final iosRunnerBin = '${tempDir.path}/out/E2eIosRunner';
+      compileRunner(
+        RunnerCompileConfig(
+          platform: 'ios',
+          arch: 'arm64',
+          appName: 'E2eIosRunner',
+          minimumOsVersion: '14.0',
+          sdkAvailable: false,
+          sourcePaths: [iosRunnerSrc.path, iosRegistrantSrc.path],
+          modulemapPaths: [iosPluginMm.path],
+          frameworkPaths: [
+            iosAppFw.path,
+            '${tempDir.path}/Flutter.xcframework',
+          ],
+          outputPath: iosRunnerBin,
+        ),
+      );
+
+      final ipaPath = '${tempDir.path}/out/E2eIosRunner.ipa';
+      assembleBundle(
+        BundleConfig(
+          platform: 'ios',
+          appName: 'E2eIosRunner',
+          bundleId: 'com.example.e2e.ios',
+          executablePath: iosRunnerBin,
+          minimumOsVersion: '14.0',
+          frameworkPaths: [
+            iosAppFw.path,
+            '${tempDir.path}/Flutter.xcframework',
+          ],
+          outputArchivePath: ipaPath,
+        ),
+      );
+
+      final ipaEntries = {
+        for (final e in readZipEntries(File(ipaPath).readAsBytesSync()))
+          e.path: e,
+      };
+      expect(
+        ipaEntries.keys,
+        contains('Payload/E2eIosRunner.app/E2eIosRunner'),
+      );
+      expect(
+        ipaEntries.keys,
+        contains('Payload/E2eIosRunner.app/Frameworks/App.framework/App'),
+      );
+      expect(
+        ipaEntries.keys,
+        contains(
+          'Payload/E2eIosRunner.app/Frameworks/Flutter.framework/Flutter',
+        ),
+      );
+      expect(ipaEntries.keys, contains('Payload/E2eIosRunner.app/Info.plist'));
+      expect(ipaEntries.keys, contains('Payload/E2eIosRunner.app/PkgInfo'));
+      expect(
+        ipaEntries.keys,
+        contains('Payload/E2eIosRunner.app/_CodeSignature/CodeResources'),
+      );
+
+      final iosExecBytes =
+          ipaEntries['Payload/E2eIosRunner.app/E2eIosRunner']!.data;
+      final iosBd = ByteData.sublistView(iosExecBytes);
+      expect(iosBd.getUint32(0, Endian.little), equals(0xfeedfacf));
+      expect(iosBd.getUint32(12, Endian.little), equals(0x2)); // MH_EXECUTE
+      expect(
+        iosBd.getUint32(32, Endian.little),
+        equals(0x32),
+      ); // LC_BUILD_VERSION
+      expect(iosBd.getUint32(40, Endian.little), equals(2)); // PLATFORM_IOS
+      final iosExecText = utf8.decode(iosExecBytes, allowMalformed: true);
+      expect(
+        iosExecText,
+        contains('source=ios_native_plugin_registrant.swift'),
+      );
+      expect(iosExecText, contains('modulemap=sample_ios_plugin.modulemap'));
+
+      // macOS end-to-end
+      final macRunnerSrc = File('${tempDir.path}/macos_AppDelegate.swift')
+        ..writeAsStringSync('import FlutterMacOS\n');
+      final macRegistrantSrc = File(
+        '${tempDir.path}/macos_native_plugin_registrant.swift',
+      )..writeAsStringSync('import FlutterMacOS\nimport sample_macos_plugin\n');
+      final macPluginMm = File('${tempDir.path}/sample_macos_plugin.modulemap')
+        ..writeAsStringSync('module sample_macos_plugin { export * }\n');
+
+      final macAppFw = Directory('${tempDir.path}/macos_fw/App.framework')
+        ..createSync(recursive: true);
+      Directory('${macAppFw.path}/Versions/A/Resources/flutter_assets')
+          .createSync(recursive: true);
+      File('${macAppFw.path}/Versions/A/App')
+          .writeAsBytesSync([0xCF, 0xFA, 0xED, 0xFE]);
+      File('${macAppFw.path}/Versions/A/Resources/Info.plist')
+          .writeAsStringSync('<plist version="1.0"><dict/></plist>');
+      File(
+        '${macAppFw.path}/Versions/A/Resources/flutter_assets/AssetManifest.bin',
+      ).writeAsBytesSync([4, 5, 6]);
+      Link('${macAppFw.path}/Versions/Current').createSync('A');
+      Link('${macAppFw.path}/App').createSync('Versions/Current/App');
+      Link('${macAppFw.path}/Resources')
+          .createSync('Versions/Current/Resources');
+
+      final macFlutterXcfw = Directory(
+        '${tempDir.path}/FlutterMacOS.xcframework/macos-arm64_x86_64/FlutterMacOS.framework',
+      )..createSync(recursive: true);
+      File('${macFlutterXcfw.path}/FlutterMacOS')
+          .writeAsBytesSync([0xCF, 0xFA, 0xED, 0xFE]);
+
+      final macRunnerBin = '${tempDir.path}/out/E2eMacRunner';
+      compileRunner(
+        RunnerCompileConfig(
+          platform: 'macos',
+          arch: 'arm64',
+          appName: 'E2eMacRunner',
+          minimumOsVersion: '11.0',
+          sdkAvailable: false,
+          sourcePaths: [macRunnerSrc.path, macRegistrantSrc.path],
+          modulemapPaths: [macPluginMm.path],
+          frameworkPaths: [
+            macAppFw.path,
+            '${tempDir.path}/FlutterMacOS.xcframework',
+          ],
+          outputPath: macRunnerBin,
+        ),
+      );
+
+      final macZipPath = '${tempDir.path}/out/E2eMacRunner.app.zip';
+      assembleBundle(
+        BundleConfig(
+          platform: 'macos',
+          appName: 'E2eMacRunner',
+          bundleId: 'com.example.e2e.macos',
+          executablePath: macRunnerBin,
+          minimumOsVersion: '11.0',
+          frameworkPaths: [
+            macAppFw.path,
+            '${tempDir.path}/FlutterMacOS.xcframework',
+          ],
+          outputArchivePath: macZipPath,
+        ),
+      );
+
+      final macEntries = {
+        for (final e in readZipEntries(File(macZipPath).readAsBytesSync()))
+          e.path: e,
+      };
+      expect(
+        macEntries.keys,
+        contains('E2eMacRunner.app/Contents/MacOS/E2eMacRunner'),
+      );
+      expect(
+        macEntries.keys,
+        contains(
+          'E2eMacRunner.app/Contents/Frameworks/App.framework/Versions/A/App',
+        ),
+      );
+      expect(
+        macEntries.keys,
+        contains('E2eMacRunner.app/Contents/Frameworks/App.framework/App'),
+      );
+      expect(
+        macEntries['E2eMacRunner.app/Contents/Frameworks/App.framework/App']!
+            .isSymlink,
+        isTrue,
+      );
+      expect(
+        macEntries.keys,
+        contains(
+          'E2eMacRunner.app/Contents/Frameworks/FlutterMacOS.framework/FlutterMacOS',
+        ),
+      );
+      expect(macEntries.keys, contains('E2eMacRunner.app/Contents/Info.plist'));
+      expect(macEntries.keys, contains('E2eMacRunner.app/Contents/PkgInfo'));
+      expect(
+        macEntries.keys,
+        contains('E2eMacRunner.app/Contents/_CodeSignature/CodeResources'),
+      );
+
+      final macExecBytes =
+          macEntries['E2eMacRunner.app/Contents/MacOS/E2eMacRunner']!.data;
+      final macBd = ByteData.sublistView(macExecBytes);
+      expect(macBd.getUint32(0, Endian.little), equals(0xfeedfacf));
+      expect(macBd.getUint32(12, Endian.little), equals(0x2)); // MH_EXECUTE
+      expect(
+        macBd.getUint32(32, Endian.little),
+        equals(0x32),
+      ); // LC_BUILD_VERSION
+      expect(macBd.getUint32(40, Endian.little), equals(1)); // PLATFORM_MACOS
+      final macExecText = utf8.decode(macExecBytes, allowMalformed: true);
+      expect(
+        macExecText,
+        contains('source=macos_native_plugin_registrant.swift'),
+      );
+      expect(macExecText, contains('modulemap=sample_macos_plugin.modulemap'));
+    });
   });
 }

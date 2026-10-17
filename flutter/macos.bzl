@@ -61,9 +61,9 @@ load("@bazel_skylib//rules:expand_template.bzl", "expand_template")
 load("@rules_apple//apple:apple.bzl", "apple_dynamic_framework_import")
 load("@rules_apple//apple:macos.bzl", "macos_application")
 load("@rules_apple//apple:versioning.bzl", "apple_bundle_version")
-load("@rules_swift//swift:swift.bzl", "swift_binary", "swift_library")
+load("@rules_swift//swift:swift.bzl", "swift_library")
 load("//flutter/private:constants.bzl", _MACOS_MINIMUM_OS_VERSION = "MACOS_MINIMUM_OS_VERSION")
-load("//flutter/private:flutter_apple_plugin_library.bzl", _flutter_apple_plugin_library_macro = "flutter_apple_plugin_library")
+load("//flutter/private:flutter_apple_plugin_library.bzl", _flutter_apple_plugin_library_macro = "flutter_apple_plugin_library", _flutter_xtool_apple_plugin_library = "flutter_xtool_apple_plugin_library")
 load("//flutter/private:flutter_apple_plugins_aggregator.bzl", _flutter_apple_plugins_aggregator = "flutter_apple_plugins_aggregator")
 load("//flutter/private:flutter_macos_application.bzl", _flutter_macos_framework_rule = "flutter_macos_framework", _flutter_macos_native_libs_rule = "flutter_macos_native_libs", _flutter_macos_privacy_manifests_rule = "flutter_macos_privacy_manifests")
 load("//flutter/private:flutter_macos_registrant.bzl", _flutter_macos_registrant_rule = "flutter_macos_registrant")
@@ -273,17 +273,38 @@ def flutter_macos_runner_lib_gen(name, registrant, engine, application = None, m
         )
         deps.append(":" + aggregator_name)
 
+    visibility = kwargs.pop("visibility", None)
+    runner_srcs = [
+        registrant,
+        "@rules_flutter//flutter/private/runners/macos:AppDelegate.swift",
+        "@rules_flutter//flutter/private/runners/macos:MainFlutterWindow.swift",
+    ]
     swift_library(
-        name = name,
-        srcs = [
-            registrant,
-            "@rules_flutter//flutter/private/runners/macos:AppDelegate.swift",
-            "@rules_flutter//flutter/private/runners/macos:MainFlutterWindow.swift",
-        ],
+        name = "__%s_apple" % name,
+        srcs = runner_srcs,
         module_name = module_name,
         tags = tags,
         deps = deps,
+        visibility = ["//visibility:private"],
         **kwargs
+    )
+    _flutter_xtool_apple_plugin_library(
+        name = "__%s_xtool" % name,
+        srcs = runner_srcs,
+        module_name = module_name,
+        platform = "macos",
+        deps = deps,
+        tags = tags,
+        visibility = ["//visibility:private"],
+    )
+    native.alias(
+        name = name,
+        actual = select({
+            Label("@rules_flutter//flutter/settings:use_xtool_backend"): ":__%s_xtool" % name,
+            "//conditions:default": ":__%s_apple" % name,
+        }),
+        tags = tags,
+        visibility = visibility,
     )
 
 # -- Convenience macro (Tier 1) -----------------------------------------------
@@ -302,6 +323,9 @@ def flutter_macos_app(
         app_icons = None,
         resources = [],
         runner_deps = [],
+        srcs = None,
+        engine = None,
+        menu_xib = None,
         backend = "auto",
         **kwargs):
     """Builds a Flutter macOS .app bundle from a flutter_application target.
@@ -493,13 +517,17 @@ def flutter_macos_app(
     )
 
     # 4. Import FlutterMacOS.framework engine — auto-select debug/release and backend.
-    flutter_macos_engine(
-        name = "__%s_engine" % name,
-        tags = tags,
-    )
+    if engine:
+        engine_target = engine
+    else:
+        flutter_macos_engine(
+            name = "__%s_engine" % name,
+            tags = tags,
+        )
+        engine_target = ":__%s_engine" % name
 
     # 5. Discover runner Swift sources and build swift_library.
-    runner_srcs = native.glob(["macos/Runner/*.swift"])
+    runner_srcs = srcs if srcs != None else native.glob(["macos/Runner/*.swift"])
     if not runner_srcs:
         fail("No Swift sources found in macos/Runner/. " +
              "Run 'flutter create --platforms=macos .' to generate runner files.")
@@ -514,32 +542,10 @@ def flutter_macos_app(
         tags = tags,
     )
 
-    # 6. XIB — substitute APP_NAME and keep the NIB's module in sync.
-    #
-    #    The runner's Swift classes (MainFlutterWindow, AppDelegate) carry no
-    #    @objc annotation in `flutter create` output, so their Objective-C
-    #    runtime names are Swift-mangled and module-qualified
-    #    (_TtC<n><module>17MainFlutterWindow). The XIB names them via
-    #    customClass/customModule. If the module baked into the NIB does not
-    #    match the module the classes were compiled into, AppKit silently
-    #    instantiates a plain NSWindow — blank window, no error.
-    #
-    #    Two mechanisms keep the two sides together:
-    #
-    #    a) customModuleProvider="target" (what `flutter create` emits) tells
-    #       ibtool to use the module of the target being built. rules_apple
-    #       derives that from the resource's owner: a XIB reached through a
-    #       swift_library's `data` is bucketed with that library's own
-    #       module_name (resource_aspect.bzl), so attaching the XIB to
-    #       __<name>_runner below makes ibtool's --module follow the runner
-    #       structurally, with no name to keep in sync by hand.
-    #
-    #    b) Rewriting the literal customModule covers XIBs that dropped the
-    #       provider attribute and hardcode customModule="Runner". Harmless
-    #       when the provider is present, since the provider wins.
+    menu_xib_template = menu_xib if menu_xib != None else "macos/Runner/Base.lproj/MainMenu.xib"
     expand_template(
         name = "__%s_menu_xib" % name,
-        template = "macos/Runner/Base.lproj/MainMenu.xib",
+        template = menu_xib_template,
         out = "__%s/Base.lproj/MainMenu.xib" % name,
         substitutions = {
             "APP_NAME": display_name,
@@ -548,17 +554,18 @@ def flutter_macos_app(
         tags = tags,
     )
 
-    swift_library(
-        name = "__%s_runner" % name,
-        srcs = runner_srcs + ["__%s_registrant" % name],
-        data = ["__%s_menu_xib" % name],
-        module_name = module_name,
-        tags = tags,
-        deps = [
-            "__%s_engine" % name,
-            "__%s_apple_plugins" % name,
-        ] + runner_deps,
-    )
+    if backend in ("auto", "rules_apple"):
+        swift_library(
+            name = "__%s_runner" % name,
+            srcs = runner_srcs + ["__%s_registrant" % name],
+            data = ["__%s_menu_xib" % name],
+            module_name = module_name,
+            tags = tags,
+            deps = [
+                engine_target,
+                "__%s_apple_plugins" % name,
+            ] + runner_deps,
+        )
 
     # 6b. App icon — the conventional catalog `flutter create` writes, unless
     #     the caller named something else. Discovered for the same reason the
@@ -656,12 +663,6 @@ def flutter_macos_app(
         )
 
     if backend in ("auto", "xtool"):
-        swift_binary(
-            name = "__%s_runner_bin" % name,
-            deps = ["__%s_runner" % name],
-            tags = tags,
-            visibility = ["//visibility:private"],
-        )
         xtool_target_name = name if backend == "xtool" else "__%s_xtool" % name
         _flutter_xtool_macos_bundle(
             name = xtool_target_name,
@@ -669,10 +670,13 @@ def flutter_macos_app(
             bundle_id = bundle_id,
             minimum_os_version = minimum_os_version,
             infoplists = [actual_info_plist],
-            executable = ":__%s_runner_bin" % name,
+            srcs = runner_srcs,
+            registrant = ":__%s_registrant" % name,
+            plugins = [":__%s_apple_plugins" % name],
+            deps = runner_deps,
             frameworks = [
                 ":__%s_app_framework" % name,
-                ":__%s_engine" % name,
+                engine_target,
             ],
             native_libs = [":__%s_native_libs" % name],
             resources = resources + [

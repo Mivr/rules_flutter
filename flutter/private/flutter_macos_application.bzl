@@ -151,59 +151,45 @@ def _flutter_macos_framework_impl(ctx):
             progress_message = "Retagging App dylib for macos (min %s)" % minimum_os_version,
         )
 
-    inputs = [flutter_assets, prepared_binary]
-    shell_parts = [
-        "set -e",
-        'FW="$1/App.framework"',
-        'mkdir -p "$FW/Resources"',
+    prepared_plist = ctx.actions.declare_file("%s_macho/Info.plist" % ctx.label.name)
+    ctx.actions.write(prepared_plist, _APP_FRAMEWORK_INFO_PLIST)
+
+    inputs = [flutter_assets, prepared_binary, prepared_plist, ctx.executable._macho_edit]
+    assemble_args = [
+        ctx.executable._macho_edit.path,
+        "assemble-macos-framework",
+        "--binary",
+        prepared_binary.path,
+        "--info-plist",
+        prepared_plist.path,
+        "--assets",
+        flutter_assets.path,
+        "--output-dir",
+        wrapper_dir.path,
     ]
-
-    # $1 = wrapper dir, $2 = AOT/dill source, $3 = flutter_assets dir, $4 = prepared_binary
-    args = ctx.actions.args()
-    args.add(wrapper_dir.path)
-
-    if is_debug:
-        if app_info.kernel_dill:
-            inputs.append(app_info.kernel_dill)
-            args.add(app_info.kernel_dill.path)
-
-            # The debug engine looks for kernel_blob.bin in flutter_assets/.
-            # We copy it after flutter_assets is assembled (see shell_parts below).
-            shell_parts.append("")  # placeholder — kernel copy happens after flutter_assets
-        else:
-            args.add("")  # placeholder
-    else:
-        args.add(prepared_binary.path)
-
-    args.add(flutter_assets.path)
-    args.add(prepared_binary.path)
-
-    # Copy the App binary (retagged AOT dylib or debug stub), flutter_assets,
-    # and write Info.plist inside Resources/.
-    shell_parts.extend([
-        'cp "$4" "$FW/App"',
-        'cp -RL "$3"/. "$FW/Resources/flutter_assets"',
-        'cat > "$FW/Resources/Info.plist" << \'PLISTEOF\'\n' + _APP_FRAMEWORK_INFO_PLIST + "PLISTEOF",
-    ])
 
     # In debug mode, place the kernel dill and VM snapshots into flutter_assets/.
     # The debug engine looks for kernel_blob.bin there. The vm_snapshot_data and
     # isolate_snapshot_data are needed for the kernel service isolate (hot reload).
     if is_debug and app_info.kernel_dill:
-        shell_parts.append('cp "$2" "$FW/Resources/flutter_assets/kernel_blob.bin"')
+        inputs.append(app_info.kernel_dill)
+        assemble_args.extend(["--kernel-blob", app_info.kernel_dill.path])
         vm_snapshot = flutter_sdk_info.vm_isolate_snapshot
         iso_snapshot = flutter_sdk_info.isolate_snapshot
         if vm_snapshot:
             inputs.append(vm_snapshot)
-            shell_parts.append('cp "%s" "$FW/Resources/flutter_assets/vm_snapshot_data"' % vm_snapshot.path)
+            assemble_args.extend(["--vm-snapshot-data", vm_snapshot.path])
         if iso_snapshot:
             inputs.append(iso_snapshot)
-            shell_parts.append('cp "%s" "$FW/Resources/flutter_assets/isolate_snapshot_data"' % iso_snapshot.path)
+            assemble_args.extend(["--isolate-snapshot-data", iso_snapshot.path])
 
-    ctx.actions.run_shell(
-        command = "\n".join(shell_parts),
-        arguments = [args],
-        inputs = inputs,
+    ctx.actions.run(
+        executable = dart_exe,
+        arguments = assemble_args,
+        inputs = depset(
+            direct = inputs,
+            transitive = [dart_vm_files],
+        ),
         outputs = [wrapper_dir],
         mnemonic = "FlutterMacOSFramework",
         progress_message = "Assembling App.framework for %s" % ctx.label,
@@ -312,22 +298,23 @@ def _flutter_macos_native_libs_impl(ctx):
     if not libs_by_basename:
         return [DefaultInfo(files = depset())]
 
+    dart_exe, dart_vm_files = resolve_exec_dart_vm(ctx)
     staged = ctx.actions.declare_directory(ctx.label.name)
     args = ctx.actions.args()
+    args.add(ctx.executable._macho_edit.path)
+    args.add("copy-files")
+    args.add("--output-dir")
     args.add(staged.path)
     for basename, lib in libs_by_basename.items():
         args.add(lib)
         args.add(basename)
-    ctx.actions.run_shell(
-        command = "\n".join([
-            "set -e",
-            'out="$1"',
-            "shift",
-            'mkdir -p "$out"',
-            'while [ "$#" -gt 0 ]; do cp "$1" "$out/$2"; shift 2; done',
-        ]),
+    ctx.actions.run(
+        executable = dart_exe,
         arguments = [args],
-        inputs = libs_by_basename.values(),
+        inputs = depset(
+            direct = list(libs_by_basename.values()) + [ctx.executable._macho_edit],
+            transitive = [dart_vm_files],
+        ),
         outputs = [staged],
         mnemonic = "FlutterMacOSNativeLibs",
         progress_message = "Staging native libraries for %{label}",
@@ -342,7 +329,16 @@ flutter_macos_native_libs = rule(
             mandatory = True,
             providers = [FlutterApplicationInfo],
         ),
+        "_macho_edit": attr.label(
+            default = Label("//flutter/private/tools:macho_edit"),
+            executable = True,
+            cfg = "exec",
+        ),
     },
+    toolchains = [
+        "@rules_flutter//flutter:toolchain_type",
+        config_common.toolchain_type("@rules_dart//dart:exec_tools_toolchain_type", mandatory = False),
+    ],
     doc = "Stages native .dylib files under their basenames for macOS bundling via additional_contents.",
 )
 

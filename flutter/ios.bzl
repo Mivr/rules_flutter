@@ -61,10 +61,10 @@ load("@bazel_skylib//rules:expand_template.bzl", "expand_template")
 load("@rules_apple//apple:apple.bzl", "apple_dynamic_xcframework_import")
 load("@rules_apple//apple:ios.bzl", "ios_application")
 load("@rules_apple//apple:versioning.bzl", "apple_bundle_version")
-load("@rules_swift//swift:swift.bzl", "swift_binary", "swift_library")
+load("@rules_swift//swift:swift.bzl", "swift_library")
 load("//flutter/private:constants.bzl", _IOS_MINIMUM_OS_VERSION = "IOS_MINIMUM_OS_VERSION")
 load("//flutter/private:debug_build.bzl", _debug_build = "debug_build")
-load("//flutter/private:flutter_apple_plugin_library.bzl", _flutter_apple_plugin_library_macro = "flutter_apple_plugin_library")
+load("//flutter/private:flutter_apple_plugin_library.bzl", _flutter_apple_plugin_library_macro = "flutter_apple_plugin_library", _flutter_xtool_apple_plugin_library = "flutter_xtool_apple_plugin_library")
 load("//flutter/private:flutter_apple_plugins_aggregator.bzl", _flutter_apple_plugins_aggregator = "flutter_apple_plugins_aggregator")
 load("//flutter/private:flutter_ios_application.bzl", _flutter_ios_application = "flutter_ios_application", _flutter_ios_framework_rule = "flutter_ios_framework", _flutter_ios_native_frameworks_rule = "flutter_ios_native_frameworks", _flutter_ios_privacy_manifests_rule = "flutter_ios_privacy_manifests")
 load("//flutter/private:flutter_ios_registrant.bzl", _flutter_ios_registrant_rule = "flutter_ios_registrant")
@@ -313,20 +313,41 @@ def flutter_ios_runner_lib_gen(name, registrant, engine, application = None, mod
         )
         deps.append(":" + aggregator_name)
 
+    visibility = kwargs.pop("visibility", None)
+    runner_srcs = [
+        registrant,
+        "@rules_flutter//flutter/private/runners/ios:AppDelegate.swift",
+        "@rules_flutter//flutter/private/runners/ios:SceneDelegate.swift",
+    ]
     swift_library(
-        name = name,
-        srcs = [
-            registrant,
-            "@rules_flutter//flutter/private/runners/ios:AppDelegate.swift",
-            "@rules_flutter//flutter/private/runners/ios:SceneDelegate.swift",
-        ],
+        name = "__%s_apple" % name,
+        srcs = runner_srcs,
         data = [
             "@rules_flutter//flutter/private/runners/ios:Base.lproj/Main.storyboard",
         ],
         module_name = module_name,
         tags = tags,
         deps = deps,
+        visibility = ["//visibility:private"],
         **kwargs
+    )
+    _flutter_xtool_apple_plugin_library(
+        name = "__%s_xtool" % name,
+        srcs = runner_srcs,
+        module_name = module_name,
+        platform = "ios",
+        deps = deps,
+        tags = tags,
+        visibility = ["//visibility:private"],
+    )
+    native.alias(
+        name = name,
+        actual = select({
+            Label("@rules_flutter//flutter/settings:use_xtool_backend"): ":__%s_xtool" % name,
+            "//conditions:default": ":__%s_apple" % name,
+        }),
+        tags = tags,
+        visibility = visibility,
     )
 
 # -- Convenience macro (Tier 1) -----------------------------------------------
@@ -347,6 +368,8 @@ def flutter_ios_app(
         app_icons = None,
         resources = [],
         runner_deps = [],
+        srcs = None,
+        engine = None,
         backend = "auto",
         **kwargs):
     """Builds a Flutter iOS .app bundle from a flutter_application target.
@@ -544,10 +567,14 @@ def flutter_ios_app(
     )
 
     # 5. Import Flutter.xcframework engine — auto-selects debug/release and backend.
-    flutter_ios_engine(
-        name = "__%s_engine" % name,
-        tags = tags,
-    )
+    if engine:
+        engine_target = engine
+    else:
+        flutter_ios_engine(
+            name = "__%s_engine" % name,
+            tags = tags,
+        )
+        engine_target = ":__%s_engine" % name
 
     # 6. Wrap native plugin/native-asset dylibs in signed .frameworks for bundling.
     _flutter_ios_native_frameworks_rule(
@@ -565,7 +592,7 @@ def flutter_ios_app(
     )
 
     # 7. Discover runner Swift sources and build swift_library.
-    runner_srcs = native.glob(["ios/Runner/*.swift"])
+    runner_srcs = srcs if srcs != None else native.glob(["ios/Runner/*.swift"])
     if not runner_srcs:
         fail("No Swift sources found in ios/Runner/. " +
              "Run 'flutter create --platforms=ios .' to generate runner files.")
@@ -580,17 +607,18 @@ def flutter_ios_app(
         tags = tags,
     )
 
-    swift_library(
-        name = "__%s_runner" % name,
-        srcs = runner_srcs + ["__%s_registrant" % name],
-        data = native.glob(["ios/Runner/Base.lproj/Main.storyboard"]),
-        module_name = module_name,
-        tags = tags,
-        deps = [
-            "__%s_engine" % name,
-            "__%s_apple_plugins" % name,
-        ] + runner_deps,
-    )
+    if backend in ("auto", "rules_apple"):
+        swift_library(
+            name = "__%s_runner" % name,
+            srcs = runner_srcs + ["__%s_registrant" % name],
+            data = native.glob(["ios/Runner/Base.lproj/Main.storyboard"], allow_empty = True),
+            module_name = module_name,
+            tags = tags,
+            deps = [
+                engine_target,
+                "__%s_apple_plugins" % name,
+            ] + runner_deps,
+        )
 
     # 8. Info.plist — preprocess to resolve Xcode variables that rules_apple
     #    doesn't handle.
@@ -627,7 +655,7 @@ def flutter_ios_app(
     # 10. Resolve launch storyboard.
     actual_launch_storyboard = launch_storyboard
     if not actual_launch_storyboard:
-        launch_candidates = native.glob(["ios/Runner/Base.lproj/LaunchScreen.storyboard"])
+        launch_candidates = native.glob(["ios/Runner/Base.lproj/LaunchScreen.storyboard"], allow_empty = True)
         if launch_candidates:
             actual_launch_storyboard = launch_candidates[0]
         else:
@@ -687,12 +715,6 @@ def flutter_ios_app(
         )
 
     if backend in ("auto", "xtool"):
-        swift_binary(
-            name = "__%s_runner_bin" % name,
-            deps = ["__%s_runner" % name],
-            tags = tags,
-            visibility = ["//visibility:private"],
-        )
         xtool_target_name = name if backend == "xtool" else "__%s_xtool" % name
         _flutter_xtool_ios_bundle(
             name = xtool_target_name,
@@ -700,10 +722,13 @@ def flutter_ios_app(
             bundle_id = bundle_id,
             minimum_os_version = minimum_os_version,
             infoplists = selected_infoplists,
-            executable = ":__%s_runner_bin" % name,
+            srcs = runner_srcs,
+            registrant = ":__%s_registrant" % name,
+            plugins = [":__%s_apple_plugins" % name],
+            deps = runner_deps,
             frameworks = [
                 ":__%s_app_framework" % name,
-                ":__%s_engine" % name,
+                engine_target,
                 ":__%s_native_frameworks" % name,
             ],
             resources = resources + ["__%s_privacy_manifests" % name],

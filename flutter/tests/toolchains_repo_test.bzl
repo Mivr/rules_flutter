@@ -3,7 +3,7 @@
 load("@bazel_skylib//lib:unittest.bzl", "analysistest", "asserts", "unittest")
 load("@bazel_skylib//rules:build_test.bzl", "build_test")
 load("//flutter/private:toolchains_repo.bzl", "CROSS_COMPILATION_PAIRS", "DESKTOP_CROSS_PAIRS", "HOST_PLATFORMS", "TARGET_PLATFORMS")
-load("//flutter/private:xtool_darwin_sdk_repo.bzl", "XTOOL_DARWIN_TARGETS", "generate_xtool_darwin_sdk_build")
+load("//flutter/private:xtool_darwin_sdk_repo.bzl", "FlutterXtoolSdkInfo", "XTOOL_DARWIN_TARGETS", "generate_xtool_darwin_sdk_build", "resolve_darwin_artifactbundle_sdk_paths")
 
 def _desktop_cross_pairs_keys_are_host_platforms_test_impl(ctx):
     """Every key in DESKTOP_CROSS_PAIRS must be a valid HOST_PLATFORMS key."""
@@ -137,6 +137,29 @@ def _xtool_darwin_sdk_build_test_impl(ctx):
     asserts.true(env, "SDK_AVAILABLE = True" in configured_build, "Expected SDK_AVAILABLE = True")
     asserts.true(env, "/xtool/iPhoneOS.sdk" in configured_build, "Expected iPhoneOS.sdk path")
     asserts.true(env, "/xtool/MacOSX.sdk" in configured_build, "Expected MacOSX.sdk path")
+    asserts.true(env, "xtool_darwin_sdk_status(" in configured_build, "Expected xtool_darwin_sdk_status target")
+
+    info_json = json.encode({
+        "schemaVersion": "1.0",
+        "artifacts": {
+            "iphoneos": {
+                "type": "sdk",
+                "variants": [{"path": "iPhoneOS17.4.sdk"}],
+            },
+            "iphonesimulator": {
+                "type": "sdk",
+                "variants": [{"path": "iPhoneSimulator17.4.sdk"}],
+            },
+            "macosx": {
+                "type": "sdk",
+                "variants": [{"path": "MacOSX14.4.sdk"}],
+            },
+        },
+    })
+    resolved_paths = resolve_darwin_artifactbundle_sdk_paths(info_json, "/opt/darwin.artifactbundle")
+    asserts.equals(env, "/opt/darwin.artifactbundle/iPhoneOS17.4.sdk", resolved_paths["iPhoneOS"])
+    asserts.equals(env, "/opt/darwin.artifactbundle/iPhoneSimulator17.4.sdk", resolved_paths["iPhoneSimulator"])
+    asserts.equals(env, "/opt/darwin.artifactbundle/MacOSX14.4.sdk", resolved_paths["MacOSX"])
     return unittest.end(env)
 
 _BackendProbeInfo = provider(fields = ["backend"])

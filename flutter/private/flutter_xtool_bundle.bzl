@@ -19,6 +19,7 @@ load("@rules_cc//cc/common:cc_common.bzl", "cc_common")
 load("@rules_cc//cc/common:cc_info.bzl", "CcInfo")
 load("//flutter:providers.bzl", "FlutterDarwinFrameworkInfo")
 load(":constants.bzl", "IOS_MINIMUM_OS_VERSION", "MACOS_MINIMUM_OS_VERSION")
+load(":xtool_darwin_sdk_repo.bzl", "FlutterXtoolSdkInfo")
 
 # -- Transitions ---------------------------------------------------------------
 
@@ -244,6 +245,40 @@ def _collect_framework_args_and_inputs(framework_targets):
 
     return framework_dirs, direct_inputs, transitive_inputs
 
+def _collect_runner_compile_inputs(ctx):
+    sources = []
+    headers = []
+    modulemaps = []
+    seen = {}
+    transitive_sets = []
+
+    def _add_file(f):
+        if f.path in seen:
+            return
+        seen[f.path] = True
+        if f.path.endswith(".swift") or f.path.endswith(".m") or f.path.endswith(".mm") or f.path.endswith(".c") or f.path.endswith(".cc") or f.path.endswith(".cpp"):
+            sources.append(f)
+        elif f.path.endswith(".h"):
+            headers.append(f)
+        elif f.path.endswith(".modulemap"):
+            modulemaps.append(f)
+
+    for f in ctx.files.srcs:
+        _add_file(f)
+    for f in ctx.files.registrant:
+        _add_file(f)
+
+    for target in ctx.attr.plugins + ctx.attr.deps:
+        for f in target[DefaultInfo].files.to_list():
+            _add_file(f)
+        if CcInfo in target:
+            cc_hdrs = target[CcInfo].compilation_context.headers
+            transitive_sets.append(cc_hdrs)
+            for f in cc_hdrs.to_list():
+                _add_file(f)
+
+    return sources, headers, modulemaps, transitive_sets
+
 def _run_xtool_pack_bundle(
         ctx,
         *,
@@ -255,13 +290,57 @@ def _run_xtool_pack_bundle(
     archive_file = ctx.actions.declare_file("%s%s" % (ctx.label.name, archive_ext))
     app_dir = ctx.actions.declare_directory("%s_bundle/%s.app" % (ctx.label.name, app_name))
 
-    executable_file = ctx.file.executable
     infoplists = ctx.files.infoplists
     resources = ctx.files.resources + extra_resources
 
     fw_dirs, fw_direct_inputs, fw_transitive_inputs = _collect_framework_args_and_inputs(
         ctx.attr.frameworks,
     )
+
+    target_arch = apple_support.target_arch_from_rule_ctx(ctx)
+    arch = target_arch if target_arch in ("arm64", "x86_64") else "arm64"
+
+    executable_file = ctx.file.executable
+    if not executable_file:
+        executable_file = ctx.actions.declare_file("%s_runner_bin" % ctx.label.name)
+        sources, headers, modulemaps, plugin_transitive_sets = _collect_runner_compile_inputs(ctx)
+
+        sdk_available = False
+        sdk_transitive = []
+        if ctx.attr._xtool_sdk_status and FlutterXtoolSdkInfo in ctx.attr._xtool_sdk_status:
+            sdk_info = ctx.attr._xtool_sdk_status[FlutterXtoolSdkInfo]
+            sdk_available = sdk_info.sdk_available
+            sdk_transitive.append(sdk_info.sdk_files)
+
+        runner_args = ctx.actions.args()
+        runner_args.add("compile-runner")
+        runner_args.add("--platform", platform)
+        runner_args.add("--arch", arch)
+        runner_args.add("--app-name", app_name)
+        runner_args.add("--minimum-os-version", ctx.attr.minimum_os_version)
+        runner_args.add("--sdk-available", "true" if sdk_available else "false")
+        runner_args.add("--output", executable_file.path)
+
+        for src in sources:
+            runner_args.add("--source", src.path)
+        for hdr in headers:
+            runner_args.add("--header", hdr.path)
+        for mm in modulemaps:
+            runner_args.add("--modulemap", mm.path)
+        for fw_dir in fw_dirs:
+            runner_args.add("--framework", fw_dir)
+
+        ctx.actions.run(
+            executable = ctx.executable._xtool_pack,
+            arguments = [runner_args],
+            inputs = depset(
+                direct = sources + headers + modulemaps + fw_direct_inputs,
+                transitive = fw_transitive_inputs + plugin_transitive_sets + sdk_transitive,
+            ),
+            outputs = [executable_file],
+            mnemonic = "FlutterXtoolRunner",
+            progress_message = "Compiling runner executable for %s (%s) via xtool_pack" % (ctx.label, platform),
+        )
 
     args = ctx.actions.args()
     args.add("bundle")
@@ -323,6 +402,7 @@ def _run_xtool_pack_bundle(
         OutputGroupInfo(
             archive = depset([archive_file]),
             app_dir = depset([app_dir]),
+            runner_binary = depset([executable_file]),
         ),
     ]
 
@@ -355,8 +435,29 @@ _COMMON_BUNDLE_ATTRS = {
     ),
     "executable": attr.label(
         allow_single_file = True,
-        mandatory = True,
-        doc = "Compiled Mach-O main executable binary for the application.",
+        doc = "Optional pre-compiled Mach-O main executable binary. When omitted, `FlutterXtoolRunner` compiles/synthesizes the runner from `srcs`, `registrant`, `plugins`, and `deps`.",
+    ),
+    "srcs": attr.label_list(
+        allow_files = True,
+        default = [],
+        doc = "Runner Swift/ObjC source files compiled by `FlutterXtoolRunner` when `executable` is omitted.",
+    ),
+    "registrant": attr.label(
+        allow_files = True,
+        doc = "GeneratedPluginRegistrant target compiled into the runner.",
+    ),
+    "plugins": attr.label_list(
+        allow_files = True,
+        default = [],
+        doc = "Apple plugin aggregator or plugin library targets linked into the runner.",
+    ),
+    "deps": attr.label_list(
+        allow_files = True,
+        default = [],
+        doc = "Additional runner library targets.",
+    ),
+    "_xtool_sdk_status": attr.label(
+        default = Label("@flutter_xtool_darwin_sdk//:sdk_status"),
     ),
     "frameworks": attr.label_list(
         allow_files = True,
