@@ -26,7 +26,6 @@ load(
     "//flutter/private:app_entrypoint.bzl",
     "APP_SCHEME",
     "app_main_location",
-    "app_main_package_uri",
     "app_scheme_location",
     "app_scheme_rel_path",
     "app_scheme_sources",
