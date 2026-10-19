@@ -1,5 +1,6 @@
 load("@bazel_skylib//rules:build_test.bzl", "build_test")
 load("//flutter/private:common.bzl", "HOST_COMPATIBLE")
+load("//flutter/private:flutter_aot_target.bzl", "flutter_aot_target")
 load(":action_inputs_test.bzl", "action_inputs_test_suite")
 load(":app_entrypoint_test.bzl", "app_entrypoint_test_suite")
 load(":artifact_urls_test.bzl", "artifact_urls_test_suite")
@@ -118,3 +119,22 @@ build_test(
 validation_test_suite(name = "validation_test")
 
 gen_l10n_test_suite(name = "gen_l10n_test")
+
+
+# Regression: `flutter_aot_target` with obfuscation and split debug info must
+# run gen_snapshot successfully and produce the debugging-info output.
+flutter_aot_target(
+    name = "aot_split_debug_target",
+    package_name = "lv_fixture",
+    main = "lib/language_version_main.dart",
+    srcs = ["lib/language_version_main.dart"],
+    obfuscate = True,
+    split_debug_info = True,
+    target_compatible_with = HOST_COMPATIBLE,
+)
+
+build_test(
+    name = "aot_split_debug_build_test",
+    targets = [":aot_split_debug_target"],
+    target_compatible_with = HOST_COMPATIBLE,
+)

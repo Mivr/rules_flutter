@@ -40,11 +40,33 @@ def _flutter_aot_action(
         progress_message = "AOT compiling Flutter %s %s" % (snapshot_kind, ctx.label),
     )
 
+def _has_gen_snapshot_flag(flags, name):
+    """Whether `flags` already carries `name` (with or without `=value`).
+
+    Args:
+        flags: List of gen_snapshot flags.
+        name: Flag name to look for.
+
+    Returns:
+        True if present.
+    """
+    for f in flags:
+        if f == name or f.startswith(name + "="):
+            return True
+    return False
+
+
 def flutter_aot_gen_snapshot_flags(ctx):
     """Build gen_snapshot extra flags/outputs from a rule's AOT attrs.
 
     Shared by `flutter_application` and `flutter_aot_target` so the two cannot
     drift on `obfuscate`, `split_debug_info`, or `extra_gen_snapshot_options`.
+
+    `--resolve-dwarf-paths` is deliberately omitted: it rewrites the DWARF
+    script URIs to filesystem paths, which fails for the `org-dartlang-app:`
+    multi-root URIs these rules compile under and would embed host paths in
+    the debugging info. `--dwarf-stack-traces` keeps DWARF stack traces and
+    `--save-debugging-info` keeps the split output without resolving paths.
 
     Args:
         ctx: Rule context carrying the AOT attributes.
@@ -55,12 +77,18 @@ def flutter_aot_gen_snapshot_flags(ctx):
     extra_flags = list(ctx.attr.extra_gen_snapshot_options)
     extra_outputs = []
     debug_info_output = None
-    if ctx.attr.obfuscate:
+
+    if ctx.attr.obfuscate and not _has_gen_snapshot_flag(extra_flags, "--obfuscate"):
         extra_flags.append("--obfuscate")
+
     if ctx.attr.split_debug_info:
         debug_info_output = ctx.actions.declare_file(ctx.label.name + ".symbols")
-        extra_flags.extend(["--dwarf-stack-traces", "--resolve-dwarf-paths", "--save-debugging-info=" + debug_info_output.path])
+        if not _has_gen_snapshot_flag(extra_flags, "--dwarf-stack-traces"):
+            extra_flags.append("--dwarf-stack-traces")
+        if not _has_gen_snapshot_flag(extra_flags, "--save-debugging-info"):
+            extra_flags.append("--save-debugging-info=" + debug_info_output.path)
         extra_outputs.append(debug_info_output)
+
     return extra_flags, extra_outputs, debug_info_output
 
 def flutter_aot_elf_action(ctx, gen_snapshot, kernel_dill, output, strip = True, extra_flags = [], extra_outputs = []):
