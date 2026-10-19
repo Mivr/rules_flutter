@@ -40,6 +40,24 @@ def _flutter_aot_action(
         progress_message = "AOT compiling Flutter %s %s" % (snapshot_kind, ctx.label),
     )
 
+def flutter_aot_gen_snapshot_flags(ctx):
+    """Build gen_snapshot extra flags/outputs from a rule's AOT attrs.
+
+    Shared by `flutter_application` and `flutter_aot_target` so the two cannot
+    drift on `obfuscate`, `split_debug_info`, or `extra_gen_snapshot_options`.
+    """
+    extra_flags = list(ctx.attr.extra_gen_snapshot_options)
+    extra_outputs = []
+    debug_info_output = None
+    if ctx.attr.obfuscate:
+        extra_flags.append("--obfuscate")
+    if ctx.attr.split_debug_info:
+        debug_info_output = ctx.actions.declare_file(ctx.label.name + ".symbols")
+        extra_flags.extend(["--dwarf-stack-traces", "--resolve-dwarf-paths", "--save-debugging-info=" + debug_info_output.path])
+        extra_outputs.append(debug_info_output)
+    return extra_flags, extra_outputs, debug_info_output
+
+
 def flutter_aot_elf_action(ctx, gen_snapshot, kernel_dill, output, strip = True, extra_flags = [], extra_outputs = []):
     """AOT compile to ELF shared library. Used for Android, Linux, Windows."""
     _flutter_aot_action(ctx, gen_snapshot, kernel_dill, output, "app-aot-elf", "--elf", strip, extra_flags, extra_outputs, "FlutterAotElf")

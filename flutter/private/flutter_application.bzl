@@ -18,7 +18,7 @@ load("@bazel_skylib//lib:dicts.bzl", "dicts")
 load("@rules_dart//dart:utils.bzl", "dart_link_hook_actions", "link_hook_runner_attr")
 load("//flutter:providers.bzl", "FlutterApplicationInfo", "FlutterInfo")
 load("//flutter/private:common.bzl", "COPY_TO_DIRECTORY_TOOLCHAINS", "FLUTTER_APPLICATION_ATTRS", "PLATFORM_CONSTRAINT_ATTRS", "check_unreplaced_hooks", "collect_binding_contracts", "collect_native_libs", "declare_flutter_assets_dir", "detect_target_platform", "flutter_build_assets", "flutter_build_mode", "flutter_compile_kernel", "flutter_compile_shaders", "host_target_arch", "launch_build_args", "resolve_flutter_sdk_info", "shader_sources")
-load("//flutter/private:flutter_aot_compile.bzl", "flutter_aot_elf_action", "flutter_aot_macho_action")
+load("//flutter/private:flutter_aot_compile.bzl", "flutter_aot_elf_action", "flutter_aot_gen_snapshot_flags", "flutter_aot_macho_action")
 load("//flutter/private:flutter_info.bzl", "dedup_plugins")
 load("//flutter/private:flutter_native_assets.bzl", "bridge_dart_code_assets", "collect_bundled_code_asset_files", "write_native_assets_manifest")
 load("//flutter/private:native_sources.bzl", "collect_native_source_pairs")
@@ -158,15 +158,9 @@ def _flutter_application_impl(ctx):
     aot_output = None
     debug_info_output = None
     if not is_debug:
-        # Collect gen_snapshot extra flags from user attrs.
-        extra_flags = list(ctx.attr.extra_gen_snapshot_options)
-        extra_outputs = []
-        if ctx.attr.obfuscate:
-            extra_flags.append("--obfuscate")
-        if ctx.attr.split_debug_info:
-            debug_info_output = ctx.actions.declare_file(ctx.label.name + ".symbols")
-            extra_flags.extend(["--dwarf-stack-traces", "--resolve-dwarf-paths", "--save-debugging-info=" + debug_info_output.path])
-            extra_outputs.append(debug_info_output)
+        # Collect gen_snapshot extra flags from user attrs (shared with
+        # flutter_aot_target so the two stay in step).
+        extra_flags, extra_outputs, debug_info_output = flutter_aot_gen_snapshot_flags(ctx)
 
         # Step 2: AOT compile — choose format based on target platform.
         if is_ios or is_macos:
