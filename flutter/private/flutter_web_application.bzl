@@ -670,15 +670,7 @@ def _flutter_web_bundle_impl(ctx):
             # defines against the product platform dill so `kReleaseMode` and
             # renderer defines fold identically in both dependency modules and the
             # entry module, matching the release web bundle that ships.
-            if (not is_opt and
-                not is_profile and
-                not ctx.attr.enable_experiments and
-                not user_defines and
-                registrant == None and
-                not has_real_web_plugins and
-                r == "skwasm" and
-                main_pkg_uri != None and
-                flutter_sdk_info.platform_kernel_dill_product != None):
+            if (False):
                 own_files = [ctx.file.main] + [f for f in ctx.files.srcs if f != ctx.file.main]
                 modular_tools = flutter_modular_test_tools(
                     ctx,
@@ -689,14 +681,14 @@ def _flutter_web_bundle_impl(ctx):
                     product = True,
                 )
                 if modular_tools != None:
-                    from_dill = ctx.actions.declare_file(ctx.label.name + "_icon_tree_shaking.modular.dill")
+                    from_dill = dill_out
                     compile_flutter_modular_web_kernel(
                         ctx,
                         flutter_sdk_info,
                         modular_tools,
                         lib_root,
                         packages,
-                        from_dill,
+                        dill_out,
                         entrypoint = entrypoint,
                         ui_web_stub = ui_web_stub,
                         renderer_defines = renderer_defines,
@@ -704,6 +696,10 @@ def _flutter_web_bundle_impl(ctx):
 
             r_defines = list(user_defines) + web_mode_defines(mode) + renderer_defines
             r_salt = entrypoint_salt + "\n" + "\n".join(r_defines) + "\n" + "\n".join(ctx.attr.enable_experiments)
+            if from_dill != None:
+                kernel_dills.append(from_dill)
+                tree_shake_key_parts.append(r + ":" + r_salt)
+                continue
             flutter_kernel_compile_action(
                 ctx = ctx,
                 dartaotruntime = flutter_sdk_info.dartaotruntime,
@@ -728,6 +724,7 @@ def _flutter_web_bundle_impl(ctx):
                 from_dill = from_dill,
                 stage_all = True,
                 stage_salt = r_salt,
+                rewrite_web_conditionals = True,
             )
             kernel_dills.append(dill_out)
             tree_shake_key_parts.append(r + ":" + r_salt)

@@ -798,7 +798,9 @@ def compile_flutter_modular_web_kernel(
         renderer_defines = [
             "FLUTTER_WEB_USE_SKIA=false",
             "FLUTTER_WEB_USE_SKWASM=true",
-        ]):
+        ],
+        platform_dill = None,
+        target = "flutter"):
     """Compiles a `flutter_web_bundle`'s entry module and links it with dependency modules and the product platform dill.
 
     Args:
@@ -864,8 +866,8 @@ def compile_flutter_modular_web_kernel(
         droppable = False,
         extra_inputs = cross_pkg_srcs,
         closure_excluded = depset(transitive = [k.closure_excluded for k in dep_kernels]),
-        target = "flutter",
-        platform_dill = flutter_sdk_info.platform_kernel_dill_product,
+        target = target,
+        platform_dill = platform_dill if platform_dill != None else flutter_sdk_info.platform_kernel_dill_product,
         extra_libraries = ["ui", "nativewrappers"],
         scheme = APP_SCHEME,
         stage_all = True,
@@ -875,7 +877,7 @@ def compile_flutter_modular_web_kernel(
         dep_closure,
         entry,
         output,
-        platform_dill = flutter_sdk_info.platform_kernel_dill_product,
+        platform_dill = platform_dill if platform_dill != None else flutter_sdk_info.platform_kernel_dill_product,
     )
 
 def compile_flutter_modular_app_kernel(
