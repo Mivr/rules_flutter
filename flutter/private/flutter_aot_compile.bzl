@@ -45,6 +45,12 @@ def flutter_aot_gen_snapshot_flags(ctx):
 
     Shared by `flutter_application` and `flutter_aot_target` so the two cannot
     drift on `obfuscate`, `split_debug_info`, or `extra_gen_snapshot_options`.
+
+    Args:
+        ctx: Rule context carrying the AOT attributes.
+
+    Returns:
+        A tuple of (extra_flags, extra_outputs, debug_info_output).
     """
     extra_flags = list(ctx.attr.extra_gen_snapshot_options)
     extra_outputs = []
@@ -56,7 +62,6 @@ def flutter_aot_gen_snapshot_flags(ctx):
         extra_flags.extend(["--dwarf-stack-traces", "--resolve-dwarf-paths", "--save-debugging-info=" + debug_info_output.path])
         extra_outputs.append(debug_info_output)
     return extra_flags, extra_outputs, debug_info_output
-
 
 def flutter_aot_elf_action(ctx, gen_snapshot, kernel_dill, output, strip = True, extra_flags = [], extra_outputs = []):
     """AOT compile to ELF shared library. Used for Android, Linux, Windows."""
