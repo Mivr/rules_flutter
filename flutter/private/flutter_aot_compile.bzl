@@ -55,7 +55,6 @@ def _has_gen_snapshot_flag(flags, name):
             return True
     return False
 
-
 def flutter_aot_gen_snapshot_flags(ctx):
     """Build gen_snapshot extra flags/outputs from a rule's AOT attrs.
 

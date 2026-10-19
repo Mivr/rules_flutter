@@ -120,14 +120,13 @@ validation_test_suite(name = "validation_test")
 
 gen_l10n_test_suite(name = "gen_l10n_test")
 
-
 # Regression: `flutter_aot_target` with obfuscation and split debug info must
 # run gen_snapshot successfully and produce the debugging-info output.
 flutter_aot_target(
     name = "aot_split_debug_target",
     package_name = "lv_fixture",
-    main = "lib/language_version_main.dart",
     srcs = ["lib/language_version_main.dart"],
+    main = "lib/language_version_main.dart",
     obfuscate = True,
     split_debug_info = True,
     target_compatible_with = HOST_COMPATIBLE,
@@ -135,6 +134,6 @@ flutter_aot_target(
 
 build_test(
     name = "aot_split_debug_build_test",
-    targets = [":aot_split_debug_target"],
     target_compatible_with = HOST_COMPATIBLE,
+    targets = [":aot_split_debug_target"],
 )
