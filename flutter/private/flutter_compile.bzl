@@ -93,6 +93,8 @@ def flutter_kernel_compile_action(
             staging directory and mount only the staging root (never `.`).
         stage_salt: Optional salt mixed into the staging root hash when
             `stage_all` is True.
+        rewrite_web_conditionals: If True, rewrite platform-conditional
+            imports/exports selecting web branches during the compile.
     """
     args = ctx.actions.args()
     args.add("--")

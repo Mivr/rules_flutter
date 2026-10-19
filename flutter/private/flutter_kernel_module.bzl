@@ -813,6 +813,8 @@ def compile_flutter_modular_web_kernel(
       entrypoint: Optional generated `<name>_wrapper_main.dart` File.
       ui_web_stub: Optional generated `<name>_ui_web_stub.dart` File.
       renderer_defines: Renderer `-D` define strings (`KEY=VALUE`).
+      platform_dill: Optional platform `.dill` File to compile against.
+      target: Frontend/kernel target model.
     """
     sources = []
     if entrypoint != None:

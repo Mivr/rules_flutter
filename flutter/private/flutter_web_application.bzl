@@ -334,7 +334,6 @@ def _flutter_web_bundle_impl(ctx):
     mode = web_build_mode(ctx)
     is_debug = mode == "debug"
     is_profile = mode == "profile"
-    is_opt = ctx.var["COMPILATION_MODE"] == "opt"
 
     # Step 1: Collect sources, generate package config, handle plugin registrant.
     # dart compile wasm/js take .dart source directly (not kernel .dill).
@@ -651,11 +650,6 @@ def _flutter_web_bundle_impl(ctx):
                 "MODULE.bazel or `register_toolchains(\"@flutter_toolchains//:all\")`) " +
                 "or set `platform_kernel_dill_product` on `flutter_toolchain`.",
             )
-        main_pkg_uri = app_main_package_uri(
-            ctx.attr.package_name,
-            lib_root,
-            ctx.file.main.short_path,
-        )
         entrypoint_uri = app_scheme_location(entrypoint).uri
 
         icon_renderers = shipped_renderers if has_font_tree_shake else [renderer]
