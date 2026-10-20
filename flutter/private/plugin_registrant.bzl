@@ -618,3 +618,53 @@ def generate_dart_plugin_registrant(ctx, plugins, target_platform = None, agent_
     registrant = ctx.actions.declare_file(ctx.label.name + "_plugin_registrant.dart")
     ctx.actions.write(registrant, content)
     return registrant
+
+def debug_kernel_inputs_shareable(plugins, has_native_assets, has_shaders, has_data_assets, agent_import = None, native_agent_import = None):
+    """Whether a debug kernel compiled for one platform serves every platform.
+
+    A whole-program JIT kernel is bytes-identical across configurations when
+    every input the frontend_server reads is content-identical: sources,
+    package config, platform dill, defines and flags. Of those, only three can
+    vary by target platform — the platform-filtered Dart plugin registrant
+    (`--source`), the Native Assets manifest (`--native-assets`, keyed by a
+    target string), and the compiled shaders baked into the asset tree whose
+    path the kernel carries in `rules_flutter.build_info.assetsDir`. Data
+    assets also land in that tree, so a platform-varying hook output would
+    fork it too.
+
+    This is the gate for sharing one `FlutterKernelCompile` across the host
+    `flutter_application` and the Android debug app (H17): it returns True
+    only when the registrant content is equal on every native platform and
+    the manifest/shader/data channels are empty. Anything else keeps its
+    per-platform compile, unchanged.
+
+    Args:
+        plugins: List of plugin structs (name, platforms dict).
+        has_native_assets: True when the app contributes any Native Assets
+            `CodeAsset` (the manifest's target string then varies by OS/arch).
+        has_shaders: True when the app bundles any shader sources of its own
+            or transitively (compiled per platform into the shared tree).
+        has_data_assets: True when the app bundles any Native Assets
+            `DataAsset` (placed in the shared tree).
+        agent_import: Same as `make_registrant_content` — must be the value
+            the build registrant uses, so equality here implies equality there.
+        native_agent_import: The same, for the native-only agent extensions.
+
+    Returns:
+        True when one debug kernel serves every native platform.
+    """
+    if has_native_assets or has_shaders or has_data_assets:
+        return False
+    first = None
+    for platform in DEV_REGISTRANT_PLATFORMS:
+        content = make_registrant_content(
+            plugins,
+            target_platform = platform,
+            agent_import = agent_import,
+            native_agent_import = native_agent_import,
+        )
+        if first == None:
+            first = content
+        elif content != first:
+            return False
+    return True

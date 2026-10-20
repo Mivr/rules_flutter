@@ -1,7 +1,7 @@
 """Unit tests for plugin_registrant.bzl pure functions."""
 
 load("@bazel_skylib//lib:unittest.bzl", "asserts", "unittest")
-load("//flutter/private:plugin_registrant.bzl", "make_android_registrant_content", "make_registrant_content")
+load("//flutter/private:plugin_registrant.bzl", "debug_kernel_inputs_shareable", "make_android_registrant_content", "make_registrant_content")
 
 def _no_plugins_returns_empty_test_impl(ctx):
     env = unittest.begin(ctx)
@@ -284,5 +284,92 @@ def _android_registrant_names_the_declared_package_test_impl(ctx):
 
 _t15_test = unittest.make(_android_registrant_names_the_declared_package_test_impl)
 
+def _shareable_empty_app_test_impl(ctx):
+    """No plugins and empty platform channels: one kernel serves every platform."""
+    env = unittest.begin(ctx)
+    asserts.true(env, debug_kernel_inputs_shareable([], False, False, False))
+    return unittest.end(env)
+
+_t16_test = unittest.make(_shareable_empty_app_test_impl)
+
+def _shareable_agent_only_test_impl(ctx):
+    """Agent-only registrants are identical on every platform: still shareable."""
+    env = unittest.begin(ctx)
+    asserts.true(env, debug_kernel_inputs_shareable(
+        [],
+        False,
+        False,
+        False,
+        agent_import = "app.agent_extensions.dart",
+        native_agent_import = "app.native_agent_extensions.dart",
+    ))
+    return unittest.end(env)
+
+_t17_test = unittest.make(_shareable_agent_only_test_impl)
+
+def _unshareable_single_platform_plugin_test_impl(ctx):
+    """A Dart plugin on one platform forks the registrant: kept per platform."""
+    env = unittest.begin(ctx)
+    plugins = [struct(
+        name = "url_launcher_android",
+        platforms = {"android": {"dartPluginClass": "UrlLauncherPlugin"}},
+    )]
+    asserts.false(env, debug_kernel_inputs_shareable(plugins, False, False, False))
+    return unittest.end(env)
+
+_t18_test = unittest.make(_unshareable_single_platform_plugin_test_impl)
+
+def _unshareable_two_platform_plugin_test_impl(ctx):
+    """A plugin on two of five platforms still forks the other three."""
+    env = unittest.begin(ctx)
+    plugins = [struct(
+        name = "my_plugin",
+        platforms = {
+            "android": {"dartPluginClass": "MyPlugin"},
+            "linux": {"dartPluginClass": "MyPlugin"},
+        },
+    )]
+    asserts.false(env, debug_kernel_inputs_shareable(plugins, False, False, False))
+    return unittest.end(env)
+
+_t19_test = unittest.make(_unshareable_two_platform_plugin_test_impl)
+
+def _shareable_all_platform_plugin_test_impl(ctx):
+    """The same Dart plugin on every native platform: registrants agree."""
+    env = unittest.begin(ctx)
+    platforms = {
+        p: {"dartPluginClass": "MyPlugin"}
+        for p in ("android", "ios", "linux", "macos", "windows")
+    }
+    plugins = [struct(name = "my_plugin", platforms = platforms)]
+    asserts.true(env, debug_kernel_inputs_shareable(plugins, False, False, False))
+    return unittest.end(env)
+
+_t20_test = unittest.make(_shareable_all_platform_plugin_test_impl)
+
+def _unshareable_native_assets_test_impl(ctx):
+    """Native Assets fork the manifest's target string: kept per platform."""
+    env = unittest.begin(ctx)
+    asserts.false(env, debug_kernel_inputs_shareable([], True, False, False))
+    return unittest.end(env)
+
+_t21_test = unittest.make(_unshareable_native_assets_test_impl)
+
+def _unshareable_shaders_test_impl(ctx):
+    """Shaders compile per platform into the shared tree: kept per platform."""
+    env = unittest.begin(ctx)
+    asserts.false(env, debug_kernel_inputs_shareable([], False, True, False))
+    return unittest.end(env)
+
+_t22_test = unittest.make(_unshareable_shaders_test_impl)
+
+def _unshareable_data_assets_test_impl(ctx):
+    """Data assets land in the shared tree: kept per platform."""
+    env = unittest.begin(ctx)
+    asserts.false(env, debug_kernel_inputs_shareable([], False, False, True))
+    return unittest.end(env)
+
+_t23_test = unittest.make(_unshareable_data_assets_test_impl)
+
 def plugin_registrant_test_suite(name):
-    unittest.suite(name, _t0_test, _t1_test, _t2_test, _t3_test, _t4_test, _t5_test, _t6_test, _t7_test, _t8_test, _t9_test, _t10_test, _t11_test, _t12_test, _t13_test, _t14_test, _t15_test)
+    unittest.suite(name, _t0_test, _t1_test, _t2_test, _t3_test, _t4_test, _t5_test, _t6_test, _t7_test, _t8_test, _t9_test, _t10_test, _t11_test, _t12_test, _t13_test, _t14_test, _t15_test, _t16_test, _t17_test, _t18_test, _t19_test, _t20_test, _t21_test, _t22_test, _t23_test)

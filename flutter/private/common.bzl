@@ -587,6 +587,200 @@ def collect_assets(deps, direct_assets):
         return list(direct_assets) + depset(transitive = transitive_depsets).to_list()
     return list(direct_assets)
 
+def build_info_label(ctx):
+    """The label string `flutter_compile_kernel` bakes into `rules_flutter.build_info`.
+
+    Usually the compiling target's own label. A target that re-exports another
+    target's kernel — the H17 shared debug kernel, compiled once in a canonical
+    configuration and served to several configurations — overrides it with the
+    application label it serves, so the dev tool's `resolveAssetsDir` label
+    check (which compares the running app's record against a cquery for the
+    application) keeps passing, and so the shared kernel's record reads the
+    same as the per-platform kernel's did. Rules without a `build_label` attr
+    (every kernel compile but `flutter_application`) fall back to their own
+    label, which is today's behavior, unchanged.
+
+    Args:
+        ctx: Rule context, optionally carrying a `build_label` string attr.
+
+    Returns:
+        The label string for the build_info record.
+    """
+    override = getattr(ctx.attr, "build_label", "")
+    if override:
+        return override
+    return str(ctx.label)
+
+def flutter_kernel_source_inputs(ctx):
+    """Collect the source-level inputs of a kernel compile, without compiling.
+
+    The pure collection half of `flutter_compile_kernel`: transitive sources,
+    the package map with the app itself synthesized in (so the entrypoint keys
+    as `package:<name>/main.dart`), the co-located main, the app lib root,
+    the entrypoint location/URI, and the deduplicated plugin list. No actions:
+    everything here is analysis-time data both the compile and the dev-loop
+    metadata derive from. Split out so a target that serves another target's
+    kernel (H17) can still emit its own configuration's dev-loop metadata —
+    live sources and generated roots — without running a second compile.
+
+    Args:
+        ctx: Rule context (must have main, srcs, deps, package_name,
+            language_version attrs).
+
+    Returns:
+        struct with all_srcs, packages, colocate_inputs, app_pkg_name,
+        app_lib_root, main_location, app_entrypoint_uri, plugins.
+    """
+    all_srcs = list(ctx.files.srcs) + collect_transitive_srcs(ctx.attr.deps).to_list()
+    packages = collect_packages(ctx.attr.deps)
+
+    # Register the app itself as a package so the frontend_server keys the
+    # entrypoint as `package:<name>/main.dart` — the URI the dev tool's
+    # incremental compiler uses (without this, hot-reload deltas keyed via
+    # sandbox `file://` URIs can't be matched against the kernel's libraries).
+    app_pkg_name = ctx.attr.package_name
+
+    # The app's own library root, which is what `package:<name>/…` resolves
+    # against. Derived from the label rather than assumed to be the workspace
+    # root, so an app in a nested Bazel package registers a `rootUri` pointing
+    # at its own directory; assuming `""` pointed every nested app's
+    # `package:` URIs at whatever sits in the *workspace's* `lib/`.
+    app_lib_root = derive_lib_root(ctx.label.workspace_root, ctx.label.package)
+    packages = synthesize_app_package(
+        ctx.label,
+        packages,
+        app_pkg_name,
+        app_lib_root,
+        ctx.attr.language_version,
+    )
+
+    # Include the app's own `main` so the synthesized package keyed as
+    # `package:<name>/main.dart` (hot-reload URI parity) is co-located with
+    # its lib/ siblings when any of them are generated.
+    colocate_inputs = all_srcs + ([ctx.file.main] if ctx.file.main else [])
+
+    main_location = app_main_location(app_pkg_name, app_lib_root, ctx.file.main) if ctx.file.main else None
+    app_entrypoint_uri = main_location.uri if main_location else None
+
+    all_dep_plugins = []
+    for dep in ctx.attr.deps:
+        if FlutterInfo in dep:
+            all_dep_plugins.extend(dep[FlutterInfo].plugins)
+    plugins = dedup_plugins(all_dep_plugins)
+
+    return struct(
+        all_srcs = all_srcs,
+        packages = packages,
+        colocate_inputs = colocate_inputs,
+        app_pkg_name = app_pkg_name,
+        app_lib_root = app_lib_root,
+        main_location = main_location,
+        app_entrypoint_uri = app_entrypoint_uri,
+        plugins = plugins,
+    )
+
+def flutter_dev_loop_inputs(ctx, source, mode, inject_agent):
+    """Emit the dev-loop metadata of a debug kernel compile, without compiling.
+
+    The dev-half of `flutter_compile_kernel`: the second (live-source)
+    package config, the filesystem roots/scheme, the generated-source and
+    source-package lists, the per-platform dev plugin registrants, and the
+    merged user defines the dev tool replays on its resident frontend_server.
+    Declares the same files `flutter_compile_kernel` would — a target serving
+    a shared kernel (H17) calls this for its own configuration so its
+    `_dev_config.json` names live host paths while the kernel it serves comes
+    from the canonical configuration.
+
+    Args:
+        ctx: Rule context.
+        source: The `flutter_kernel_source_inputs` struct for this target.
+        mode: `flutter_build_mode(ctx)` — passed in because the caller has
+            already resolved it for the compile half.
+        inject_agent: Whether the agent extensions are registered from the
+            registrant (debug, non-AOT, `_agent_extensions_src` present) —
+            decides the registrant imports, not the files: the import names
+            are basenames, stable without staging anything.
+
+    Returns:
+        struct with dev_package_config, dev_filesystem_roots,
+        dev_filesystem_scheme, dev_generated_source_paths,
+        dev_generated_source_uris, dev_generated_source_files,
+        dev_source_packages, dev_app_sources, dev_plugin_registrants,
+        user_defines, agent_import, native_agent_import. The dev_* fields are
+        None/empty outside debug, exactly as in `flutter_compile_kernel`.
+    """
+    emit_dev_config = mode == "debug"
+    dev_package_config = None
+    dev_filesystem_roots = []
+    dev_filesystem_scheme = ""
+    dev_generated_source_paths = []
+    dev_generated_source_uris = []
+    dev_generated_source_files = []
+    dev_source_packages = []
+    dev_app_sources = []
+    if emit_dev_config:
+        dev_package_config = ctx.actions.declare_file(ctx.label.name + ".dev_package_config.json")
+        dev_pc = generate_dev_package_config(source.packages, source.colocate_inputs, dev_package_config, scheme = APP_SCHEME)
+        ctx.actions.write(dev_package_config, dev_pc.content)
+
+        # A `main` with no `package:` URI is compiled under the app scheme,
+        # and the dev loop's compiler has to mount the same root to name it
+        # the same way.
+        dev_filesystem_roots = with_root(dev_pc.filesystem_roots, source.main_location.root if source.main_location else None)
+        dev_filesystem_scheme = dev_pc.scheme
+        dev_app_sources = app_scheme_sources(source.app_pkg_name, source.app_lib_root, ctx.file.main, ctx.files.srcs) if ctx.file.main else []
+        dev_generated_source_paths = dev_pc.generated_source_paths
+        dev_generated_source_uris = dev_pc.generated_source_uris
+        dev_source_packages = dev_pc.source_packages
+
+        # Resolved from the same list the paths came from, so the two cannot
+        # drift — see [resolve_dev_generated_sources] for why declaring them is
+        # what makes the config's paths true.
+        dev_generated_source_files = resolve_dev_generated_sources(
+            dev_generated_source_paths,
+            source.colocate_inputs,
+        )
+
+    agent_import = None
+    native_agent_import = None
+    if inject_agent:
+        agent_import = ctx.label.name + ".agent_extensions.dart"
+        native_agent_import = ctx.label.name + ".native_agent_extensions.dart"
+
+    # Dev-loop registrants, one per platform (debug only). The dev tool reads
+    # these from a HOST-configuration build while the app can be running on a
+    # different platform, so the host build emits every platform's filter and
+    # the dev tool selects by the platform the running app reports. See
+    # generate_dev_plugin_registrants.
+    dev_plugin_registrants = {}
+    if emit_dev_config:
+        dev_plugin_registrants = generate_dev_plugin_registrants(
+            ctx,
+            source.plugins,
+            agent_import = agent_import,
+            native_agent_import = native_agent_import,
+        )
+
+    # Merged user defines (attr + extra_dart_defines flag, no mode keys),
+    # surfaced so dev-config writers can replay them on the dev tool's
+    # frontend_server.
+    user_defines = merge_dart_defines(ctx)
+
+    return struct(
+        dev_package_config = dev_package_config,
+        dev_filesystem_roots = dev_filesystem_roots,
+        dev_filesystem_scheme = dev_filesystem_scheme,
+        dev_generated_source_paths = dev_generated_source_paths,
+        dev_generated_source_uris = dev_generated_source_uris,
+        dev_generated_source_files = dev_generated_source_files,
+        dev_source_packages = dev_source_packages,
+        dev_app_sources = dev_app_sources,
+        dev_plugin_registrants = dev_plugin_registrants,
+        user_defines = user_defines,
+        agent_import = agent_import,
+        native_agent_import = native_agent_import,
+    )
+
 def flutter_compile_kernel(ctx, flutter_sdk_info, aot = None, platform_dill = None, target_platform = None, frontend_server_target = "flutter", native_assets_manifest = None, track_widget_creation = False, assets_dir = None, platform_build_args = [], recorded_uses = None):
     """Run the shared kernel compilation step.
 
@@ -633,76 +827,19 @@ def flutter_compile_kernel(ctx, flutter_sdk_info, aot = None, platform_dill = No
     Returns:
         struct with kernel_dill (File) and package_config (File).
     """
-    all_srcs = list(ctx.files.srcs) + collect_transitive_srcs(ctx.attr.deps).to_list()
-    packages = collect_packages(ctx.attr.deps)
+    source = flutter_kernel_source_inputs(ctx)
+    all_srcs = source.all_srcs
+    packages = source.packages
+    colocate_inputs = source.colocate_inputs
+    app_pkg_name = source.app_pkg_name
+    app_lib_root = source.app_lib_root
 
-    # Register the app itself as a package so the frontend_server keys the
-    # entrypoint as `package:<name>/main.dart` — the URI the dev tool's
-    # incremental compiler uses (without this, hot-reload deltas keyed via
-    # sandbox `file://` URIs can't be matched against the kernel's libraries).
-    app_pkg_name = ctx.attr.package_name
-
-    # The app's own library root, which is what `package:<name>/…` resolves
-    # against. Derived from the label rather than assumed to be the workspace
-    # root, so an app in a nested Bazel package registers a `rootUri` pointing
-    # at its own directory; assuming `""` pointed every nested app's
-    # `package:` URIs at whatever sits in the *workspace's* `lib/`.
-    app_lib_root = derive_lib_root(ctx.label.workspace_root, ctx.label.package)
-    packages = synthesize_app_package(
-        ctx.label,
-        packages,
-        app_pkg_name,
-        app_lib_root,
-        ctx.attr.language_version,
-    )
-
-    # Include the app's own `main` so the synthesized package keyed as
-    # `package:<name>/main.dart` (hot-reload URI parity) is co-located with
-    # its lib/ siblings when any of them are generated.
-    colocate_inputs = all_srcs + ([ctx.file.main] if ctx.file.main else [])
-
-    # Dev hot-reload metadata (debug only): a *second* package_config that, for a
-    # source-assembled app package, points its `rootUri` at the live source tree
-    # + generated bazel-out roots via a filesystem scheme — instead of the frozen
-    # assembled `.pkgsrcs` dir the build package_config uses. This is what lets
-    # the dev tool's frontend_server pick up live edits AND find generated parts.
-    # Computed from the PRE-colocation `packages`/`colocate_inputs` so `lib_root`
-    # and `File.is_source` are still intact. See rules_dart
-    # `generate_dev_package_config`.
+    # The dev-loop metadata (live package config, per-platform registrants,
+    # replayed defines) is emitted inside `flutter_dev_loop_inputs` below,
+    # once the agent decision is known; the entrypoint names stay here.
     mode = flutter_build_mode(ctx)
-    emit_dev_config = mode == "debug"
-    dev_package_config = None
-    dev_filesystem_roots = []
-    dev_filesystem_scheme = ""
-    dev_generated_source_paths = []
-    dev_generated_source_uris = []
-    dev_generated_source_files = []
-    dev_source_packages = []
-    dev_app_sources = []
-    main_location = app_main_location(app_pkg_name, app_lib_root, ctx.file.main) if ctx.file.main else None
-    app_entrypoint_uri = main_location.uri if main_location else None
-    if emit_dev_config:
-        dev_package_config = ctx.actions.declare_file(ctx.label.name + ".dev_package_config.json")
-        dev_pc = generate_dev_package_config(packages, colocate_inputs, dev_package_config, scheme = APP_SCHEME)
-        ctx.actions.write(dev_package_config, dev_pc.content)
-
-        # A `main` with no `package:` URI is compiled under the app scheme,
-        # and the dev loop's compiler has to mount the same root to name it
-        # the same way.
-        dev_filesystem_roots = with_root(dev_pc.filesystem_roots, main_location.root if main_location else None)
-        dev_filesystem_scheme = dev_pc.scheme
-        dev_app_sources = app_scheme_sources(app_pkg_name, app_lib_root, ctx.file.main, ctx.files.srcs) if ctx.file.main else []
-        dev_generated_source_paths = dev_pc.generated_source_paths
-        dev_generated_source_uris = dev_pc.generated_source_uris
-        dev_source_packages = dev_pc.source_packages
-
-        # Resolved from the same list the paths came from, so the two cannot
-        # drift — see [resolve_dev_generated_sources] for why declaring them is
-        # what makes the config's paths true.
-        dev_generated_source_files = resolve_dev_generated_sources(
-            dev_generated_source_paths,
-            colocate_inputs,
-        )
+    main_location = source.main_location
+    app_entrypoint_uri = source.app_entrypoint_uri
 
     if aot == None:
         aot = mode != "debug"
@@ -757,33 +894,31 @@ def flutter_compile_kernel(ctx, flutter_sdk_info, aot = None, platform_dill = No
     # Collect plugins from deps and generate the registrant. The registrant is
     # a side library (upstream _PluginRegistrant shape) the engine invokes
     # before main() on every root-isolate launch — including hot restart.
-    all_dep_plugins = []
-    for dep in ctx.attr.deps:
-        if FlutterInfo in dep:
-            all_dep_plugins.extend(dep[FlutterInfo].plugins)
-    plugins = dedup_plugins(all_dep_plugins)
+    plugins = source.plugins
+
+    # The dev-loop half of this compile (live package config, filesystem
+    # roots, per-platform registrants, replayed defines). Same inputs the
+    # compile uses, so the two cannot drift; a target serving a shared kernel
+    # (H17) calls `flutter_dev_loop_inputs` directly for its own
+    # configuration instead of compiling.
+    dev = flutter_dev_loop_inputs(ctx, source, mode, inject_agent)
+    dev_package_config = dev.dev_package_config
+    dev_filesystem_roots = dev.dev_filesystem_roots
+    dev_filesystem_scheme = dev.dev_filesystem_scheme
+    dev_generated_source_paths = dev.dev_generated_source_paths
+    dev_generated_source_uris = dev.dev_generated_source_uris
+    dev_generated_source_files = dev.dev_generated_source_files
+    dev_source_packages = dev.dev_source_packages
+    dev_app_sources = dev.dev_app_sources
+    dev_plugin_registrants = dev.dev_plugin_registrants
     registrant = generate_dart_plugin_registrant(
         ctx,
         plugins,
         target_platform = target_platform,
-        agent_import = staged_agent.basename if staged_agent else None,
-        native_agent_import = staged_native_agent.basename if staged_native_agent else None,
+        agent_import = dev.agent_import,
+        native_agent_import = dev.native_agent_import,
     )
     registrant_location = app_scheme_location(registrant) if registrant else None
-
-    # Dev-loop registrants, one per platform (debug only). The dev tool reads
-    # these from a HOST-configuration build while the app can be running on a
-    # different platform, so the host build emits every platform's filter and
-    # the dev tool selects by the platform the running app reports. See
-    # generate_dev_plugin_registrants.
-    dev_plugin_registrants = {}
-    if emit_dev_config:
-        dev_plugin_registrants = generate_dev_plugin_registrants(
-            ctx,
-            plugins,
-            agent_import = staged_agent.basename if staged_agent else None,
-            native_agent_import = staged_native_agent.basename if staged_native_agent else None,
-        )
 
     # Collect extra frontend_server flags from build flag attrs.
     extra_frontend_flags = []
@@ -793,7 +928,7 @@ def flutter_compile_kernel(ctx, flutter_sdk_info, aot = None, platform_dill = No
     # Merge defines with mode-specific Dart VM flags. user_defines (attr +
     # extra_dart_defines flag, no mode keys) is surfaced in the return struct
     # so dev-config writers can replay it on the dev tool's frontend_server.
-    user_defines = merge_dart_defines(ctx)
+    user_defines = dev.user_defines
     all_defines = list(user_defines)
     if mode == "profile":
         all_defines.append("dart.vm.profile=true")
@@ -814,7 +949,7 @@ def flutter_compile_kernel(ctx, flutter_sdk_info, aot = None, platform_dill = No
     # value it read from the running app instead.
     if assets_dir != None and not aot and mode == "debug":
         all_defines.append("rules_flutter.build_info=" + json.encode({
-            "label": str(ctx.label),
+            "label": build_info_label(ctx),
             "compilationMode": ctx.var["COMPILATION_MODE"],
             "platformBuildArgs": platform_build_args,
             "dartDefines": user_defines,
