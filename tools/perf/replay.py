@@ -31,6 +31,14 @@ with stdin closed and a per-action timeout, under a whole-log time budget
 plus the skipped count. The report always includes the
 executed-but-not-replayed table and per-mnemonic failure counts so a broken
 replay can never look like a cost drop.
+
+Every replay records ``user_s``/``sys_s`` CPU seconds from ``time -l``
+alongside instructions retired: GitHub's macOS VMs may lack a PMU, in
+which case the instruction counter stays empty everywhere and replay CPU
+is the fallback cost signal. Failed replays (non-zero exit or timeout)
+record the exit code plus the last ``STDERR_TAIL_LINES`` lines of stderr,
+and each mnemonic aggregate keeps one such sample, so the summary shows
+why a replay class failed.
 """
 
 import argparse
@@ -64,13 +72,37 @@ DEFAULT_IOS_MNEMONICS = frozenset([
 
 TIME_BIN = "/usr/bin/time"
 
+# Kept stderr lines per failed replay: enough to diagnose a broken replay
+# class (missing Xcode env, sandbox-only paths) without bloating the report.
+STDERR_TAIL_LINES = 20
+
 INSTRUCTIONS_RE = re.compile(r"^\s*([\d,]+)\s+instructions retired\s*$",
                              re.MULTILINE)
 REAL_RE = re.compile(r"^\s*([\d.]+)\s+real\b", re.MULTILINE)
+# macOS `time -l` prints real/user/sys on one line, so user/sys match
+# mid-line; GNU `time -v` prints "User time (seconds): N" lines instead.
+USER_RE = re.compile(
+    r"(?:([\d.]+)\s+user\b|[Uu]ser time[^\n:]*:\s*([\d.]+))")
+SYS_RE = re.compile(
+    r"(?:([\d.]+)\s+sys\b|[Ss]ystem time[^\n:]*:\s*([\d.]+))")
+
+
+def first_number(match):
+    if match is None:
+        return None
+    for group in match.groups():
+        if group is not None:
+            return float(group)
+    return None
 
 
 def parse_time_l_output(text):
-    """Extracts instructions-retired and wall seconds from time -l output."""
+    """Extracts instructions-retired, wall and CPU seconds from time output.
+
+    macOS ``time -l`` prints real/user/sys on one line; GNU ``time -v``
+    prints them labelled across lines. Either way the *_s values come back
+    None when the platform reports no counter.
+    """
     instructions = None
     match = INSTRUCTIONS_RE.search(text or "")
     if match:
@@ -79,7 +111,15 @@ def parse_time_l_output(text):
     match = REAL_RE.search(text or "")
     if match:
         real_s = float(match.group(1))
-    return (instructions, real_s)
+    user_s = first_number(USER_RE.search(text or ""))
+    sys_s = first_number(SYS_RE.search(text or ""))
+    return (instructions, real_s, user_s, sys_s)
+
+
+def tail_lines(text, limit=STDERR_TAIL_LINES):
+    """Last ``limit`` lines of text (a failed replay's stderr sample)."""
+    lines = (text or "").splitlines()
+    return "\n".join(lines[-limit:])
 
 
 def select_spawns(spawns, mnemonics):
@@ -136,22 +176,31 @@ def run_replay(spawn, execroot, timeout):
             check=False,
             text=True,
         )
-    except subprocess.TimeoutExpired:
+    except subprocess.TimeoutExpired as exc:
         return {
             "mnemonic": spawn.get("mnemonic", ""),
             "target": spawn.get("targetLabel", ""),
             "instructions": None,
             "real_s": None,
+            "user_s": None,
+            "sys_s": None,
             "exit_code": "timeout",
+            "stderr_tail": tail_lines(
+                exc.stderr.decode() if isinstance(exc.stderr, bytes)
+                else exc.stderr),
             "command": spawn.get("commandArgs", []),
         }
-    instructions, real_s = parse_time_l_output(proc.stderr)
+    instructions, real_s, user_s, sys_s = parse_time_l_output(proc.stderr)
+    failed = proc.returncode != 0
     return {
         "mnemonic": spawn.get("mnemonic", ""),
         "target": spawn.get("targetLabel", ""),
         "instructions": instructions,
         "real_s": real_s,
+        "user_s": user_s,
+        "sys_s": sys_s,
         "exit_code": proc.returncode,
+        "stderr_tail": tail_lines(proc.stderr) if failed else None,
         "command": spawn.get("commandArgs", []),
     }
 
@@ -169,16 +218,31 @@ def aggregate_replays(records):
             "instructions_total": 0,
             "instructions_missing": 0,
             "real_s_total": 0.0,
+            "user_s_total": 0.0,
+            "sys_s_total": 0.0,
+            "cpu_s_missing": 0,
+            "sample_failure": None,
         })
         entry["count"] += 1
         if is_failure(record):
             entry["failures"] += 1
+            if entry["sample_failure"] is None:
+                entry["sample_failure"] = {
+                    "target": record.get("target", ""),
+                    "exit_code": record.get("exit_code"),
+                    "stderr_tail": record.get("stderr_tail"),
+                }
         if record["instructions"] is None:
             entry["instructions_missing"] += 1
         else:
             entry["instructions_total"] += record["instructions"]
-        if record["real_s"] is not None:
+        if record.get("real_s") is not None:
             entry["real_s_total"] += record["real_s"]
+        if record.get("user_s") is None or record.get("sys_s") is None:
+            entry["cpu_s_missing"] += 1
+        else:
+            entry["user_s_total"] += record["user_s"]
+            entry["sys_s_total"] += record["sys_s"]
     return by_mnemonic
 
 

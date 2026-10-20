@@ -13,13 +13,21 @@ For each of `base_ref` and `head_ref` (rules_flutter commits, wired through
 configurations (fixed table `CONFIGS` in `tools/perf/run_rep.py`, recorded
 in the summary metadata):
 
-- `device_release`: the Flutter iOS framework only —
-  `//app:app_framework` with `-c opt --ios_multi_cpus=arm64`. That target
-  is an explicit public `flutter_ios_framework_gen` over the shared
-  application (emitted by the generator, not the macro's private
-  `__app_ios_app_framework`), covering AOT gen_snapshot for arm64 plus
-  App.framework assembly with no `ios_application`, hence no signing and
-  no provisioning profile.
+- `device_release`: the Flutter iOS framework assembly itself —
+  `//app:__app_framework_framework` with `-c opt
+  --ios_multi_cpus=arm64`. That is the `_flutter_ios_framework` rule
+  the generator's public `flutter_ios_framework_gen(name =
+  "app_framework")` creates (`__<name>_framework` in
+  `flutter/ios.bzl`): with `-c opt` the application is non-debug, so
+  `flutter_application` runs AOT gen_snapshot for iOS (`FlutterAotMacho`)
+  and the framework rule assembles App.framework (`FlutterIOSRetagDylib`
+  + `FlutterIOSCopyAssets`), with no `ios_application`, hence no
+  signing and no provisioning profile. The public
+  `//app:app_framework` wrapper is an `apple_dynamic_framework_import`
+  whose outputs are only consumed when linked into an app — building it
+  executes zero actions (as the first dispatch showed), so the bench
+  targets the inner rule and the driver fails any clean build that
+  executes fewer than 10 actions (`--min-clean-actions`).
 - `sim_debug`: the full simulator app — `//app:app_ios` with
   `-c dbg --ios_multi_cpus=sim_arm64` (the developer inner loop; the
   simulator runs debug builds only, and simulator bundles need no
@@ -41,18 +49,34 @@ Per scenario run it records:
 - Executed action count by mnemonic, from
   `bazel build --execution_log_json_file` (only executed spawns are logged).
 - Total action CPU time (user+sys from each spawn's metrics) plus wall time.
-  Linux sandbox runs omit user/sys; `cpu_time_available` says whether any
-  spawn carried them, so missing data is never mistaken for zero CPU.
+  The Linux sandbox runner does not populate `userTime`/`systemTime` and
+  the macOS runner did not either on the first dispatch;
+  `cpu_time_available` says whether any spawn carried them, so missing
+  data is never mistaken for zero CPU. Wall time is always reported.
+  (`--experimental_execution_log_spawn_metrics` does not exist in the
+  pinned Bazel 9.3.0 — `bazel help build` lists only the
+  `--execution_log_{binary,compact,json}_file` outputs — so there is no
+  extra per-spawn metric to consume.)
 - Instructions retired for the iOS-only actions (`FlutterAotMacho`
   gen_snapshot for iOS, the `FlutterIOS*` framework/bundle tools,
   `FlutterStripEngine`, `FlutterPlistMerge`, `FlutterMachOVerifyProbe`,
   assembler/clang and linker steps), by replaying each such action's
-  command line under `/usr/bin/time -l` with the logged environment in the
-  build's execroot right after the build. Kernel compiles are excluded
-  (the Linux bench measures them); pass `--mnemonic` to opt back in.
-  Replays run with stdin closed, a 600 s per-action timeout, and an
-  1800 s whole-log budget; on exhaustion the report records
-  `truncated=true` and the skipped count.
+  command line under `/usr/bin/time -l` with the host environment
+  overlaid by the logged environment, in the build's execroot right
+  after the build. Kernel compiles are excluded (the Linux bench
+  measures them); pass `--mnemonic` to opt back in. Replays run with
+  stdin closed, a 600 s per-action timeout, and an 1800 s whole-log
+  budget; on exhaustion the report records `truncated=true` and the
+  skipped count.
+- Replay CPU seconds (`user_s`/`sys_s` from `time -l`) per action and
+  per mnemonic. GitHub's macOS VMs may expose no PMU, in which case no
+  replayed action carries an instruction counter; the summary then says
+  so plainly and replay CPU is the fallback cost signal.
+- Failed replays (non-zero exit or timeout) record the exit code plus
+  the last 20 lines of stderr in `replay.json`, and the summary shows
+  one sample per failing mnemonic (target, exit, stderr tail), so the
+  next run tells us why a replay class failed (missing Xcode env,
+  sandbox-only paths) instead of just counting it.
 
 Ordering (enforced by `tools/perf/run_rep.py`): per repeat and per config,
 the workspace is reset from the pristine copy, then all three scenario
@@ -120,7 +144,10 @@ Everything except the Bazel invocation, the replay execution, and the
   `python3 tools/perf/gen_monorepo.py generate --target-loc 20000
   --rules-flutter <checkout> --out <dir>`, then
   `bazel build //packages/... //app:app //app:app_lib --nobuild` in it.
-  Both bench targets must load:
-  `bazel query '//app:app_framework + //app:app_ios'`. Configured
-  analysis of either iOS target fails on Linux at Apple toolchain
-  resolution (no Apple SDK), which is expected — macOS builds them.
+  All three bench targets must load:
+  `bazel query '//app:app_framework + //app:app_ios +
+  //app:__app_framework_framework'`. The device_release target goes
+  further: `bazel build //app:__app_framework_framework --nobuild -c opt
+  --ios_multi_cpus=arm64` completes analysis on Linux (only execution
+  needs the Apple SDK). The full `//app:app_ios` analysis fails on Linux
+  at Apple toolchain resolution, which is expected — macOS builds it.

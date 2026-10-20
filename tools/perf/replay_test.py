@@ -42,23 +42,41 @@ SWIFT_SPAWN = {
 
 
 class ParseTimeTest(unittest.TestCase):
-    def test_instructions_and_real(self):
-        instructions, real_s = parse_time_l_output(TIME_L_FIXTURE)
+    def test_instructions_real_and_cpu(self):
+        instructions, real_s, user_s, sys_s = parse_time_l_output(
+            TIME_L_FIXTURE)
         self.assertEqual(instructions, 123456789)
         self.assertAlmostEqual(real_s, 3.21)
+        self.assertAlmostEqual(user_s, 2.90)
+        self.assertAlmostEqual(sys_s, 0.11)
 
     def test_commas_accepted(self):
-        instructions, _ = parse_time_l_output("  1,234,567  instructions retired\n")
+        instructions, _, _, _ = parse_time_l_output(
+            "  1,234,567  instructions retired\n")
         self.assertEqual(instructions, 1234567)
 
     def test_missing_counter_is_none(self):
-        instructions, real_s = parse_time_l_output("  3.21 real\n")
+        instructions, real_s, user_s, sys_s = parse_time_l_output(
+            "  3.21 real\n")
         self.assertIsNone(instructions)
         self.assertAlmostEqual(real_s, 3.21)
+        self.assertIsNone(user_s)
+        self.assertIsNone(sys_s)
 
     def test_empty_is_none(self):
-        self.assertEqual(parse_time_l_output(""), (None, None))
-        self.assertEqual(parse_time_l_output(None), (None, None))
+        self.assertEqual(parse_time_l_output(""),
+                         (None, None, None, None))
+        self.assertEqual(parse_time_l_output(None),
+                         (None, None, None, None))
+
+    def test_gnu_time_verbose_cpu(self):
+        out = ("\tUser time (seconds): 1.10\n"
+               "\tSystem time (seconds): 0.20\n")
+        instructions, real_s, user_s, sys_s = parse_time_l_output(out)
+        self.assertIsNone(instructions)
+        self.assertIsNone(real_s)
+        self.assertAlmostEqual(user_s, 1.10)
+        self.assertAlmostEqual(sys_s, 0.20)
 
 
 class SelectTest(unittest.TestCase):
@@ -132,9 +150,10 @@ class ReplayHelpersTest(unittest.TestCase):
     def test_aggregate_missing_counter(self):
         records = [
             {"mnemonic": "SwiftCompile", "instructions": None,
-             "real_s": 1.0, "exit_code": 0},
+             "real_s": 1.0, "user_s": 0.8, "sys_s": 0.1, "exit_code": 0},
             {"mnemonic": "SwiftCompile", "instructions": 50,
-             "real_s": 2.0, "exit_code": 1},
+             "real_s": 2.0, "user_s": None, "sys_s": None, "exit_code": 1,
+             "target": "//app:app_ios", "stderr_tail": "clang: error: x"},
         ]
         by_mnemonic = aggregate_replays(records)
         entry = by_mnemonic["SwiftCompile"]
@@ -143,6 +162,27 @@ class ReplayHelpersTest(unittest.TestCase):
         self.assertEqual(entry["instructions_missing"], 1)
         self.assertEqual(entry["instructions_total"], 50)
         self.assertAlmostEqual(entry["real_s_total"], 3.0)
+        self.assertAlmostEqual(entry["user_s_total"], 0.8)
+        self.assertAlmostEqual(entry["sys_s_total"], 0.1)
+        self.assertEqual(entry["cpu_s_missing"], 1)
+        self.assertEqual(entry["sample_failure"], {
+            "target": "//app:app_ios", "exit_code": 1,
+            "stderr_tail": "clang: error: x"})
+
+    def test_success_has_no_sample_failure(self):
+        records = [{"mnemonic": "Lipo", "instructions": 9,
+                    "real_s": 0.5, "user_s": 0.4, "sys_s": 0.1,
+                    "exit_code": 0}]
+        entry = aggregate_replays(records)["Lipo"]
+        self.assertEqual(entry["failures"], 0)
+        self.assertIsNone(entry["sample_failure"])
+
+    def test_stderr_tail_keeps_last_lines(self):
+        import replay as replay_mod
+        text = "\n".join("line %d" % n for n in range(30))
+        tail = replay_mod.tail_lines(text)
+        self.assertEqual(tail.splitlines(),
+                         ["line %d" % n for n in range(10, 30)])
 
     def test_timeout_exit_counts_as_failure(self):
         records = [{"mnemonic": "Lipo", "instructions": None,
@@ -204,7 +244,8 @@ class SubprocessArgsTest(unittest.TestCase):
 
             class Proc:
                 returncode = 0
-                stderr = "  7  instructions retired\n  1.5 real\n"
+                stderr = ("  1.5 real         1.1 user         0.2 sys\n"
+                          "  7  instructions retired\n")
 
             return Proc()
 
@@ -217,6 +258,33 @@ class SubprocessArgsTest(unittest.TestCase):
         self.assertEqual(seen.get("timeout"), 600.0)
         self.assertEqual(record["instructions"], 7)
         self.assertAlmostEqual(record["real_s"], 1.5)
+        self.assertAlmostEqual(record["user_s"], 1.1)
+        self.assertAlmostEqual(record["sys_s"], 0.2)
+        self.assertIsNone(record["stderr_tail"])
+
+    def test_failed_replay_records_stderr_tail(self):
+        import subprocess as subprocess_mod
+        real_run = subprocess_mod.run
+
+        def fake_run(argv, **kwargs):
+            seen_argv = argv
+
+            class Proc:
+                returncode = 1
+                stderr = "\n".join(
+                    "err %d" % n for n in range(25))
+
+            return Proc()
+
+        subprocess_mod.run = fake_run
+        try:
+            record = replay.run_replay(AOT_SPAWN, "/execroot", 600.0)
+        finally:
+            subprocess_mod.run = real_run
+        self.assertEqual(record["exit_code"], 1)
+        self.assertIsNone(record["instructions"])
+        self.assertEqual(record["stderr_tail"].splitlines(),
+                         ["err %d" % n for n in range(5, 25)])
 
 
 if __name__ == "__main__":

@@ -48,6 +48,7 @@ def scenario_metrics(exe_summaries, replay_reports):
     wall = [s["total_wall_s"] for s in exe_summaries]
     cpu = [s["total_cpu_user_s"] + s["total_cpu_sys_s"] for s in exe_summaries]
     instr = []
+    n_replayed = [report.get("n_replayed", 0) for report in replay_reports]
     for report in replay_reports:
         total = 0
         complete = True
@@ -57,17 +58,29 @@ def scenario_metrics(exe_summaries, replay_reports):
             else:
                 total += action["instructions"]
         instr.append(total if complete else None)
+    instructions_available = any(
+        action.get("instructions") is not None
+        for report in replay_reports
+        for action in report.get("actions", []))
     by_mnemonic = {}
     for s in exe_summaries:
         for mnemonic, entry in s.get("by_mnemonic", {}).items():
             by_mnemonic.setdefault(mnemonic, []).append(entry["count"])
     replay_failures = {}
+    replay_cpu_s = {}
+    failure_samples = {}
     truncated = []
     for report in replay_reports:
         truncated.append(bool(report.get("truncated")))
         for mnemonic, entry in report.get("by_mnemonic", {}).items():
             replay_failures.setdefault(mnemonic, []).append(
                 entry.get("failures", 0))
+            replay_cpu_s.setdefault(mnemonic, []).append(
+                entry.get("user_s_total", 0.0)
+                + entry.get("sys_s_total", 0.0))
+            sample = entry.get("sample_failure")
+            if sample is not None and mnemonic not in failure_samples:
+                failure_samples[mnemonic] = sample
     return {
         "n_actions": n_actions,
         "wall_s": wall,
@@ -75,8 +88,12 @@ def scenario_metrics(exe_summaries, replay_reports):
         "instructions": [v for v in instr if v is not None],
         "instructions_complete": len(instr) > 0 and all(
             v is not None for v in instr),
+        "instructions_available": instructions_available,
+        "n_replayed": n_replayed,
         "by_mnemonic_counts": by_mnemonic,
         "replay_failures": replay_failures,
+        "replay_cpu_s": replay_cpu_s,
+        "failure_samples": failure_samples,
         "truncated": truncated,
     }
 
@@ -118,6 +135,32 @@ def compare_metrics(base_m, head_m):
                 head_m["replay_failures"].get(mnemonic, [])),
         }
     out["replay_failures"] = failures
+    replay_cpu = {}
+    for mnemonic in sorted(
+            set(base_m["replay_cpu_s"]) | set(head_m["replay_cpu_s"])):
+        replay_cpu[mnemonic] = {
+            "base": summarize_values(
+                base_m["replay_cpu_s"].get(mnemonic, [])),
+            "head": summarize_values(
+                head_m["replay_cpu_s"].get(mnemonic, [])),
+        }
+    out["replay_cpu_s"] = replay_cpu
+    samples = {}
+    for mnemonic in sorted(
+            set(base_m["failure_samples"]) | set(head_m["failure_samples"])):
+        samples[mnemonic] = {
+            "base": base_m["failure_samples"].get(mnemonic),
+            "head": head_m["failure_samples"].get(mnemonic),
+        }
+    out["failure_samples"] = samples
+    out["instructions_available"] = {
+        "base": base_m["instructions_available"],
+        "head": head_m["instructions_available"],
+    }
+    out["n_replayed"] = {
+        "base": sum(base_m["n_replayed"]),
+        "head": sum(head_m["n_replayed"]),
+    }
     out["truncated"] = {
         "base": any(base_m["truncated"]),
         "head": any(head_m["truncated"]),
@@ -222,63 +265,112 @@ def render_markdown(summary):
             lines.append("## %s / %s" % (config, scenario))
             lines.append("")
             entry = config_entry["scenarios"][scenario]
-        if "error" in entry:
-            lines.append("error: %s" % entry["error"])
+            if "error" in entry:
+                lines.append("error: %s" % entry["error"])
+                lines.append("")
+                continue
+            lines.append("| metric | base median [min, max] | "
+                         "head median [min, max] | delta |")
+            lines.append("| --- | --- | --- | --- |")
+            repeats = entry.get("repeats", {})
+            if repeats.get("base") == 1 or repeats.get("head") == 1:
+                lines.append("")
+                lines.append("repeats=1: medians are single samples, no spread.")
+                lines.append("")
+            for key, unit in [("n_actions", ""), ("wall_s", "s"),
+                              ("cpu_s", "s"), ("instructions", "")]:
+                m = entry[key]
+                lines.append("| %s | %s [%s, %s] | %s [%s, %s] | %s |" % (
+                    key,
+                    fmt(m["base"]["median"], unit), fmt(m["base"]["min"], unit),
+                    fmt(m["base"]["max"], unit),
+                    fmt(m["head"]["median"], unit), fmt(m["head"]["min"], unit),
+                    fmt(m["head"]["max"], unit),
+                    fmt_delta(m["delta_pct"])))
             lines.append("")
-            continue
-        lines.append("| metric | base median [min, max] | "
-                     "head median [min, max] | delta |")
-        lines.append("| --- | --- | --- | --- |")
-        repeats = entry.get("repeats", {})
-        if repeats.get("base") == 1 or repeats.get("head") == 1:
+            replayed = entry.get("n_replayed", {})
+            available = entry.get("instructions_available", {})
+            if (replayed.get("base", 0) + replayed.get("head", 0) > 0
+                    and not available.get("base")
+                    and not available.get("head")):
+                lines.append("note: no replayed action reported an "
+                             "instruction counter (GitHub macOS VMs may "
+                             "expose no PMU); replay CPU seconds below are "
+                             "the fallback cost signal.")
+                lines.append("")
+            elif not (entry["instructions_complete"]["base"]
+                      and entry["instructions_complete"]["head"]):
+                lines.append("warning: instructions incomplete for some repeats; "
+                             "totals cover only actions with a counter.")
+                lines.append("")
+            if entry["truncated"]["base"] or entry["truncated"]["head"]:
+                lines.append("warning: replay hit its time budget on some "
+                             "repeats (truncated=true in replay.json); "
+                             "instruction totals are partial.")
+                lines.append("")
+            lines.append("Replay failures by mnemonic (median count of "
+                         "non-zero exits/timeouts):")
             lines.append("")
-            lines.append("repeats=1: medians are single samples, no spread.")
+            if entry["replay_failures"]:
+                lines.append("| mnemonic | base | head |")
+                lines.append("| --- | --- | --- |")
+                for mnemonic in sorted(entry["replay_failures"]):
+                    m = entry["replay_failures"][mnemonic]
+                    lines.append("| %s | %s | %s |" % (
+                        mnemonic, fmt(m["base"]["median"]),
+                        fmt(m["head"]["median"])))
+            else:
+                lines.append("no replayed actions.")
             lines.append("")
-        for key, unit in [("n_actions", ""), ("wall_s", "s"),
-                          ("cpu_s", "s"), ("instructions", "")]:
-            m = entry[key]
-            lines.append("| %s | %s [%s, %s] | %s [%s, %s] | %s |" % (
-                key,
-                fmt(m["base"]["median"], unit), fmt(m["base"]["min"], unit),
-                fmt(m["base"]["max"], unit),
-                fmt(m["head"]["median"], unit), fmt(m["head"]["min"], unit),
-                fmt(m["head"]["max"], unit),
-                fmt_delta(m["delta_pct"])))
-        lines.append("")
-        if not (entry["instructions_complete"]["base"]
-                and entry["instructions_complete"]["head"]):
-            lines.append("warning: instructions incomplete for some repeats; "
-                         "totals cover only actions with a counter.")
+            lines.append("Replay CPU by mnemonic (user+sys seconds from "
+                         "`time -l`, median):")
             lines.append("")
-        if entry["truncated"]["base"] or entry["truncated"]["head"]:
-            lines.append("warning: replay hit its time budget on some "
-                         "repeats (truncated=true in replay.json); "
-                         "instruction totals are partial.")
+            if entry.get("replay_cpu_s"):
+                lines.append("| mnemonic | base | head |")
+                lines.append("| --- | --- | --- |")
+                for mnemonic in sorted(entry["replay_cpu_s"]):
+                    m = entry["replay_cpu_s"][mnemonic]
+                    lines.append("| %s | %s | %s |" % (
+                        mnemonic, fmt(m["base"]["median"], "s"),
+                        fmt(m["head"]["median"], "s")))
+            else:
+                lines.append("no replayed actions.")
             lines.append("")
-        lines.append("Replay failures by mnemonic (median count of "
-                     "non-zero exits/timeouts):")
-        lines.append("")
-        if entry["replay_failures"]:
-            lines.append("| mnemonic | base | head |")
-            lines.append("| --- | --- | --- |")
-            for mnemonic in sorted(entry["replay_failures"]):
-                m = entry["replay_failures"][mnemonic]
-                lines.append("| %s | %s | %s |" % (
-                    mnemonic, fmt(m["base"]["median"]),
-                    fmt(m["head"]["median"])))
-        else:
-            lines.append("no replayed actions.")
-        lines.append("")
-        lines.append("Executed actions by mnemonic (median count):")
-        lines.append("")
-        lines.append("| mnemonic | base | head | delta |")
-        lines.append("| --- | --- | --- | --- |")
-        for mnemonic in sorted(entry["by_mnemonic"]):
-            m = entry["by_mnemonic"][mnemonic]
-            lines.append("| %s | %s | %s | %s |" % (
-                mnemonic, fmt(m["base"]["median"]), fmt(m["head"]["median"]),
-                fmt_delta(m["delta_pct"])))
-        lines.append("")
+            samples = entry.get("failure_samples", {})
+            failing = sorted(
+                m for m in samples
+                if (entry["replay_failures"].get(m, {}).get("base", {})
+                    .get("median") or 0) > 0
+                or (entry["replay_failures"].get(m, {}).get("head", {})
+                    .get("median") or 0) > 0)
+            if failing:
+                lines.append("Sample replay failure per mnemonic (first "
+                             "failing action's target, exit and stderr tail):")
+                lines.append("")
+                for mnemonic in failing:
+                    for ref in ["base", "head"]:
+                        sample = samples[mnemonic].get(ref)
+                        if sample is None:
+                            continue
+                        lines.append("`%s` %s: target `%s`, exit `%s`:"
+                                     % (mnemonic, ref,
+                                        sample.get("target", ""),
+                                        sample.get("exit_code", "")))
+                        lines.append("")
+                        lines.append("```")
+                        lines.append(sample.get("stderr_tail") or "(no stderr)")
+                        lines.append("```")
+                        lines.append("")
+            lines.append("Executed actions by mnemonic (median count):")
+            lines.append("")
+            lines.append("| mnemonic | base | head | delta |")
+            lines.append("| --- | --- | --- | --- |")
+            for mnemonic in sorted(entry["by_mnemonic"]):
+                m = entry["by_mnemonic"][mnemonic]
+                lines.append("| %s | %s | %s | %s |" % (
+                    mnemonic, fmt(m["base"]["median"]), fmt(m["head"]["median"]),
+                    fmt_delta(m["delta_pct"])))
+            lines.append("")
     return "\n".join(lines)
 
 

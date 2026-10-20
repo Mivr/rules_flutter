@@ -13,11 +13,15 @@ cache.
 
 Configurations (fixed table ``CONFIGS``):
 
-- ``device_release``: the Flutter iOS framework only
-  (``//app:app_framework``, an explicit public ``flutter_ios_framework_gen``
-  target: AOT gen_snapshot for arm64 plus App.framework assembly, no
-  ``ios_application`` and therefore no signing or provisioning profile),
-  built with ``-c opt --ios_multi_cpus=arm64``.
+- ``device_release``: the Flutter iOS framework assembly itself
+  (``//app:__app_framework_framework``, the ``_flutter_ios_framework``
+  rule that ``flutter_ios_framework_gen(name = "app_framework")``
+  creates: AOT gen_snapshot for arm64 plus App.framework assembly, no
+  ``ios_application`` and therefore no signing or provisioning
+  profile), built with ``-c opt --ios_multi_cpus=arm64``. The public
+  ``//app:app_framework`` wrapper is an ``apple_dynamic_framework_import``
+  whose outputs are only consumed when linked into an app, so building it
+  executes nothing — the bench must target the inner rule.
 - ``sim_debug``: the full simulator app (``//app:app_ios``, the developer
   inner loop), built with ``-c dbg --ios_multi_cpus=sim_arm64``. The
   simulator runs debug builds only, and simulator bundles need no
@@ -36,6 +40,9 @@ import stat
 import subprocess
 import sys
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from execlog import load_spawns  # noqa: E402
+
 SCENARIOS = [
     ("clean", None),
     ("app_edit", "apply-app-edit"),
@@ -44,7 +51,7 @@ SCENARIOS = [
 
 CONFIGS = {
     "device_release": {
-        "target": "//app:app_framework",
+        "target": "//app:__app_framework_framework",
         "build_flags": ["-c", "opt", "--ios_multi_cpus=arm64"],
     },
     "sim_debug": {
@@ -53,6 +60,13 @@ CONFIGS = {
     },
 }
 CONFIG_ORDER = ["device_release", "sim_debug"]
+
+# A clean bench build always executes dozens of actions (kernel compiles
+# per package, AOT, framework assembly or the full app link). Fewer than
+# this many executed spawns means the target built nothing (as
+# //app:app_framework did: its import wrapper has no actions of its own)
+# and the repeat must fail loudly instead of recording a silent no-op.
+DEFAULT_MIN_CLEAN_ACTIONS = 10
 
 
 def real_run(argv, cwd=None, capture_output=False):
@@ -145,6 +159,22 @@ def replay_log(run, tools_dir, log_path, execroot, out_path, timeout,
     return proc
 
 
+def check_clean_actions(log_path, target, minimum):
+    """Fails loudly when a clean build executed suspiciously few actions."""
+    try:
+        n_spawns = len(load_spawns(log_path))
+    except OSError as exc:
+        raise RuntimeError(
+            "clean build of %s left no execution log %s (%s)"
+            % (target, log_path, exc))
+    if n_spawns < minimum:
+        raise RuntimeError(
+            "clean build of %s executed only %d action(s) "
+            "(minimum %d): the target builds nothing" % (
+                target, n_spawns, minimum))
+    return n_spawns
+
+
 def shutdown(run, work, out_base):
     proc = run(["bazel", "--output_base=" + out_base, "shutdown"], cwd=work)
     if proc.returncode != 0:
@@ -154,7 +184,8 @@ def shutdown(run, work, out_base):
 
 
 def run_config(tools_dir, work, out_base, results_ref_dir, rep, config,
-               replay_timeout=600.0, replay_budget=1800.0, run=None,
+               replay_timeout=600.0, replay_budget=1800.0,
+               min_clean_actions=DEFAULT_MIN_CLEAN_ACTIONS, run=None,
                chmod=None):
     """Runs one configuration: three builds, chmod, three replay passes."""
     spec = CONFIGS[config]
@@ -168,6 +199,9 @@ def run_config(tools_dir, work, out_base, results_ref_dir, rep, config,
         bazel_build(run, work, out_base, spec["target"],
                     spec["build_flags"], log_path)
         logs[scenario] = log_path
+        if scenario == "clean":
+            check_clean_actions(log_path, spec["target"],
+                                min_clean_actions)
     execroot = get_execroot(run, work, out_base)
     bazel_out = os.path.join(execroot, "bazel-out")
     made_writable = chmod(bazel_out) if os.path.isdir(bazel_out) else 0
@@ -187,6 +221,7 @@ def run_config(tools_dir, work, out_base, results_ref_dir, rep, config,
 
 def run_rep(tools_dir, pristine, work, out_base_root, results_ref_dir, rep,
             configs=None, replay_timeout=600.0, replay_budget=1800.0,
+            min_clean_actions=DEFAULT_MIN_CLEAN_ACTIONS,
             run=None, chmod=None, reset=None):
     """Runs one full repeat over configs, each with a fresh work copy.
 
@@ -207,6 +242,7 @@ def run_rep(tools_dir, pristine, work, out_base_root, results_ref_dir, rep,
             tools_dir, work, os.path.join(out_base_root, config),
             results_ref_dir, rep, config,
             replay_timeout=replay_timeout, replay_budget=replay_budget,
+            min_clean_actions=min_clean_actions,
             run=run, chmod=chmod)
     return records
 
@@ -228,11 +264,15 @@ def main(argv=None):
                         help="repeatable; default is all configs in order")
     parser.add_argument("--replay-timeout", type=float, default=600.0)
     parser.add_argument("--replay-budget", type=float, default=1800.0)
+    parser.add_argument("--min-clean-actions", type=int,
+                        default=DEFAULT_MIN_CLEAN_ACTIONS,
+                        help="clean builds executing fewer actions fail")
     args = parser.parse_args(argv)
     records = run_rep(args.tools, args.pristine, args.work, args.out_base,
                       args.results_ref_dir, args.rep, configs=args.config,
                       replay_timeout=args.replay_timeout,
-                      replay_budget=args.replay_budget)
+                      replay_budget=args.replay_budget,
+                      min_clean_actions=args.min_clean_actions)
     for config, record in records.items():
         print("config=%s rep=%d execroot=%s made_writable=%d"
               % (config, args.rep, record["execroot"],

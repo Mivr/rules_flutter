@@ -24,9 +24,10 @@ class Proc:
 class FakeRun:
     """Records argv; emulates bazel build/info/shutdown and the tools."""
 
-    def __init__(self, execroot="/fake/execroot"):
+    def __init__(self, execroot="/fake/execroot", n_spawns=12):
         self.calls = []
         self.execroot = execroot
+        self.n_spawns = n_spawns
 
     def __call__(self, argv, cwd=None, capture_output=False):
         self.calls.append(list(argv))
@@ -35,6 +36,19 @@ class FakeRun:
             base = argv[1].replace("--output_base=", "")
             return Proc(stdout=os.path.join(
                 self.execroot, os.path.basename(base)) + "\n")
+        if argv[0] == "bazel" and "build" in argv:
+            # The real build writes the execution log; emulate it so the
+            # clean-action guard has something to count.
+            for arg in argv:
+                if arg.startswith("--execution_log_json_file="):
+                    log_path = arg.split("=", 1)[1]
+                    os.makedirs(os.path.dirname(log_path), exist_ok=True)
+                    with open(log_path, "w", encoding="utf-8",
+                              newline="\n") as fh:
+                        for _ in range(self.n_spawns):
+                            fh.write(json.dumps(
+                                {"mnemonic": "Genrule"}) + "\n")
+            return Proc()
         if argv[0] == "bazel":
             return Proc()
         # Tool invocations: pretend to write their outputs.
@@ -72,8 +86,11 @@ class FakeRun:
 
 class ConfigTableTest(unittest.TestCase):
     def test_two_configs_with_targets_and_flags(self):
+        # device_release targets the inner framework rule: the public
+        # import wrapper executes no actions of its own.
         self.assertEqual(
-            CONFIGS["device_release"]["target"], "//app:app_framework")
+            CONFIGS["device_release"]["target"],
+            "//app:__app_framework_framework")
         self.assertEqual(
             CONFIGS["sim_debug"]["target"], "//app:app_ios")
         device_flags = CONFIGS["device_release"]["build_flags"]
@@ -191,7 +208,7 @@ class OrderingTest(unittest.TestCase):
                   if argv[0] == "bazel" and "build" in argv]
         self.assertEqual(len(builds), 6)
         for argv in builds:
-            if "//app:app_framework" in argv:
+            if "//app:__app_framework_framework" in argv:
                 self.assertIn("-c", argv)
                 self.assertIn("opt", argv)
                 self.assertIn("--ios_multi_cpus=arm64", argv)
@@ -245,6 +262,37 @@ class OrderingTest(unittest.TestCase):
                     self.dest, 1, run=fake, chmod=lambda path: 0,
                     reset=lambda pristine, work: None)
         self.assertNotIn("replay", fake.kinds())
+
+    def test_near_empty_clean_build_fails_loudly(self):
+        fake = FakeRun(n_spawns=2)
+        with self.assertRaisesRegex(RuntimeError, "only 2 action"):
+            run_rep("/tools", self.pristine, self.work, "/fake/out",
+                    self.dest, 1, run=fake, chmod=lambda path: 0,
+                    reset=lambda pristine, work: None)
+        self.assertNotIn("replay", fake.kinds())
+
+    def test_min_clean_actions_override(self):
+        fake = FakeRun(n_spawns=2)
+        records = run_rep(
+            "/tools", self.pristine, self.work, "/fake/out", self.dest, 1,
+            configs=["sim_debug"], min_clean_actions=2,
+            run=fake, chmod=lambda path: 0,
+            reset=lambda pristine, work: None)
+        self.assertEqual(sorted(records), ["sim_debug"])
+
+    def test_missing_clean_log_fails_loudly(self):
+        class NoLog(FakeRun):
+            def __call__(self, argv, cwd=None, capture_output=False):
+                if argv[0] == "bazel" and "build" in argv:
+                    self.calls.append(list(argv))
+                    return Proc()
+                return super().__call__(argv, cwd, capture_output)
+
+        fake = NoLog()
+        with self.assertRaisesRegex(RuntimeError, "no execution log"):
+            run_rep("/tools", self.pristine, self.work, "/fake/out",
+                    self.dest, 1, run=fake, chmod=lambda path: 0,
+                    reset=lambda pristine, work: None)
 
 
 class ChmodTest(unittest.TestCase):

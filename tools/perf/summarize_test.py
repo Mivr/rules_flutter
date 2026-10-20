@@ -35,14 +35,22 @@ def exe_summary(n_spawns, wall, user, sys_, by_mnemonic):
     }
 
 
-def replay_report(instructions_list, failures=0, truncated=False):
+def replay_report(instructions_list, failures=0, truncated=False,
+                  cpu_s=0.0, sample_failure=None):
+    by_mnemonic = {}
+    if failures or cpu_s or sample_failure is not None:
+        by_mnemonic["FlutterAotMacho"] = {"failures": failures,
+                                          "user_s_total": cpu_s,
+                                          "sys_s_total": 0.0}
+        if sample_failure is not None:
+            by_mnemonic["FlutterAotMacho"]["sample_failure"] = sample_failure
     return {
         "truncated": truncated,
-        "by_mnemonic": {
-            "FlutterAotMacho": {"failures": failures},
-        } if failures else {},
+        "n_replayed": len(instructions_list),
+        "by_mnemonic": by_mnemonic,
         "actions": [
-            {"mnemonic": "FlutterAotMacho", "instructions": v, "real_s": 1.0}
+            {"mnemonic": "FlutterAotMacho", "instructions": v, "real_s": 1.0,
+             "user_s": 0.9, "sys_s": 0.1}
             for v in instructions_list
         ],
     }
@@ -168,7 +176,12 @@ class TreeTest(unittest.TestCase):
         head_exe = [exe_summary(5, 200.0, 100.0, 1.0,
                                 {"FlutterAotMacho": 1})]
         base_rep = [replay_report([100], failures=0, truncated=True)]
-        head_rep = [replay_report([200], failures=2, truncated=False)]
+        head_rep = [replay_report([200], failures=2, truncated=False,
+                                  cpu_s=1.5,
+                                  sample_failure={
+                                      "target": "//app:app_ios",
+                                      "exit_code": 1,
+                                      "stderr_tail": "clang: error: boom"})]
         compared = summarize_mod.compare_metrics(
             summarize_mod.scenario_metrics(base_exe, base_rep),
             summarize_mod.scenario_metrics(head_exe, head_rep))
@@ -177,12 +190,56 @@ class TreeTest(unittest.TestCase):
         self.assertEqual(
             compared["replay_failures"]["FlutterAotMacho"]["head"]["median"],
             2)
+        self.assertEqual(
+            compared["replay_cpu_s"]["FlutterAotMacho"]["head"]["median"],
+            1.5)
+        self.assertEqual(
+            compared["failure_samples"]["FlutterAotMacho"]["head"],
+            {"target": "//app:app_ios", "exit_code": 1,
+             "stderr_tail": "clang: error: boom"})
         md = summarize_mod.render_markdown({
             "base_ref": "base", "head_ref": "head", "meta": {},
             "configs": {"sim_debug": {"scenarios": {"clean": compared}}}})
         self.assertIn("time budget", md)
         self.assertIn("Replay failures", md)
         self.assertIn("FlutterAotMacho", md)
+        self.assertIn("Replay CPU", md)
+        self.assertIn("clang: error: boom", md)
+
+    def test_every_scenario_section_has_its_table(self):
+        # Regression: the scenario table body once bound to the outer
+        # config loop, so only each config's last scenario got tables.
+        import summarize as summarize_mod
+        exe = [exe_summary(5, 100.0, 50.0, 0.5, {"Genrule": 2})]
+        rep = [replay_report([10])]
+        metrics = summarize_mod.scenario_metrics(exe, rep)
+        compared = summarize_mod.compare_metrics(metrics, metrics)
+        md = summarize_mod.render_markdown({
+            "base_ref": "base", "head_ref": "head", "meta": {},
+            "configs": {"cfg": {"scenarios": {
+                "app_edit": compared, "clean": compared}}}})
+        for scenario in ["app_edit", "clean"]:
+            header = "## cfg / %s" % scenario
+            start = md.index(header)
+            nxt = md.find("## cfg / ", start + len(header))
+            section = md[start:] if nxt < 0 else md[start:nxt]
+            self.assertIn("| n_actions |", section)
+            self.assertIn("Genrule", section)
+
+    def test_no_instruction_counter_states_pmu_note(self):
+        import summarize as summarize_mod
+        exe = [exe_summary(5, 100.0, 50.0, 0.5, {"Genrule": 2})]
+        rep = [{"n_replayed": 1, "truncated": False, "by_mnemonic": {},
+                "actions": [{"mnemonic": "Genrule", "instructions": None,
+                             "real_s": 1.0, "user_s": 0.9, "sys_s": 0.1}]}]
+        metrics = summarize_mod.scenario_metrics(exe, rep)
+        compared = summarize_mod.compare_metrics(metrics, metrics)
+        self.assertFalse(compared["instructions_available"]["base"])
+        md = summarize_mod.render_markdown({
+            "base_ref": "base", "head_ref": "head", "meta": {},
+            "configs": {"cfg": {"scenarios": {"clean": compared}}}})
+        self.assertIn("no PMU", md)
+        self.assertIn("Replay CPU", md)
 
 
 if __name__ == "__main__":
