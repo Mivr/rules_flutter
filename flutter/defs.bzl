@@ -53,6 +53,27 @@ load("//flutter/private:flutter_test.bzl", _flutter_test = "flutter_test")
 
 flutter_aot_target = _flutter_aot_target
 
+def debug_kernel_tags(tags):
+    """Tags for the macro-created canonical debug-kernel target (H17).
+
+    The canonical kernel is an implementation detail consumed through the
+    outer's `debug_kernel` edge (which transitions it into the canonical
+    configuration). Left visible to `//...`, it would also build top-level
+    in every requesting configuration and compile the kernel once more per
+    configuration — the duplication H17 removes. `manual` keeps it out of
+    wildcard builds while explicit requests still work.
+
+    Args:
+        tags: Caller-passed tags for the application, if any.
+
+    Returns:
+        The tags for the canonical target: the caller's tags plus `manual`.
+    """
+    tags = list(tags or [])
+    if "manual" not in tags:
+        tags.append("manual")
+    return tags
+
 def flutter_application(name, package_name = "", **kwargs):
     """Compiles a Flutter application with stable package: URIs for hot reload.
 
@@ -79,16 +100,24 @@ def flutter_application(name, package_name = "", **kwargs):
     # the inner target at itself or fork the outer elsewhere.
     kwargs.pop("debug_kernel", None)
     kwargs.pop("build_label", None)
+
+    # The canonical kernel is an implementation detail consumed through the
+    # outer's `debug_kernel` edge (see `debug_kernel_tags`): keep it out of
+    # wildcard builds so `//...` does not compile it once per configuration.
+    # Popped so it can differ from the outer's (which keeps caller tags only).
+    caller_tags = kwargs.pop("tags", [])
     _flutter_application(
         name = inner_name,
         package_name = package_name or name,
         build_label = "@@//" + native.package_name() + ":" + name,
+        tags = debug_kernel_tags(caller_tags),
         **kwargs
     )
     _flutter_application(
         name = name,
         package_name = package_name or name,
         debug_kernel = ":" + inner_name,
+        tags = caller_tags,
         **kwargs
     )
 

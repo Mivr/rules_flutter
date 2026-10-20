@@ -1,6 +1,7 @@
 """Unit tests for flutter_application platform detection logic."""
 
 load("@bazel_skylib//lib:unittest.bzl", "asserts", "unittest")
+load("//flutter:defs.bzl", "debug_kernel_tags")
 load("//flutter/private:common.bzl", "android_platform_for_abi", "build_info_label", "detect_target_platform", "kernel_file_stem", "launch_build_args")
 load("//flutter/private:flutter_application.bzl", "debug_kernel_transition_impl")
 load("//flutter/private:plugin_registrant.bzl", "DEV_REGISTRANT_PLATFORMS")
@@ -322,6 +323,22 @@ def _kernel_file_stem_parses_the_served_app_test_impl(ctx):
 
 _t18_test = unittest.make(_kernel_file_stem_parses_the_served_app_test_impl)
 
+def _debug_kernel_tags_add_manual_test_impl(ctx):
+    """The canonical kernel stays out of wildcard builds.
+
+    Without `manual`, `//...` builds the inner target top-level in every
+    requesting configuration and compiles the kernel once more per
+    configuration — the duplication H17 removes.
+    """
+    env = unittest.begin(ctx)
+    asserts.equals(env, ["manual"], debug_kernel_tags(None))
+    asserts.equals(env, ["manual"], debug_kernel_tags([]))
+    asserts.equals(env, ["manual"], debug_kernel_tags(["manual"]))
+    asserts.equals(env, ["opt", "manual"], debug_kernel_tags(["opt"]))
+    return unittest.end(env)
+
+_t19_test = unittest.make(_debug_kernel_tags_add_manual_test_impl)
+
 def flutter_application_test_suite(name):
     unittest.suite(
         name,
@@ -345,4 +362,5 @@ def flutter_application_test_suite(name):
         _t16_test,
         _t17_test,
         _t18_test,
+        _t19_test,
     )
