@@ -611,6 +611,32 @@ def build_info_label(ctx):
         return override
     return str(ctx.label)
 
+def kernel_file_stem(ctx):
+    """The filename stem for a kernel compile's generated side libraries.
+
+    The staged agent sources and the plugin registrant are named off the
+    compiling target (`<name>.agent_extensions.dart`,
+    `<name>_plugin_registrant.dart`), and those names travel into the kernel:
+    the registrant's content imports the agent by basename, and the kernel
+    names the registrant by its `APP_SCHEME` URI (a `short_path`, so
+    configuration-independent but target-dependent). A target serving another
+    target's kernel (H17) therefore derives these names from the application
+    it serves — parsed out of `build_label` — so the shared kernel's bytes
+    match the per-platform kernel's in everything but the build_info record.
+    Every other generated file (the kernel itself, the package configs, the
+    asset tree) is path-only and keeps the compiling target's own name.
+
+    Args:
+        ctx: Rule context, optionally carrying a `build_label` string attr.
+
+    Returns:
+        The application short name whose side libraries this compile emits.
+    """
+    override = getattr(ctx.attr, "build_label", "")
+    if override and ":" in override:
+        return override.split(":")[-1]
+    return ctx.label.name
+
 def flutter_kernel_source_inputs(ctx):
     """Collect the source-level inputs of a kernel compile, without compiling.
 
@@ -744,8 +770,9 @@ def flutter_dev_loop_inputs(ctx, source, mode, inject_agent):
     agent_import = None
     native_agent_import = None
     if inject_agent:
-        agent_import = ctx.label.name + ".agent_extensions.dart"
-        native_agent_import = ctx.label.name + ".native_agent_extensions.dart"
+        stem = kernel_file_stem(ctx)
+        agent_import = stem + ".agent_extensions.dart"
+        native_agent_import = stem + ".native_agent_extensions.dart"
 
     # Dev-loop registrants, one per platform (debug only). The dev tool reads
     # these from a HOST-configuration build while the app can be running on a
@@ -838,7 +865,6 @@ def flutter_compile_kernel(ctx, flutter_sdk_info, aot = None, platform_dill = No
     # replayed defines) is emitted inside `flutter_dev_loop_inputs` below,
     # once the agent decision is known; the entrypoint names stay here.
     mode = flutter_build_mode(ctx)
-    main_location = source.main_location
     app_entrypoint_uri = source.app_entrypoint_uri
 
     if aot == None:
@@ -882,13 +908,14 @@ def flutter_compile_kernel(ctx, flutter_sdk_info, aot = None, platform_dill = No
     staged_agent = None
     staged_native_agent = None
     if inject_agent:
-        staged_agent = ctx.actions.declare_file(ctx.label.name + ".agent_extensions.dart")
+        stem = kernel_file_stem(ctx)
+        staged_agent = ctx.actions.declare_file(stem + ".agent_extensions.dart")
         ctx.actions.symlink(output = staged_agent, target_file = ctx.file._agent_extensions_src)
 
         # The native-only half (`dart:ffi`): loading a native hot patch. A
         # kernel compile is always native — web stages `agent.dart` alone, in
         # its own rule.
-        staged_native_agent = ctx.actions.declare_file(ctx.label.name + ".native_agent_extensions.dart")
+        staged_native_agent = ctx.actions.declare_file(stem + ".native_agent_extensions.dart")
         ctx.actions.symlink(output = staged_native_agent, target_file = ctx.file._native_agent_extensions_src)
 
     # Collect plugins from deps and generate the registrant. The registrant is
@@ -917,6 +944,7 @@ def flutter_compile_kernel(ctx, flutter_sdk_info, aot = None, platform_dill = No
         target_platform = target_platform,
         agent_import = dev.agent_import,
         native_agent_import = dev.native_agent_import,
+        file_stem = kernel_file_stem(ctx),
     )
     registrant_location = app_scheme_location(registrant) if registrant else None
 
@@ -1200,7 +1228,7 @@ def flutter_compile_shaders(ctx, flutter_sdk_info, target_platform):
             compiled[job.bundle_path] = output
     return compiled
 
-def declare_flutter_assets_dir(ctx):
+def declare_flutter_assets_dir(ctx, name = None):
     """Declare the `flutter_assets/` tree artifact for this target.
 
     Split out from `flutter_build_assets` so a rule can name the directory
@@ -1213,10 +1241,16 @@ def declare_flutter_assets_dir(ctx):
     Args:
         ctx: Rule context.
 
+        name: Optional directory basename. Defaults to the target's own
+            `<name>_flutter_assets`. A canonical debug-kernel target (H17)
+            passes its served application's stem so the tree — whose path the
+            kernel bakes into `rules_flutter.build_info.assetsDir` — lands on
+            the same path as the application-local tree it replaces.
+
     Returns:
         The declared directory (tree artifact) File.
     """
-    return ctx.actions.declare_directory(ctx.label.name + "_flutter_assets")
+    return ctx.actions.declare_directory((name or ctx.label.name) + "_flutter_assets")
 
 def flutter_build_assets(ctx, flutter_sdk_info, output_dir, compiled_shaders = {}, kernel_dill = None, kernel_dills = [], tree_shake_key = "", is_debug = False, data_assets = None):
     """Run the shared asset bundling step.

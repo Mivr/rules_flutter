@@ -23,6 +23,17 @@ SHADER_PLATFORM_FLAGS = {
     "tester": ["--sksl", "--runtime-stage-vulkan"],
 }
 
+def shader_tree_shareable_with_android(target_platform):
+    """Whether a tree carrying this platform's compiled shaders serves Android, and vice versa (H17).
+
+    impellerc selects runtime stages per platform: Android, Linux and Windows
+    share one flag set, so the same sources compile under the same invocation
+    and one tree serves them all. iOS/macOS (Metal stages) and web (SkSL JSON)
+    need their own tree. Same flags implying same bytes is verified against
+    the pinned SDK by comparing the compiled outputs, not assumed.
+    """
+    return SHADER_PLATFORM_FLAGS[target_platform] == SHADER_PLATFORM_FLAGS["android"]
+
 def get_shader_platform_flags(target_platform):
     """Get the impellerc flags for a target platform.
 

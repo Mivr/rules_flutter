@@ -17,11 +17,105 @@ load("@apple_support//lib:apple_support.bzl", "apple_support")
 load("@bazel_skylib//lib:dicts.bzl", "dicts")
 load("@rules_dart//dart:utils.bzl", "dart_link_hook_actions", "link_hook_runner_attr")
 load("//flutter:providers.bzl", "FlutterApplicationInfo", "FlutterInfo")
-load("//flutter/private:common.bzl", "COPY_TO_DIRECTORY_TOOLCHAINS", "FLUTTER_APPLICATION_ATTRS", "PLATFORM_CONSTRAINT_ATTRS", "check_unreplaced_hooks", "collect_binding_contracts", "collect_native_libs", "declare_flutter_assets_dir", "detect_target_platform", "flutter_build_assets", "flutter_build_mode", "flutter_compile_kernel", "flutter_compile_shaders", "host_target_arch", "launch_build_args", "resolve_flutter_sdk_info", "shader_sources")
+load("//flutter/private:common.bzl", "COPY_TO_DIRECTORY_TOOLCHAINS", "FLUTTER_APPLICATION_ATTRS", "PLATFORM_CONSTRAINT_ATTRS", "android_platform_for_abi", "check_unreplaced_hooks", "collect_binding_contracts", "collect_native_libs", "declare_flutter_assets_dir", "detect_target_platform", "flutter_build_assets", "flutter_build_mode", "flutter_compile_kernel", "flutter_compile_shaders", "flutter_dev_loop_inputs", "flutter_kernel_source_inputs", "host_target_arch", "kernel_file_stem", "launch_build_args", "resolve_flutter_sdk_info", "shader_sources")
 load("//flutter/private:flutter_aot_compile.bzl", "flutter_aot_elf_action", "flutter_aot_gen_snapshot_flags", "flutter_aot_macho_action")
 load("//flutter/private:flutter_info.bzl", "dedup_plugins")
 load("//flutter/private:flutter_native_assets.bzl", "bridge_dart_code_assets", "collect_bundled_code_asset_files", "write_native_assets_manifest")
+load("//flutter/private:flutter_shader_compile.bzl", "shader_tree_shareable_with_android")
 load("//flutter/private:native_sources.bzl", "collect_native_source_pairs")
+load("//flutter/private:plugin_registrant.bzl", "debug_kernel_inputs_shareable")
+
+def debug_kernel_transition_impl(settings, _attr):
+    """Canonical debug-kernel configuration shared by host and Android (H17).
+
+    One FlutterKernelCompile per distinct kernel serves the host application
+    and the Android debug app, as H10 did for the AOT kernel by pinning the
+    configuration rather than the artifacts.
+
+    Args:
+        settings: The incoming configuration. Only `platforms`,
+            `android_platforms`, `cpu` and `@rules_go//go/config:pure` are
+            read; everything else passes through untouched.
+        _attr: Unused (the transition is unconditional, not attribute-driven).
+
+    Returns:
+        The canonical debug-kernel configuration: Android platforms picked
+        like `_android_platform_transition_platforms` (an edge already on
+        Android keeps its platforms, so this configuration IS the Android
+        app's), `dynamic_mode` off as in H10, `compilation_mode` dbg, and
+        `@rules_go//go/config:pure` on to match the Android subtree behind
+        `flutter_android_pure_go_transition` (the flag feeds only Go actions,
+        nothing the kernel compile runs).
+    """
+    platforms = None
+    for platform in settings["//command_line_option:platforms"]:
+        platform_str = str(platform).lower()
+        if "android" in platform_str:
+            platforms = list(settings["//command_line_option:platforms"])
+            break
+        if "x86_64" in platform_str or "x64" in platform_str or "amd64" in platform_str:
+            platforms = [android_platform_for_abi("x86_64")]
+            break
+        if "arm64" in platform_str or "aarch64" in platform_str:
+            platforms = [android_platform_for_abi("arm64-v8a")]
+            break
+    if platforms == None:
+        android_platforms = settings["//command_line_option:android_platforms"]
+        if android_platforms:
+            platforms = list(android_platforms)
+        else:
+            cpu = settings["//command_line_option:cpu"]
+            if cpu in ("x86_64", "x86", "x64", "amd64"):
+                platforms = [android_platform_for_abi("x86_64")]
+            else:
+                platforms = [android_platform_for_abi("arm64-v8a")]
+    return {
+        "//command_line_option:platforms": platforms,
+        "//command_line_option:dynamic_mode": "off",
+        "//command_line_option:compilation_mode": "dbg",
+        "@rules_go//go/config:pure": True,
+    }
+
+_debug_kernel_transition = transition(
+    implementation = debug_kernel_transition_impl,
+    inputs = [
+        "//command_line_option:platforms",
+        "//command_line_option:android_platforms",
+        "//command_line_option:cpu",
+        "@rules_go//go/config:pure",
+    ],
+    outputs = [
+        "//command_line_option:platforms",
+        "//command_line_option:dynamic_mode",
+        "//command_line_option:compilation_mode",
+        "@rules_go//go/config:pure",
+    ],
+)
+
+DEBUG_KERNEL_ATTRS = {
+    "build_label": attr.string(
+        doc = "Canonical label string baked into `rules_flutter.build_info` instead " +
+              "of this target's own label. Set by the `flutter_application` macro on " +
+              "the canonical debug-kernel target it creates beside the application, " +
+              "so the shared kernel reports the application it serves. Empty " +
+              "means the target's own label (every directly-declared application).",
+        default = "",
+    ),
+    "debug_kernel": attr.label(
+        doc = "The canonical debug-kernel target the `flutter_application` macro " +
+              "creates beside this application. A debug build whose kernel inputs " +
+              "are platform-identical serves this target's kernel instead of " +
+              "compiling its own. Reserved for the macro: None for " +
+              "directly-declared applications and for the canonical target " +
+              "itself, which always compile locally.",
+        default = None,
+        providers = [FlutterApplicationInfo],
+        cfg = _debug_kernel_transition,
+    ),
+    "_allowlist_function_transition": attr.label(
+        default = "@bazel_tools//tools/allowlists/function_transition_allowlist",
+    ),
+}
 
 def _flutter_application_impl(ctx):
     flutter_sdk_info = resolve_flutter_sdk_info(ctx)
@@ -106,15 +200,97 @@ def _flutter_application_impl(ctx):
         if asset.asset_id not in declared_ids
     ]
 
+    # Aggregate the plugin channels from deps. These are what the platform
+    # registrant generators and desktop runners read back off this target —
+    # via FlutterApplicationInfo, since an application is the end of the
+    # library graph and does not contribute to another one. Aggregated before
+    # the kernel compile (rather than beside the bundle below) because the
+    # H17 sharing decision reads the plugin list: a kernel whose registrant
+    # is platform-identical is compiled once and served to every
+    # configuration.
+    all_dep_plugins = []
+    apple_plugin_lib_depsets = []
+    android_plugin_lib_depsets = []
+    linux_plugin_lib_depsets = []
+    windows_plugin_lib_depsets = []
+    apple_privacy_manifest_depsets = []
+    for dep in ctx.attr.deps:
+        if FlutterInfo in dep:
+            all_dep_plugins.extend(dep[FlutterInfo].plugins)
+            apple_plugin_lib_depsets.append(dep[FlutterInfo].apple_plugin_libraries)
+            android_plugin_lib_depsets.append(dep[FlutterInfo].android_plugin_libraries)
+            linux_plugin_lib_depsets.append(dep[FlutterInfo].linux_plugin_libraries)
+            windows_plugin_lib_depsets.append(dep[FlutterInfo].windows_plugin_libraries)
+            apple_privacy_manifest_depsets.append(dep[FlutterInfo].apple_privacy_manifests)
+    all_plugins = dedup_plugins(all_dep_plugins)
+    apple_plugin_libraries = depset(transitive = apple_plugin_lib_depsets)
+    android_plugin_libraries = depset(transitive = android_plugin_lib_depsets)
+    linux_plugin_libraries = depset(transitive = linux_plugin_lib_depsets)
+    windows_plugin_libraries = depset(transitive = windows_plugin_lib_depsets)
+    apple_privacy_manifests = depset(transitive = apple_privacy_manifest_depsets)
+
+    # H17 shared debug kernel: one FlutterKernelCompile per distinct kernel,
+    # compiled once in the Android configuration by the canonical kernel
+    # target the `flutter_application` macro creates beside the application.
+    # A debug build serves the canonical kernel, asset tree, manifest and
+    # package config instead of compiling a second one when its own kernel
+    # would be byte-identical: no native/shader/data assets in its view, a
+    # platform-invariant registrant, and the canonical target's kernel
+    # shareable in its (Android) view. The transitive depset materializations
+    # below run only on this path — the dep itself is analyzed regardless,
+    # but its actions execute only if some consumer's build requests files.
+    # A label with a cfg transition reads back as a list, not a Target (set:
+    # single element; unset: empty), so normalize before the None check. (The
+    # macro-created inner target never sets debug_kernel; the outer always
+    # does.)
+    _debug_kernel = ctx.attr.debug_kernel
+    if type(_debug_kernel) == "list":
+        _debug_kernel = _debug_kernel[0] if _debug_kernel else None
+    own_kernel_shareable = False
+    if is_debug:
+        has_data_assets = len(transitive_data_assets.to_list()) > 0
+
+        # Shaders are shareable when this configuration's compiled shaders
+        # come out of the same impellerc invocation Android uses (same flags,
+        # verified byte-identical outputs), so the canonical tree serves here.
+        # A Metal/SkSL-JSON platform keeps its own tree — and its own kernel.
+        # Shader *presence* never blocks sharing: the SDK always contributes
+        # shaders, so presence gating would never share; the canonical target
+        # mirrors every input attribute, so its tree carries the same compiled
+        # shaders (hence `has_shaders = False` below — the flags check above
+        # is the gate, not the source list).
+        shader_ok = shader_tree_shareable_with_android(target_platform)
+        if not native_assets_list and not has_data_assets and shader_ok:
+            agent_src = getattr(ctx.attr, "_agent_extensions_src", None)
+            stem = kernel_file_stem(ctx)
+            own_kernel_shareable = debug_kernel_inputs_shareable(
+                plugins = all_plugins,
+                has_native_assets = False,
+                has_shaders = False,
+                has_data_assets = False,
+                agent_import = (stem + ".agent_extensions.dart") if agent_src != None else None,
+                native_agent_import = (stem + ".native_agent_extensions.dart") if agent_src != None else None,
+            )
+    shared_kernel = None
+    if own_kernel_shareable and _debug_kernel != None and _debug_kernel[FlutterApplicationInfo].debug_kernel_shareable:
+        shared_kernel = _debug_kernel[FlutterApplicationInfo]
+
     target_arch = host_target_arch(ctx, flutter_sdk_info)
-    native_assets_manifest_file = ctx.actions.declare_file(ctx.label.name + ".native_assets.json")
-    write_native_assets_manifest(
-        ctx = ctx,
-        output_file = native_assets_manifest_file,
-        native_assets = native_assets_list,
-        target_os = target_platform,
-        target_arch = target_arch,
-    )
+    if shared_kernel != None:
+        # The canonical manifest: empty (sharing requires it), keyed by the
+        # canonical Android target string. The kernel was compiled against
+        # this file, so this configuration serves it rather than writing an
+        # identical map under its own target string.
+        native_assets_manifest_file = shared_kernel.native_assets_manifest
+    else:
+        native_assets_manifest_file = ctx.actions.declare_file(ctx.label.name + ".native_assets.json")
+        write_native_assets_manifest(
+            ctx = ctx,
+            output_file = native_assets_manifest_file,
+            native_assets = native_assets_list,
+            target_os = target_platform,
+            target_arch = target_arch,
+        )
 
     bundled_code_assets = collect_bundled_code_asset_files(native_assets_list)
 
@@ -123,8 +299,22 @@ def _flutter_application_impl(ctx):
     # bakes it into `rules_flutter.build_info.assetsDir`, and the dev tool
     # matches the running app's reported value against the tree it watches
     # and rebuilds. Declaring an output is independent of registering the
-    # action that fills it, so the ordering costs nothing.
-    flutter_assets = declare_flutter_assets_dir(ctx)
+    # action that fills it, so the ordering costs nothing. A build serving
+    # the shared kernel serves the canonical tree with it: the baked path
+    # must name the tree the kernel was compiled against.
+    if shared_kernel != None:
+        flutter_assets = shared_kernel.flutter_assets
+    elif ctx.attr.build_label != "" and own_kernel_shareable:
+        # The canonical kernel target, shareable in its own (Android) view:
+        # name the tree off the served application's stem, not this target's
+        # own label, so the baked `assetsDir` lands on the same path as the
+        # application-local tree this kernel replaces (H17 byte-identity with
+        # main's Android dill). Unshareable canonical targets keep their own
+        # name: nothing serves them, and the stem name could collide with a
+        # non-sharing application's own tree in the same configuration.
+        flutter_assets = declare_flutter_assets_dir(ctx, name = kernel_file_stem(ctx))
+    else:
+        flutter_assets = declare_flutter_assets_dir(ctx)
 
     # Link hooks run over the uses the AOT compile records, so only a
     # release or profile build has any: a JIT compile tree-shakes nothing and
@@ -133,25 +323,51 @@ def _flutter_application_impl(ctx):
     recorded_uses = ctx.actions.declare_file(ctx.label.name + ".recorded_uses.json") if run_link_hooks else None
 
     # Step 1: Kernel compilation (mode-aware: debug uses debug dill, no AOT).
-    compilation = flutter_compile_kernel(
-        ctx,
-        flutter_sdk_info,
-        target_platform = target_platform,
-        native_assets_manifest = native_assets_manifest_file,
-        track_widget_creation = ctx.attr.track_widget_creation,
-        assets_dir = flutter_assets,
-        recorded_uses = recorded_uses,
-        platform_build_args = launch_build_args(
-            target_platform,
-            is_simulator = is_ios and apple_support.target_environment_from_rule_ctx(ctx) == "simulator",
-            is_arm64 = ctx.target_platform_has_constraint(
-                ctx.attr._arm64_constraint[platform_common.ConstraintValueInfo],
+    # A build serving the shared kernel still emits its own configuration's
+    # dev-loop metadata (live sources, generated roots, per-platform
+    # registrants) for `_dev_config.json` — but no compile, so the canonical
+    # FlutterKernelCompile is the only one in the build.
+    if shared_kernel != None:
+        kernel_dill = shared_kernel.kernel_dill
+        package_config = shared_kernel.package_config
+        source = flutter_kernel_source_inputs(ctx)
+        agent_src = getattr(ctx.attr, "_agent_extensions_src", None)
+        dev = flutter_dev_loop_inputs(ctx, source, mode, agent_src != None)
+        compilation = struct(
+            kernel_dill = kernel_dill,
+            package_config = package_config,
+            dev_plugin_registrants = dev.dev_plugin_registrants,
+            dart_defines = dev.user_defines,
+            app_entrypoint_uri = source.app_entrypoint_uri,
+            dev_package_config = dev.dev_package_config,
+            dev_filesystem_roots = dev.dev_filesystem_roots,
+            dev_filesystem_scheme = dev.dev_filesystem_scheme,
+            dev_generated_source_paths = dev.dev_generated_source_paths,
+            dev_generated_source_uris = dev.dev_generated_source_uris,
+            dev_generated_source_files = dev.dev_generated_source_files,
+            dev_source_packages = dev.dev_source_packages,
+            dev_app_sources = dev.dev_app_sources,
+        )
+    else:
+        compilation = flutter_compile_kernel(
+            ctx,
+            flutter_sdk_info,
+            target_platform = target_platform,
+            native_assets_manifest = native_assets_manifest_file,
+            track_widget_creation = ctx.attr.track_widget_creation,
+            assets_dir = flutter_assets,
+            recorded_uses = recorded_uses,
+            platform_build_args = launch_build_args(
+                target_platform,
+                is_simulator = is_ios and apple_support.target_environment_from_rule_ctx(ctx) == "simulator",
+                is_arm64 = ctx.target_platform_has_constraint(
+                    ctx.attr._arm64_constraint[platform_common.ConstraintValueInfo],
+                ),
+                is_x86_64 = ctx.target_platform_has_constraint(
+                    ctx.attr._x86_64_constraint[platform_common.ConstraintValueInfo],
+                ),
             ),
-            is_x86_64 = ctx.target_platform_has_constraint(
-                ctx.attr._x86_64_constraint[platform_common.ConstraintValueInfo],
-            ),
-        ),
-    )
+        )
     kernel_dill = compilation.kernel_dill
     package_config = compilation.package_config
 
@@ -216,42 +432,23 @@ def _flutter_application_impl(ctx):
         link_hook_validation = link.validation_outputs
 
     # Step 3: Shader compilation + asset bundle. Pass data assets so the
-    # bundler places them under flutter_assets/packages/<pkg>/<name>.
-    compiled_shaders = flutter_compile_shaders(ctx, flutter_sdk_info, target_platform)
-    flutter_build_assets(
-        ctx,
-        flutter_sdk_info,
-        flutter_assets,
-        compiled_shaders,
-        kernel_dill = kernel_dill,
-        is_debug = is_debug,
-        data_assets = transitive_data_assets,
-    )
-
-    # Aggregate the plugin channels from deps. These are what the platform
-    # registrant generators and desktop runners read back off this target —
-    # via FlutterApplicationInfo, since an application is the end of the
-    # library graph and does not contribute to another one.
-    all_dep_plugins = []
-    apple_plugin_lib_depsets = []
-    android_plugin_lib_depsets = []
-    linux_plugin_lib_depsets = []
-    windows_plugin_lib_depsets = []
-    apple_privacy_manifest_depsets = []
-    for dep in ctx.attr.deps:
-        if FlutterInfo in dep:
-            all_dep_plugins.extend(dep[FlutterInfo].plugins)
-            apple_plugin_lib_depsets.append(dep[FlutterInfo].apple_plugin_libraries)
-            android_plugin_lib_depsets.append(dep[FlutterInfo].android_plugin_libraries)
-            linux_plugin_lib_depsets.append(dep[FlutterInfo].linux_plugin_libraries)
-            windows_plugin_lib_depsets.append(dep[FlutterInfo].windows_plugin_libraries)
-            apple_privacy_manifest_depsets.append(dep[FlutterInfo].apple_privacy_manifests)
-    all_plugins = dedup_plugins(all_dep_plugins)
-    apple_plugin_libraries = depset(transitive = apple_plugin_lib_depsets)
-    android_plugin_libraries = depset(transitive = android_plugin_lib_depsets)
-    linux_plugin_libraries = depset(transitive = linux_plugin_lib_depsets)
-    windows_plugin_libraries = depset(transitive = windows_plugin_lib_depsets)
-    apple_privacy_manifests = depset(transitive = apple_privacy_manifest_depsets)
+    # bundler places them under flutter_assets/packages/<pkg>/<name>. A build
+    # serving the shared kernel serves the canonical tree with it — whose
+    # compiled shaders match this configuration's impellerc invocation — so
+    # it bundles nothing itself. (Sharing requires shaders this configuration
+    # can reuse, and no data assets, so the canonical tree's content is this
+    # configuration's content.)
+    if shared_kernel == None:
+        compiled_shaders = flutter_compile_shaders(ctx, flutter_sdk_info, target_platform)
+        flutter_build_assets(
+            ctx,
+            flutter_sdk_info,
+            flutter_assets,
+            compiled_shaders,
+            kernel_dill = kernel_dill,
+            is_debug = is_debug,
+            data_assets = transitive_data_assets,
+        )
 
     # Every loose native library this app carries, by both routes in: the
     # `native_deps` set above, and the Native Assets `CodeAsset` libraries
@@ -455,6 +652,7 @@ def _flutter_application_impl(ctx):
             android_plugin_libraries = android_plugin_libraries,
             linux_plugin_libraries = linux_plugin_libraries,
             windows_plugin_libraries = windows_plugin_libraries,
+            debug_kernel_shareable = is_debug and ctx.attr.build_label != "" and own_kernel_shareable,
         ),
     ]
     providers.append(OutputGroupInfo(**output_groups))
@@ -464,6 +662,7 @@ flutter_application = rule(
     implementation = _flutter_application_impl,
     attrs = dicts.add(
         FLUTTER_APPLICATION_ATTRS,
+        DEBUG_KERNEL_ATTRS,
         PLATFORM_CONSTRAINT_ATTRS,
         link_hook_runner_attr(),
         # Simulator-vs-device is an Apple *environment* constraint, not an OS

@@ -1,7 +1,8 @@
 """Unit tests for flutter_application platform detection logic."""
 
 load("@bazel_skylib//lib:unittest.bzl", "asserts", "unittest")
-load("//flutter/private:common.bzl", "detect_target_platform", "launch_build_args")
+load("//flutter/private:common.bzl", "android_platform_for_abi", "build_info_label", "detect_target_platform", "kernel_file_stem", "launch_build_args")
+load("//flutter/private:flutter_application.bzl", "debug_kernel_transition_impl")
 load("//flutter/private:plugin_registrant.bzl", "DEV_REGISTRANT_PLATFORMS")
 
 def _ios_detection_test_impl(ctx):
@@ -193,6 +194,134 @@ _t9_test = unittest.make(_android_x64_build_args_test_impl)
 _t10_test = unittest.make(_desktop_build_args_test_impl)
 _t11_test = unittest.make(_dev_registrant_covers_every_platform_test_impl)
 
+def _debug_kernel_transition_moves_host_x64_to_android_test_impl(ctx):
+    """An x86_64 host edge lands on the x86_64 Android platform, in dbg."""
+    env = unittest.begin(ctx)
+    result = debug_kernel_transition_impl(
+        {
+            "//command_line_option:platforms": ["@platforms//linux_x86_64"],
+            "//command_line_option:android_platforms": [],
+            "//command_line_option:cpu": "k8",
+        },
+        None,
+    )
+    asserts.equals(env, [android_platform_for_abi("x86_64")], result["//command_line_option:platforms"])
+    asserts.equals(env, "dbg", result["//command_line_option:compilation_mode"])
+    asserts.equals(env, "off", result["//command_line_option:dynamic_mode"])
+    asserts.equals(env, True, result["@rules_go//go/config:pure"])
+    return unittest.end(env)
+
+_t12_test = unittest.make(_debug_kernel_transition_moves_host_x64_to_android_test_impl)
+
+def _debug_kernel_transition_defaults_generic_host_to_arm64_test_impl(ctx):
+    """A host platform naming no arch defaults to the arm64 Android platform.
+
+    The same default-ABI choice the Android edge makes, so the canonical
+    configuration stays the Android app's configuration.
+    """
+    env = unittest.begin(ctx)
+    result = debug_kernel_transition_impl(
+        {
+            "//command_line_option:platforms": ["@platforms//host"],
+            "//command_line_option:android_platforms": [],
+            "//command_line_option:cpu": "k8",
+        },
+        None,
+    )
+    asserts.equals(env, [android_platform_for_abi("arm64-v8a")], result["//command_line_option:platforms"])
+    asserts.equals(env, True, result["@rules_go//go/config:pure"])
+    return unittest.end(env)
+
+_t12b_test = unittest.make(_debug_kernel_transition_defaults_generic_host_to_arm64_test_impl)
+
+def _debug_kernel_transition_moves_host_arm64_to_android_test_impl(ctx):
+    """An arm64 host edge lands on the arm64 Android platform."""
+    env = unittest.begin(ctx)
+    result = debug_kernel_transition_impl(
+        {
+            "//command_line_option:platforms": ["@platforms//host"],
+            "//command_line_option:android_platforms": [],
+            "//command_line_option:cpu": "arm64",
+        },
+        None,
+    )
+    asserts.equals(env, [android_platform_for_abi("arm64-v8a")], result["//command_line_option:platforms"])
+    asserts.equals(env, True, result["@rules_go//go/config:pure"])
+    return unittest.end(env)
+
+_t13_test = unittest.make(_debug_kernel_transition_moves_host_arm64_to_android_test_impl)
+
+def _debug_kernel_transition_keeps_android_platforms_test_impl(ctx):
+    """An edge already on Android keeps its platforms.
+
+    The canonical configuration IS the Android app's, so its kernel bytes
+    stay put.
+    """
+    env = unittest.begin(ctx)
+    incoming = ["@rules_flutter//flutter/platforms:android_arm64"]
+    result = debug_kernel_transition_impl(
+        {
+            "//command_line_option:platforms": incoming,
+            "//command_line_option:android_platforms": [],
+            "//command_line_option:cpu": "arm64",
+        },
+        None,
+    )
+    asserts.equals(env, incoming, result["//command_line_option:platforms"])
+    asserts.equals(env, True, result["@rules_go//go/config:pure"])
+    return unittest.end(env)
+
+_t14_test = unittest.make(_debug_kernel_transition_keeps_android_platforms_test_impl)
+
+def _build_info_label_defaults_to_own_label_test_impl(ctx):
+    """Without an override the record names the compiling target, as before."""
+    env = unittest.begin(ctx)
+    ctx_like = struct(label = "@@//app:app", attr = struct(build_label = ""))
+    asserts.equals(env, "@@//app:app", build_info_label(ctx_like))
+    return unittest.end(env)
+
+_t15_test = unittest.make(_build_info_label_defaults_to_own_label_test_impl)
+
+def _build_info_label_override_names_the_served_app_test_impl(ctx):
+    """The canonical kernel reports the application it serves.
+
+    So the dev tool's label check (cquery for the application vs the running
+    record) keeps passing on a shared kernel.
+    """
+    env = unittest.begin(ctx)
+    ctx_like = struct(
+        label = "@@//app:__app_debug_kernel",
+        attr = struct(build_label = "@@//app:app"),
+    )
+    asserts.equals(env, "@@//app:app", build_info_label(ctx_like))
+    return unittest.end(env)
+
+_t16_test = unittest.make(_build_info_label_override_names_the_served_app_test_impl)
+
+def _kernel_file_stem_defaults_to_target_name_test_impl(ctx):
+    env = unittest.begin(ctx)
+    ctx_like = struct(label = struct(name = "app"), attr = struct(build_label = ""))
+    asserts.equals(env, "app", kernel_file_stem(ctx_like))
+    return unittest.end(env)
+
+_t17_test = unittest.make(_kernel_file_stem_defaults_to_target_name_test_impl)
+
+def _kernel_file_stem_parses_the_served_app_test_impl(ctx):
+    """The canonical target derives side-library names from the served app.
+
+    Registrant and staged agent names come from the served application, so
+    the shared kernel's recorded URIs match the per-platform kernel's.
+    """
+    env = unittest.begin(ctx)
+    ctx_like = struct(
+        label = struct(name = "__app_debug_kernel"),
+        attr = struct(build_label = "@@//app:app"),
+    )
+    asserts.equals(env, "app", kernel_file_stem(ctx_like))
+    return unittest.end(env)
+
+_t18_test = unittest.make(_kernel_file_stem_parses_the_served_app_test_impl)
+
 def flutter_application_test_suite(name):
     unittest.suite(
         name,
@@ -208,4 +337,12 @@ def flutter_application_test_suite(name):
         _t9_test,
         _t10_test,
         _t11_test,
+        _t12_test,
+        _t12b_test,
+        _t13_test,
+        _t14_test,
+        _t15_test,
+        _t16_test,
+        _t17_test,
+        _t18_test,
     )

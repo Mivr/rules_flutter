@@ -121,14 +121,56 @@ _t7_test = unittest.make(_tester_flags_test_impl)
 
 # Analysis tests for shared shader compilation via aspects
 
-def _consumer_no_local_shader_compiles_impl(ctx):
-    env = analysistest.begin(ctx)
-    shader_compiles = [
+def _shader_compiles(env):
+    return [
         a
         for a in analysistest.target_actions(env)
         if a.mnemonic == "FlutterShaderCompile"
     ]
-    asserts.equals(env, 0, len(shader_compiles), "consumer should not compile shared shaders locally")
+
+def _kernel_compiles(env):
+    return [
+        a
+        for a in analysistest.target_actions(env)
+        if a.mnemonic == "FlutterKernelCompile"
+    ]
+
+def _bundle_config_writes(env):
+    return [
+        a
+        for a in analysistest.target_actions(env)
+        if a.mnemonic == "FileWrite" and
+           a.outputs.to_list()[0].basename.endswith(".asset_bundle_config.json")
+    ]
+
+def _consumer_no_local_shader_compiles_impl(ctx):
+    env = analysistest.begin(ctx)
+    asserts.equals(env, 0, len(_shader_compiles(env)), "consumer should not compile shared shaders locally")
+    config = written_json(env, ".asset_bundle_config.json")
+    if config != None:
+        asserts.true(env, "shaders/test_shader.frag" in config["copies"], "SDK/library shader missing from bundle copies")
+        asserts.true(env, "packages/shared_shader_fixture/shaders/pkg_shader.frag" in config["copies"], "pkg_shader missing from bundle copies")
+        asserts.true(env, config["copies"]["shaders/test_shader.frag"].endswith(".iplr"), "shader output should be .iplr")
+    return analysistest.end(env)
+
+def _app_consumer_serves_shared_kernel_impl(ctx):
+    """A debug `flutter_application` serves the macro's canonical kernel target.
+
+    The outer compiles no kernel, no shaders, and writes no bundle config of
+    its own: the shared kernel, tree and bundle config come from
+    `__<name>_debug_kernel` (H17). The serving target's own compiles and
+    bundle content are asserted on the inner target instead.
+    """
+    env = analysistest.begin(ctx)
+    asserts.equals(env, 0, len(_shader_compiles(env)), "serving consumer compiles no shaders itself")
+    asserts.equals(env, 0, len(_kernel_compiles(env)), "serving consumer compiles no kernel itself")
+    asserts.equals(env, 0, len(_bundle_config_writes(env)), "serving consumer writes no bundle config itself")
+    return analysistest.end(env)
+
+def _inner_bundles_library_shaders_impl(ctx):
+    """The canonical kernel target compiles and bundles what the serving app does not."""
+    env = analysistest.begin(ctx)
+    asserts.equals(env, 0, len(_shader_compiles(env)), "inner has no own shaders to compile")
     config = written_json(env, ".asset_bundle_config.json")
     if config != None:
         asserts.true(env, "shaders/test_shader.frag" in config["copies"], "SDK/library shader missing from bundle copies")
@@ -145,14 +187,16 @@ def _assert_no_workspace_include(env, action):
         "shader compile without shader_includes must not pass workspace --include directory: %s" % include_flags,
     )
 
-def _consumer_with_own_shader_compiles_own_impl(ctx):
+def _inner_with_own_shader_compiles_own_impl(ctx):
+    """The canonical kernel target compiles the serving app's own shader (H17).
+
+    The serving outer compiles nothing itself; this runs against the inner
+    target and keeps the pre-sharing coverage (own shader compiled without a
+    workspace --include, bundle carries all three shaders).
+    """
     env = analysistest.begin(ctx)
-    shader_compiles = [
-        a
-        for a in analysistest.target_actions(env)
-        if a.mnemonic == "FlutterShaderCompile"
-    ]
-    asserts.equals(env, 1, len(shader_compiles), "consumer should compile only its own shader")
+    shader_compiles = _shader_compiles(env)
+    asserts.equals(env, 1, len(shader_compiles), "inner should compile only the app's own shader")
     for action in shader_compiles:
         _assert_no_workspace_include(env, action)
     config = written_json(env, ".asset_bundle_config.json")
@@ -162,14 +206,15 @@ def _consumer_with_own_shader_compiles_own_impl(ctx):
         asserts.true(env, "flutter/tests/shared_shader_fixture/shaders/test_shader.frag" in config["copies"])
     return analysistest.end(env)
 
-def _consumer_sksl_required_compiles_locally_impl(ctx):
+def _inner_sksl_required_compiles_locally_impl(ctx):
+    """The canonical kernel target compiles all shaders locally with require_sksl (H17).
+
+    The serving outer compiles nothing itself; this runs against the inner
+    target and keeps the pre-sharing coverage.
+    """
     env = analysistest.begin(ctx)
-    shader_compiles = [
-        a
-        for a in analysistest.target_actions(env)
-        if a.mnemonic == "FlutterShaderCompile"
-    ]
-    asserts.equals(env, 2, len(shader_compiles), "require_sksl_shaders should compile all shaders locally")
+    shader_compiles = _shader_compiles(env)
+    asserts.equals(env, 2, len(shader_compiles), "require_sksl_shaders should compile all shaders on the inner")
     for action in shader_compiles:
         _assert_no_workspace_include(env, action)
     return analysistest.end(env)
@@ -240,15 +285,15 @@ def _library_shader_includes_aspect_impl(ctx):
     return analysistest.end(env)
 
 def _consumer_forwards_library_shader_includes_impl(ctx):
+    """The serving outer forwards library shader_includes via its dev config (H17).
+
+    The outer compiles nothing itself (0 local compiles); its `_dev_config.json`
+    still names every bundled shader with its workspace sources. The actual
+    compile action is asserted on the inner target.
+    """
     env = analysistest.begin(ctx)
-    shader_compiles = [
-        a
-        for a in analysistest.target_actions(env)
-        if a.mnemonic == "FlutterShaderCompile"
-    ]
-    asserts.equals(env, 1, len(shader_compiles), "expected 1 local FlutterShaderCompile action when require_sksl_shaders is True")
-    if shader_compiles:
-        _assert_shader_with_includes_action(env, shader_compiles[0])
+    shader_compiles = _shader_compiles(env)
+    asserts.equals(env, 0, len(shader_compiles), "serving outer compiles no shaders itself")
     dev_config = written_json(env, "_dev_config.json")
     if dev_config != None:
         shader_map = dev_config.get("shaders", {})
@@ -263,14 +308,30 @@ def _consumer_forwards_library_shader_includes_impl(ctx):
         )
     return analysistest.end(env)
 
+def _inner_compiles_shader_with_includes_impl(ctx):
+    """The canonical kernel target compiles the includes shader (H17).
+
+    Keeps the pre-sharing `_assert_shader_with_includes_action` coverage,
+    moved from the now-serving outer to the inner that compiles.
+    """
+    env = analysistest.begin(ctx)
+    shader_compiles = _shader_compiles(env)
+    asserts.equals(env, 1, len(shader_compiles), "inner should compile the includes shader")
+    if shader_compiles:
+        _assert_shader_with_includes_action(env, shader_compiles[0])
+    return analysistest.end(env)
+
 _DBG = {
     "//command_line_option:compilation_mode": "dbg",
     str(Label("//flutter:profile")): False,
 }
 
 _consumer_no_local_shader_compiles_test = analysistest.make(_consumer_no_local_shader_compiles_impl, config_settings = _DBG)
-_consumer_with_own_shader_test = analysistest.make(_consumer_with_own_shader_compiles_own_impl, config_settings = _DBG)
-_consumer_sksl_required_test = analysistest.make(_consumer_sksl_required_compiles_locally_impl, config_settings = _DBG)
+_app_consumer_serves_shared_kernel_test = analysistest.make(_app_consumer_serves_shared_kernel_impl, config_settings = _DBG)
+_inner_bundles_library_shaders_test = analysistest.make(_inner_bundles_library_shaders_impl, config_settings = _DBG)
+_inner_with_own_shader_test = analysistest.make(_inner_with_own_shader_compiles_own_impl, config_settings = _DBG)
+_inner_sksl_required_test = analysistest.make(_inner_sksl_required_compiles_locally_impl, config_settings = _DBG)
+_inner_compiles_shader_with_includes_test = analysistest.make(_inner_compiles_shader_with_includes_impl, config_settings = _DBG)
 _aspect_compiles_on_library_test = analysistest.make(
     _aspect_compiles_on_library_impl,
     config_settings = _DBG,
@@ -416,13 +477,17 @@ def shader_compile_test_suite(name):
         ],
     )
 
-    _consumer_no_local_shader_compiles_test(
+    _app_consumer_serves_shared_kernel_test(
         name = name + "_app_consumer_1_no_shader_actions",
         target_under_test = ":_app_consumer_1",
     )
-    _consumer_no_local_shader_compiles_test(
+    _app_consumer_serves_shared_kernel_test(
         name = name + "_app_consumer_2_no_shader_actions",
         target_under_test = ":_app_consumer_2",
+    )
+    _inner_bundles_library_shaders_test(
+        name = name + "_inner_consumer_1_bundles_library_shaders",
+        target_under_test = ":___app_consumer_1_debug_kernel",
     )
     _consumer_no_local_shader_compiles_test(
         name = name + "_test_consumer_1_no_shader_actions",
@@ -454,17 +519,29 @@ def shader_compile_test_suite(name):
         name = name + "_library_shader_includes_tester_aspect",
         target_under_test = "//flutter/tests/shared_shader_fixture:shader_with_includes_lib",
     )
-    _consumer_with_own_shader_test(
+    _app_consumer_serves_shared_kernel_test(
         name = name + "_app_consumer_own_shader",
         target_under_test = ":_app_consumer_own_shader",
     )
-    _consumer_sksl_required_test(
+    _inner_with_own_shader_test(
+        name = name + "_inner_consumer_own_shader",
+        target_under_test = ":___app_consumer_own_shader_debug_kernel",
+    )
+    _app_consumer_serves_shared_kernel_test(
         name = name + "_app_consumer_sksl_required",
         target_under_test = ":_app_consumer_sksl_required",
+    )
+    _inner_sksl_required_test(
+        name = name + "_inner_consumer_sksl_required",
+        target_under_test = ":___app_consumer_sksl_required_debug_kernel",
     )
     _consumer_forwards_library_shader_includes_test(
         name = name + "_app_consumer_forwards_library_shader_includes",
         target_under_test = ":_app_consumer_with_includes_sksl_required",
+    )
+    _inner_compiles_shader_with_includes_test(
+        name = name + "_inner_consumer_with_includes",
+        target_under_test = ":___app_consumer_with_includes_sksl_required_debug_kernel",
     )
 
     native.test_suite(
@@ -473,6 +550,7 @@ def shader_compile_test_suite(name):
             ":" + name + "_flags_pure",
             ":" + name + "_app_consumer_1_no_shader_actions",
             ":" + name + "_app_consumer_2_no_shader_actions",
+            ":" + name + "_inner_consumer_1_bundles_library_shaders",
             ":" + name + "_test_consumer_1_no_shader_actions",
             ":" + name + "_test_consumer_2_no_shader_actions",
             ":" + name + "_aspect_compiles_on_library",
@@ -481,8 +559,11 @@ def shader_compile_test_suite(name):
             ":" + name + "_library_shader_includes_web_aspect",
             ":" + name + "_library_shader_includes_tester_aspect",
             ":" + name + "_app_consumer_own_shader",
+            ":" + name + "_inner_consumer_own_shader",
             ":" + name + "_app_consumer_sksl_required",
+            ":" + name + "_inner_consumer_sksl_required",
             ":" + name + "_app_consumer_forwards_library_shader_includes",
+            ":" + name + "_inner_consumer_with_includes",
             ":" + name + "_shader_with_includes_build_test",
         ],
     )

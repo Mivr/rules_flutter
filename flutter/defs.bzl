@@ -61,14 +61,34 @@ def flutter_application(name, package_name = "", **kwargs):
     sandbox `file:///` URIs, which is required for hot reload incremental
     deltas to match the running application's library URIs.
 
+    Beside the application, creates a canonical debug-kernel target
+    (`__<name>_debug_kernel`, an instance of the same rule): a debug build
+    whose kernel inputs are platform-identical serves that target's kernel —
+    compiled once in the Android configuration — instead of compiling its
+    own (H17). The inner target shares every input attribute; it never
+    shares further itself.
+
     Args:
         name: Target name.
         package_name: Dart package name (from pubspec.yaml). Defaults to name.
         **kwargs: All other arguments forwarded to the underlying rule.
     """
+    inner_name = "__" + name + "_debug_kernel"
+
+    # The sharing wiring is the macro's own: a caller-passed value would wire
+    # the inner target at itself or fork the outer elsewhere.
+    kwargs.pop("debug_kernel", None)
+    kwargs.pop("build_label", None)
+    _flutter_application(
+        name = inner_name,
+        package_name = package_name or name,
+        build_label = "@@//" + native.package_name() + ":" + name,
+        **kwargs
+    )
     _flutter_application(
         name = name,
         package_name = package_name or name,
+        debug_kernel = ":" + inner_name,
         **kwargs
     )
 

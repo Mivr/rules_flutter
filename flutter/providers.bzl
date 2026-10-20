@@ -295,6 +295,7 @@ FlutterApplicationInfo = provider(
         "android_plugin_libraries": "depset[struct]: Aggregated Android plugin libraries, same shape as `FlutterInfo.android_plugin_libraries`. Read by the Android plugin aggregator to merge JavaInfo and lift library permissions.",
         "linux_plugin_libraries": "depset[struct]: Aggregated Linux plugin source bundles, same shape as `FlutterInfo.linux_plugin_libraries`. The Linux runner folds these into its compile.",
         "windows_plugin_libraries": "depset[struct]: Aggregated Windows plugin source bundles, same shape as `FlutterInfo.windows_plugin_libraries`. The Windows runner folds these into its compile.",
+        "debug_kernel_shareable": "bool: True when this target is the macro-created canonical debug-kernel target (H17) and its kernel inputs are platform-identical in its own (Android) view, so a debug build whose own view agrees may serve this kernel instead of compiling its own.",
     },
 )
 

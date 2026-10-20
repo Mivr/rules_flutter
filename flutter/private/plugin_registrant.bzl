@@ -592,7 +592,7 @@ def generate_dev_plugin_registrants(ctx, plugins, agent_import = None, native_ag
         registrants[platform] = out
     return registrants
 
-def generate_dart_plugin_registrant(ctx, plugins, target_platform = None, agent_import = None, native_agent_import = None):
+def generate_dart_plugin_registrant(ctx, plugins, target_platform = None, agent_import = None, native_agent_import = None, file_stem = None):
     """Generate a Dart plugin registrant source file via ctx.actions.write.
 
     Args:
@@ -602,6 +602,10 @@ def generate_dart_plugin_registrant(ctx, plugins, target_platform = None, agent_
         agent_import: Optional relative import for the staged agent-extensions
             library, registered from the registrant (debug builds).
         native_agent_import: The same, for the native-only agent extensions.
+        file_stem: Optional filename stem. Defaults to the target's own name;
+            a target serving another target's kernel (H17) passes the served
+            application's stem so the registrant's `APP_SCHEME` URI — which
+            the kernel records — matches the per-platform kernel's.
 
     Returns:
         File: The generated registrant .dart file, or None if there are no
@@ -615,7 +619,7 @@ def generate_dart_plugin_registrant(ctx, plugins, target_platform = None, agent_
     )
     if not content:
         return None
-    registrant = ctx.actions.declare_file(ctx.label.name + "_plugin_registrant.dart")
+    registrant = ctx.actions.declare_file((file_stem or ctx.label.name) + "_plugin_registrant.dart")
     ctx.actions.write(registrant, content)
     return registrant
 
