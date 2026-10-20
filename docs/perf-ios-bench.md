@@ -77,6 +77,56 @@ Per scenario run it records:
   one sample per failing mnemonic (target, exit, stderr tail), so the
   next run tells us why a replay class failed (missing Xcode env,
   sandbox-only paths) instead of just counting it.
+- Executed-but-not-replayed actions are counted per reason in
+  `replay.json` (`skipped_by_mnemonic`) and shown in the summary's "Not
+  replayed" table. Exec-configuration (host tool) spawns — outputs
+  under a `-exec-` configuration directory such as
+  `bazel-out/darwin_arm64-opt-exec-*/`, which build host tools (abseil,
+  the Swift worker) rather than the iOS app — are skipped by default
+  under the single reason "host tools (not replayed)"
+  (`--include-exec-config` opts back in).
+
+## Generator v2: a reachable program
+
+The first generator shape wired `main` to top-layer widgets only, with
+no package calling its dependencies at run time, so AOT tree-shaking
+dropped everything below the top layer: a layer-0 `core_edit`
+re-ran the kernel compile but never `gen_snapshot`, and the AOT dill
+came out byte-identical. Since generator v2 (same design as the
+referee's `flutter-monorepo` v2) the generated program is reachable
+like a real app:
+
+- Each package entry (`entryN(x, probe)`) calls every own file's
+  helper and value functions — including the value functions the
+  bench edits — and constructs every own file's widget, all
+  unconditionally, so a `body_edit` at any layer changes the AOT
+  program. (`api_edit` keeps its meaning: adding an unused member
+  legitimately changes nothing in AOT.)
+- Each entry also calls its direct dependencies' entries, and `main`
+  calls every top-layer entry. Cross-package calls are guarded by a
+  probe `main` reads from a runtime source the compiler cannot fold
+  (`int.tryParse('probe') ?? 0`, always zero at run time), so the
+  whole transitive closure stays reachable for tree-shaking without
+  running if the app ever runs. The DAG repair pass gives every
+  package below the top layer at least one dependent, so reachability
+  holds through the dependency graph from every seed.
+- `bench-workspace-stats.json` records `generator_version: 2` (also
+  embedded in the summary metadata as `base_stats`/`head_stats`); the
+  summary warns when the two sides differ in shape. Numbers from the
+  old shape are never comparable with v2 numbers.
+
+## Apple replay environment
+
+Bazel's darwin spawn runner adds `DEVELOPER_DIR` and `SDKROOT` at
+execution time (as `XcodeLocalEnvProvider` does), so the execution log
+never records them and naive replays of Apple actions fail with
+`Error: DEVELOPER_DIR not set.` When the logged environment names an
+Apple SDK platform (`APPLE_SDK_PLATFORM`, alongside
+`APPLE_SDK_VERSION_OVERRIDE` / `XCODE_VERSION_OVERRIDE`),
+`tools/perf/replay.py` resolves `DEVELOPER_DIR` from `xcode-select -p`
+and `SDKROOT` from `xcrun --sdk <platform lowercased>
+--show-sdk-path`, cached per platform. Without those tools (e.g.
+Linux) it replays with the logged environment alone.
 
 Ordering (enforced by `tools/perf/run_rep.py`): per repeat and per config,
 the workspace is reset from the pristine copy, then all three scenario

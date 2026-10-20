@@ -104,7 +104,9 @@ class DagTest(unittest.TestCase):
                 self.assertEqual(dag["layer_of"][pkg], layer_idx)
                 for dep in dag["deps"][pkg]:
                     self.assertIn(dep, lower)
-                self.assertEqual(
+                # Fanout floor from the seeded pass; orphan repair (v2) may
+                # add edges above it so every package stays reachable.
+                self.assertGreaterEqual(
                     len(dag["deps"][pkg]), min(3, len(lower)))
                 self.assertEqual(dag["deps"][pkg], sorted(dag["deps"][pkg]))
                 self.assertEqual(len(set(dag["deps"][pkg])),
@@ -119,6 +121,136 @@ class DagTest(unittest.TestCase):
         dag = build_dag(1, 8, 4, 5)
         self.assertEqual(len(dag["layers"]), 1)
         self.assertEqual(dag["deps"], [[]])
+
+
+class RepairTest(unittest.TestCase):
+    def test_no_orphans_below_top_layer(self):
+        shapes = [(1, 8, 4), (9, 3, 4), (20, 4, 3), (40, 8, 4),
+                  (60, 8, 4)]
+        for n, layers, fanout in shapes:
+            for seed in [1, 2, 3, 11, 99]:
+                dag = build_dag(n, layers, fanout, seed)
+                fan_in = fan_in_counts(dag)
+                top = set(dag["layers"][-1])
+                for p in range(n):
+                    if p not in top:
+                        self.assertGreaterEqual(
+                            fan_in[p], 1,
+                            "pkg%d orphaned (n=%d seed=%d)" % (p, n, seed))
+
+    def test_repair_keeps_dag_shaped(self):
+        for seed in [1, 7, 42]:
+            dag = build_dag(30, 6, 3, seed)
+            for layer_idx, members in enumerate(dag["layers"]):
+                lower = {p for lower in dag["layers"][:layer_idx]
+                         for p in lower}
+                for pkg in members:
+                    for dep in dag["deps"][pkg]:
+                        self.assertIn(dep, lower)
+                    self.assertEqual(dag["deps"][pkg],
+                                     sorted(dag["deps"][pkg]))
+                    self.assertEqual(len(set(dag["deps"][pkg])),
+                                     len(dag["deps"][pkg]))
+
+    def test_repair_deterministic(self):
+        self.assertEqual(build_dag(30, 6, 3, 9), build_dag(30, 6, 3, 9))
+        self.assertNotEqual(build_dag(30, 6, 3, 9), build_dag(30, 6, 3, 10))
+
+
+class ReachabilityTest(unittest.TestCase):
+    def make_plan(self, **kwargs):
+        opts = small_opts(**kwargs)
+        return (opts, gen_monorepo.MonorepoPlan(opts, 12))
+
+    def test_main_calls_every_top_layer_entry(self):
+        opts, plan = self.make_plan()
+        main = gen_monorepo.render_app_main(plan.top_layer())
+        for a in plan.top_layer():
+            self.assertIn("entry%d(3, probe)" % a, main)
+        # Unfoldable-but-false-at-runtime guard source.
+        self.assertIn("int.tryParse('probe') ?? 0", main)
+        # Entry results flow to a reachable use.
+        self.assertIn("$reach", main)
+
+    def test_entry_calls_deps_and_own_functions(self):
+        opts, plan = self.make_plan()
+        n = len(plan.dag["deps"])
+        for p in range(n):
+            body = gen_monorepo.render_entrypoint(
+                p, opts.files_per_package, plan.dag["deps"][p])
+            self.assertIn("int entry%d(int x, int probe)" % p, body)
+            for d in plan.dag["deps"][p]:
+                self.assertIn("entry%d(x, probe)" % d, body)
+            if plan.dag["deps"][p]:
+                self.assertIn("if (probe != 0) {", body)
+            for f in range(opts.files_per_package):
+                self.assertIn("fn%dx%d(x)" % (p, f), body)
+                self.assertIn("value%dx%d()" % (p, f), body)
+                widget = "W" if f % 2 == 0 else "S"
+                self.assertIn(
+                    "%s%dx%d(value: 1)" % (widget, p, f), body)
+        self.assertTrue(
+            any(plan.dag["deps"]),
+            "expected at least one package with dependencies")
+
+    def test_entry_imports_dependency_entries(self):
+        opts, plan = self.make_plan()
+        for p, deps in enumerate(plan.dag["deps"]):
+            body = gen_monorepo.render_entrypoint(
+                p, opts.files_per_package, deps)
+            for d in deps:
+                self.assertIn(
+                    "import 'package:pkg%d/pkg%d.dart';" % (d, d), body)
+
+    def test_every_package_reachable_from_main_through_dag(self):
+        for seed in [1, 7, 42]:
+            opts = small_opts(seed=seed)
+            plan = gen_monorepo.MonorepoPlan(opts, 15)
+            seen = set(plan.top_layer())
+            stack = list(plan.top_layer())
+            while stack:
+                pkg = stack.pop()
+                for dep in plan.dag["deps"][pkg]:
+                    if dep not in seen:
+                        seen.add(dep)
+                        stack.append(dep)
+            self.assertEqual(seen, set(range(len(plan.dag["deps"]))),
+                             "seed %d" % seed)
+
+    def test_edit_target_reachable(self):
+        tmp = tempfile.mkdtemp(prefix="gen-mono-reach-")
+        try:
+            rules_dir = os.path.join(tmp, "rules")
+            os.makedirs(rules_dir)
+            ws = os.path.join(tmp, "ws")
+            generate_flutter_monorepo(ws, rules_dir, [], small_opts())
+            with open(os.path.join(ws, "bench-edit-manifest.json"),
+                      encoding="utf-8") as fh:
+                rel = json.load(fh)["body_edit"]
+            pkg = int(rel.split("/")[1].replace("pkg", ""))
+            with open(os.path.join(ws, "packages/pkg%d/lib/pkg%d.dart"
+                                    % (pkg, pkg)),
+                      encoding="utf-8") as fh:
+                entry = fh.read()
+            # The edited file is f0: its value function is called from the
+            # package entry, and the package is reachable from main.
+            self.assertIn("value%dx0()" % pkg, entry)
+            with open(os.path.join(ws, "bench-workspace-stats.json"),
+                      encoding="utf-8") as fh:
+                n_packages = json.load(fh)["packages"]
+            opts = small_opts()
+            plan = gen_monorepo.MonorepoPlan(opts, n_packages)
+            seen = set(plan.top_layer())
+            stack = list(plan.top_layer())
+            while stack:
+                member = stack.pop()
+                for dep in plan.dag["deps"][member]:
+                    if dep not in seen:
+                        seen.add(dep)
+                        stack.append(dep)
+            self.assertIn(pkg, seen)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
 
 
 class SizingTest(unittest.TestCase):
@@ -204,6 +336,7 @@ class GenerationTest(unittest.TestCase):
     def test_stats_and_manifest(self):
         out, stats = self.generate("a")
         self.assertEqual(stats["generator"], "flutter-monorepo")
+        self.assertEqual(stats["generator_version"], 2)
         self.assertGreater(stats["packages"], 0)
         self.assertGreater(stats["files"], 0)
         self.assertGreater(stats["targets"], 0)

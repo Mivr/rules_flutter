@@ -10,7 +10,10 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import replay
 from replay import (
     DEFAULT_IOS_MNEMONICS,
+    HOST_TOOLS_SKIPPED_KEY,
     aggregate_replays,
+    apple_env,
+    is_exec_config,
     parse_time_l_output,
     replay_all,
     replay_argv,
@@ -230,6 +233,177 @@ class BudgetTest(unittest.TestCase):
                 "command": []})
         self.assertFalse(report["truncated"])
         self.assertEqual(report["n_replayed"], 1)
+
+
+class ExecConfigTest(unittest.TestCase):
+    def exec_spawn(self, mnemonic="CppCompile"):
+        return {
+            "commandArgs": [
+                "clang", "-c",
+                "bazel-out/darwin_arm64-opt-exec-1234ABCD/bin/external/"
+                "abseil-cpp+/absl/base/base.cc",
+                "-o",
+                "bazel-out/darwin_arm64-opt-exec-1234ABCD/bin/external/"
+                "abseil-cpp+/absl/base/_objs/base/base.pic.o",
+            ],
+            "environmentVariables": [],
+            "mnemonic": mnemonic,
+            "exitCode": 0,
+            "targetLabel": "@@abseil-cpp+//absl/base:base",
+        }
+
+    def test_exec_config_detected(self):
+        self.assertTrue(is_exec_config(self.exec_spawn()))
+        self.assertFalse(is_exec_config(AOT_SPAWN))
+        self.assertFalse(is_exec_config(SWIFT_SPAWN))
+
+    def test_target_config_bazel_out_not_exec(self):
+        spawn = dict(self.exec_spawn(), commandArgs=[
+            "clang", "-c",
+            "bazel-out/darwin_arm64-opt/bin/app/app.o",
+        ])
+        self.assertFalse(is_exec_config(spawn))
+
+    def test_inputs_never_trigger(self):
+        spawn = dict(AOT_SPAWN, inputs={
+            "bazel-out/darwin_arm64-opt-exec-1234/bin/foo": {}})
+        self.assertFalse(is_exec_config(spawn))
+
+    def test_exec_config_skipped_by_default(self):
+        replayable, skipped = select_spawns(
+            [self.exec_spawn(), AOT_SPAWN], DEFAULT_IOS_MNEMONICS)
+        self.assertEqual(replayable, [AOT_SPAWN])
+        self.assertEqual(skipped, {HOST_TOOLS_SKIPPED_KEY: 1})
+        self.assertEqual(HOST_TOOLS_SKIPPED_KEY,
+                         "host tools (not replayed)")
+
+    def test_include_exec_config_replays(self):
+        replayable, skipped = select_spawns(
+            [self.exec_spawn()], DEFAULT_IOS_MNEMONICS,
+            include_exec_config=True)
+        self.assertEqual(len(replayable), 1)
+        self.assertEqual(skipped, {})
+
+    def test_replay_all_buckets_host_tools(self):
+        report = replay_all(
+            [self.exec_spawn(), self.exec_spawn("CppLink"), AOT_SPAWN],
+            DEFAULT_IOS_MNEMONICS, "/nonexistent", 60.0,
+            runner=lambda spawn: {
+                "mnemonic": spawn["mnemonic"], "target": "",
+                "instructions": 1, "real_s": 0.1, "exit_code": 0,
+                "command": []})
+        self.assertEqual(report["n_replayed"], 1)
+        self.assertEqual(report["skipped_by_mnemonic"],
+                         {HOST_TOOLS_SKIPPED_KEY: 2})
+
+
+class AppleEnvTest(unittest.TestCase):
+    def apple_spawn(self, platform="iphoneos"):
+        return {
+            "commandArgs": ["gen_snapshot", "--macho", "out.dill"],
+            "environmentVariables": [
+                {"name": "APPLE_SDK_PLATFORM", "value": platform},
+                {"name": "APPLE_SDK_VERSION_OVERRIDE", "value": "17.2"},
+                {"name": "XCODE_VERSION_OVERRIDE", "value": "15.1"},
+            ],
+            "mnemonic": "FlutterAotMacho",
+            "exitCode": 0,
+            "targetLabel": "//app:app_ios",
+        }
+
+    def xcode_runner(self, calls):
+        def run(argv):
+            calls.append(argv)
+
+            class Proc:
+                returncode = 0
+                stdout = ("Xcode.app/Contents/Developer\n"
+                          if argv[0] == "xcode-select"
+                          else "iPhoneOS.sdk\n")
+
+            return Proc()
+        return run
+
+    def test_no_platform_no_probe(self):
+        calls = []
+        self.assertEqual(
+            apple_env(AOT_SPAWN, cache={}, runner=self.xcode_runner(calls)),
+            {})
+        self.assertEqual(calls, [])
+
+    def test_synthesizes_developer_dir_and_sdkroot(self):
+        calls = []
+        env = apple_env(self.apple_spawn(), cache={},
+                        runner=self.xcode_runner(calls))
+        self.assertEqual(env, {
+            "DEVELOPER_DIR": "Xcode.app/Contents/Developer",
+            "SDKROOT": "iPhoneOS.sdk",
+        })
+        self.assertEqual(calls[0], ["xcode-select", "-p"])
+        self.assertEqual(calls[1],
+                         ["xcrun", "--sdk", "iphoneos", "--show-sdk-path"])
+
+    def test_platform_lowercased(self):
+        calls = []
+        apple_env(self.apple_spawn(platform="iPhoneOS"), cache={},
+                  runner=self.xcode_runner(calls))
+        self.assertIn("iphoneos", calls[1])
+
+    def test_cached_per_platform(self):
+        cache = {}
+        calls = []
+        runner = self.xcode_runner(calls)
+        first = apple_env(self.apple_spawn(), cache=cache, runner=runner)
+        second = apple_env(self.apple_spawn(), cache=cache, runner=runner)
+        self.assertEqual(first, second)
+        self.assertEqual(len(calls), 2)
+        other = apple_env(self.apple_spawn(platform="iphonesimulator"),
+                          cache=cache, runner=runner)
+        self.assertEqual(other, first)
+        self.assertEqual(len(calls), 4)
+
+    def test_probe_failure_is_fail_open(self):
+        def failing(argv):
+            class Proc:
+                returncode = 1
+                stdout = ""
+
+            return Proc()
+        self.assertEqual(
+            apple_env(self.apple_spawn(), cache={}, runner=failing), {})
+        self.assertEqual(
+            apple_env(self.apple_spawn(), cache=None, runner=failing), {})
+
+    def test_run_replay_applies_apple_env(self):
+        import subprocess as subprocess_mod
+        seen = {}
+        real_run = subprocess_mod.run
+
+        def fake_run(argv, **kwargs):
+            seen.update(kwargs)
+            seen["argv"] = argv
+
+            class Proc:
+                returncode = 0
+                stderr = ("  1.5 real         1.1 user         0.2 sys\n"
+                          "  7  instructions retired\n")
+
+            return Proc()
+
+        subprocess_mod.run = fake_run
+        try:
+            record = replay.run_replay(
+                self.apple_spawn(), "/execroot", 600.0,
+                apple_cache={},
+                xcode_runner=self.xcode_runner([]))
+        finally:
+            subprocess_mod.run = real_run
+        self.assertEqual(record["instructions"], 7)
+        self.assertEqual(
+            seen["env"]["DEVELOPER_DIR"], "Xcode.app/Contents/Developer")
+        self.assertEqual(seen["env"]["SDKROOT"], "iPhoneOS.sdk")
+        # Logged Apple overrides still overlay the host environment.
+        self.assertEqual(seen["env"]["APPLE_SDK_PLATFORM"], "iphoneos")
 
 
 class SubprocessArgsTest(unittest.TestCase):

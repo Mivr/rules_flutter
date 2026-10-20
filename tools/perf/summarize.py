@@ -66,6 +66,10 @@ def scenario_metrics(exe_summaries, replay_reports):
     for s in exe_summaries:
         for mnemonic, entry in s.get("by_mnemonic", {}).items():
             by_mnemonic.setdefault(mnemonic, []).append(entry["count"])
+    skipped = {}
+    for report in replay_reports:
+        for key, count in report.get("skipped_by_mnemonic", {}).items():
+            skipped.setdefault(key, []).append(count)
     replay_failures = {}
     replay_cpu_s = {}
     failure_samples = {}
@@ -91,6 +95,7 @@ def scenario_metrics(exe_summaries, replay_reports):
         "instructions_available": instructions_available,
         "n_replayed": n_replayed,
         "by_mnemonic_counts": by_mnemonic,
+        "skipped": skipped,
         "replay_failures": replay_failures,
         "replay_cpu_s": replay_cpu_s,
         "failure_samples": failure_samples,
@@ -121,6 +126,14 @@ def compare_metrics(base_m, head_m):
             "delta_pct": delta_pct(head["median"], base["median"]),
         }
     out["by_mnemonic"] = by_mnemonic
+    skipped = {}
+    for key in sorted(set(base_m.get("skipped", {}))
+                      | set(head_m.get("skipped", {}))):
+        skipped[key] = {
+            "base": summarize_values(base_m["skipped"].get(key, [])),
+            "head": summarize_values(head_m["skipped"].get(key, [])),
+        }
+    out["skipped"] = skipped
     out["instructions_complete"] = {
         "base": base_m["instructions_complete"],
         "head": head_m["instructions_complete"],
@@ -256,6 +269,23 @@ def render_markdown(summary):
     for key in sorted(meta):
         lines.append("- %s: %s" % (key, meta[key]))
     lines.append("")
+    versions = {}
+    for key in ["base_stats", "head_stats"]:
+        stats = meta.get(key)
+        if isinstance(stats, dict) and "generator_version" in stats:
+            versions[key] = stats["generator_version"]
+    if versions and not (
+            len(versions) == 2 and len(set(versions.values())) == 1):
+        # A v1 (unversioned) vs v2 workspace, or two different versions:
+        # the generated programs differ in shape, so the numbers are never
+        # comparable.
+        lines.append("warning: generator workspace stats differ in shape "
+                     "(base_stats generator_version=%s, head_stats "
+                     "generator_version=%s): numbers across generator "
+                     "versions are not comparable." % (
+                         versions.get("base_stats"),
+                         versions.get("head_stats")))
+        lines.append("")
     lines.append("Medians over repeats; spread is [min, max]. "
                  "Delta is head-vs-base on the medians.")
     lines.append("")
@@ -370,6 +400,19 @@ def render_markdown(summary):
                 lines.append("| %s | %s | %s | %s |" % (
                     mnemonic, fmt(m["base"]["median"]), fmt(m["head"]["median"]),
                     fmt_delta(m["delta_pct"])))
+            lines.append("")
+            lines.append("Not replayed (median count per repeat):")
+            lines.append("")
+            if entry.get("skipped"):
+                lines.append("| reason | base | head |")
+                lines.append("| --- | --- | --- |")
+                for key in sorted(entry["skipped"]):
+                    m = entry["skipped"][key]
+                    lines.append("| %s | %s | %s |" % (
+                        key, fmt(m["base"]["median"]),
+                        fmt(m["head"]["median"])))
+            else:
+                lines.append("everything executed was replayed.")
             lines.append("")
     return "\n".join(lines)
 

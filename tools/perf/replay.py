@@ -25,6 +25,19 @@ Platform-agnostic kernel actions (``FlutterKernelCompile``,
 the Linux referee bench already measures them, and replaying them would
 blow the job time budget. They stay opt-in via ``--mnemonic``.
 
+Exec-configuration (host tool) spawns — outputs under a ``-exec-``
+configuration directory such as ``bazel-out/darwin_arm64-opt-exec-*/``,
+which build host tools (abseil, the Swift worker) rather than the iOS
+app — are skipped by default and counted as "host tools (not replayed)";
+pass ``--include-exec-config`` to replay them anyway.
+
+Apple SDK actions need ``DEVELOPER_DIR`` and ``SDKROOT``, which Bazel's
+darwin spawn runner adds at execution time (as ``XcodeLocalEnvProvider``
+does) and the execution log therefore never records. When the logged
+environment names an Apple SDK platform (``APPLE_SDK_PLATFORM``),
+``DEVELOPER_DIR`` is resolved from ``xcode-select -p`` and ``SDKROOT``
+from ``xcrun --sdk <platform> --show-sdk-path``, cached per platform.
+
 Only successful (exit 0), non-cached spawns are replayed. Each replay runs
 with stdin closed and a per-action timeout, under a whole-log time budget
 (``--budget-seconds``); on exhaustion the report records ``truncated=true``
@@ -69,6 +82,15 @@ DEFAULT_IOS_MNEMONICS = frozenset([
     "SwiftCompile",
     "Lipo",
 ])
+
+# Exec-configuration output directory: bazel-out/<config>-exec-<hash>/...
+# builds host tools, not the app. Matched against command arguments and
+# declared outputs, never source inputs (which live outside bazel-out).
+EXEC_CONFIG_RE = re.compile(r"(?:^|/)bazel-out/[^/\s\"']*-exec-[^/\s\"']*/")
+
+# Skipped-bucket label for exec-configuration spawns in the report's
+# skipped_by_mnemonic table and the summary ("host tools (not replayed)").
+HOST_TOOLS_SKIPPED_KEY = "host tools (not replayed)"
 
 TIME_BIN = "/usr/bin/time"
 
@@ -122,12 +144,21 @@ def tail_lines(text, limit=STDERR_TAIL_LINES):
     return "\n".join(lines[-limit:])
 
 
-def select_spawns(spawns, mnemonics):
-    """Splits spawns into (replayable, skipped) by mnemonic and status."""
+def select_spawns(spawns, mnemonics, include_exec_config=False):
+    """Splits spawns into (replayable, skipped) by mnemonic and status.
+
+    Exec-configuration (host tool) spawns are skipped by default into the
+    single "host tools (not replayed)" bucket; pass include_exec_config
+    to replay them like any other spawn.
+    """
     replayable = []
     skipped = {}
     for spawn in spawns:
         mnemonic = spawn.get("mnemonic", "")
+        if not include_exec_config and is_exec_config(spawn):
+            skipped[HOST_TOOLS_SKIPPED_KEY] = \
+                skipped.get(HOST_TOOLS_SKIPPED_KEY, 0) + 1
+            continue
         if mnemonic not in mnemonics:
             skipped[mnemonic] = skipped.get(mnemonic, 0) + 1
             continue
@@ -156,14 +187,98 @@ def replay_env(spawn):
     return env
 
 
+def spawn_search_strings(spawn):
+    """Config-marker search space: every string except source inputs.
+
+    Covers command arguments, declared outputs, the target label and the
+    logged environment; the inputs map holds source paths (never
+    configuration output directories) and can be enormous, so it is
+    skipped.
+    """
+    found = []
+
+    def walk(value):
+        if isinstance(value, str):
+            found.append(value)
+        elif isinstance(value, list):
+            for item in value:
+                walk(item)
+        elif isinstance(value, dict):
+            for key, item in value.items():
+                if key == "inputs":
+                    continue
+                walk(item)
+
+    walk(spawn)
+    return found
+
+
+def is_exec_config(spawn):
+    """Whether the spawn builds a host tool under an -exec- config dir."""
+    return any(EXEC_CONFIG_RE.search(text or "")
+               for text in spawn_search_strings(spawn))
+
+
+def apple_env(spawn, cache=None, runner=None):
+    """Synthesizes Bazel's Xcode execution env for an Apple spawn.
+
+    Bazel's darwin spawn runner adds DEVELOPER_DIR and SDKROOT at execution
+    time (as XcodeLocalEnvProvider does), so the execution log never
+    records them. When the logged environment names an Apple SDK platform
+    (APPLE_SDK_PLATFORM, alongside APPLE_SDK_VERSION_OVERRIDE /
+    XCODE_VERSION_OVERRIDE), DEVELOPER_DIR comes from ``xcode-select -p``
+    and SDKROOT from ``xcrun --sdk <platform lowercased>
+    --show-sdk-path``, cached per platform. Fail-open: without the tools
+    (e.g. Linux) or on any probe failure, returns {} and the replay runs
+    with the logged environment alone.
+    """
+    logged = replay_env(spawn)
+    platform = logged.get("APPLE_SDK_PLATFORM")
+    if not platform:
+        return {}
+    cache = cache if cache is not None else {}
+    if platform in cache:
+        return dict(cache[platform])
+
+    def default_runner(argv):
+        return subprocess.run(
+            argv,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            timeout=60,
+            check=False,
+            text=True,
+        )
+
+    run = runner or default_runner
+    try:
+        developer_dir = run(["xcode-select", "-p"])
+        sdk_path = run(["xcrun", "--sdk", platform.lower(),
+                        "--show-sdk-path"])
+    except (OSError, subprocess.SubprocessError):
+        return {}
+    if developer_dir.returncode != 0 or sdk_path.returncode != 0:
+        return {}
+    synthesized = {
+        "DEVELOPER_DIR": (developer_dir.stdout or "").strip(),
+        "SDKROOT": (sdk_path.stdout or "").strip(),
+    }
+    if not synthesized["DEVELOPER_DIR"] or not synthesized["SDKROOT"]:
+        return {}
+    cache[platform] = synthesized
+    return dict(synthesized)
+
+
 def replay_argv(spawn):
     return [TIME_BIN, "-l"] + list(spawn["commandArgs"])
 
 
-def run_replay(spawn, execroot, timeout):
+def run_replay(spawn, execroot, timeout, apple_cache=None, xcode_runner=None):
     """Replays one spawn; returns its record dict."""
     env = dict(os.environ)
     env.update(replay_env(spawn))
+    env.update(apple_env(spawn, cache=apple_cache, runner=xcode_runner))
     try:
         proc = subprocess.run(
             replay_argv(spawn),
@@ -247,7 +362,8 @@ def aggregate_replays(records):
 
 
 def replay_all(spawns, mnemonics, execroot, timeout, budget_seconds=None,
-               runner=None, clock=None):
+               runner=None, clock=None, include_exec_config=False,
+               apple_cache=None, xcode_runner=None):
     """Selects and replays spawns under a whole-log time budget.
 
     Stops starting new replays once budget_seconds elapse; the report then
@@ -255,9 +371,14 @@ def replay_all(spawns, mnemonics, execroot, timeout, budget_seconds=None,
     skipped_by_mnemonic as "<mnemonic> (budget-exhausted)".
     """
     now = clock or time.monotonic
-    replayable, skipped = select_spawns(spawns, mnemonics)
+    replayable, skipped = select_spawns(
+        spawns, mnemonics, include_exec_config=include_exec_config)
     skipped = dict(skipped)
-    run = runner or (lambda spawn: run_replay(spawn, execroot, timeout))
+    cache = apple_cache if apple_cache is not None else {}
+    if runner is None:
+        runner = (lambda spawn: run_replay(
+            spawn, execroot, timeout, apple_cache=cache,
+            xcode_runner=xcode_runner))
     records = []
     truncated = False
     start = now()
@@ -265,7 +386,7 @@ def replay_all(spawns, mnemonics, execroot, timeout, budget_seconds=None,
         if budget_seconds is not None and now() - start >= budget_seconds:
             truncated = True
             break
-        records.append(run(spawn))
+        records.append(runner(spawn))
     if truncated:
         for spawn in replayable[len(records):]:
             key = "%s (budget-exhausted)" % spawn.get("mnemonic", "")
@@ -295,6 +416,9 @@ def main(argv=None):
                         help="per-action replay timeout in seconds")
     parser.add_argument("--budget-seconds", type=float, default=1800.0,
                         help="whole-log replay time budget in seconds")
+    parser.add_argument("--include-exec-config", action="store_true",
+                        help="also replay exec-configuration (host tool) "
+                        "spawns, skipped by default")
     parser.add_argument("--dry-run", action="store_true",
                         help="print replay commands without running them")
     args = parser.parse_args(argv)
@@ -302,13 +426,16 @@ def main(argv=None):
         else set(DEFAULT_IOS_MNEMONICS) | set(args.mnemonic)
     spawns = load_spawns(args.log)
     if args.dry_run:
-        replayable, skipped = select_spawns(spawns, mnemonics)
+        replayable, skipped = select_spawns(
+            spawns, mnemonics,
+            include_exec_config=args.include_exec_config)
         for spawn in replayable:
             print("$ %s" % " ".join(replay_argv(spawn)))
         print("replayable=%d skipped=%s" % (len(replayable), skipped))
         return 0
     report = replay_all(spawns, mnemonics, args.execroot, args.timeout,
-                        budget_seconds=args.budget_seconds)
+                        budget_seconds=args.budget_seconds,
+                        include_exec_config=args.include_exec_config)
     with open(args.out, "w", encoding="utf-8", newline="\n") as fh:
         fh.write(json.dumps(report, indent=2, sort_keys=True) + "\n")
     print("replayed=%d skipped=%s" % (report["n_replayed"],

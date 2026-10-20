@@ -20,6 +20,13 @@ Dart lines of code (``target_loc``), mirroring the manager referee's
   App.framework target + simulator build test). This bench measures iOS only,
   so unlike the referee generator there is no Android app and no
   ``flutter_test`` targets unless ``--test-ratio`` asks for them.
+- Reachability (generator v2): each package entry calls its direct
+  dependencies' entries and every own file's functions (including the
+  value functions the bench edits) and constructs every own file's
+  widget; ``main`` calls every top-layer entry. Cross-package calls are
+  guarded by a probe main reads from a runtime source the compiler
+  cannot fold that is zero at run time, so AOT tree-shaking keeps the
+  whole program without running it.
 - An edit manifest (``bench-edit-manifest.json``) records the file the
   ``body_edit``/``api_edit`` scenarios edit, and a stats file
   (``bench-workspace-stats.json``) records the workspace statistics.
@@ -84,12 +91,45 @@ def file_rng(seed, package, file):
 # Package DAG.
 
 
+def repair_orphans(deps, layer_vecs, layer_count, seed):
+    """Attaches every unreachable package to a higher-layer dependent.
+
+    Generator v2 needs every package below the top layer reachable from
+    main through the DAG (each entry calls its dependencies' entries, main
+    calls the top layer). The seeded fanout above can leave a package with
+    no dependents; such an orphan gains one edge from a package in a
+    strictly higher layer, drawn from a fresh seeded stream so the main
+    fanout stream is undisturbed. Top-layer packages need no repair: main
+    calls them all directly. Edges stay sorted, unique, and downward, so
+    the graph remains an acyclic layered DAG.
+    """
+    if layer_count < 2:
+        return
+    fan_in = [0] * len(deps)
+    for edges in deps:
+        for d in edges:
+            fan_in[d] += 1
+    rng = SplitMix64((seed ^ 0x0B971E) & MASK64)
+    for layer in range(layer_count - 1):
+        higher = [q for upper in layer_vecs[layer + 1:] for q in upper]
+        for pkg in layer_vecs[layer]:
+            if fan_in[pkg] > 0:
+                continue
+            dependent = higher[rng.below(len(higher))]
+            deps[dependent].append(pkg)
+            deps[dependent].sort()
+            fan_in[pkg] += 1
+
+
 def build_dag(n_packages, layers, fanout, seed):
     """Layered DAG: deps[p] holds the sorted direct deps of package p.
 
     Packages spread over min(layers, n_packages) layers (extras go to the top
     layers); each package above layer 0 depends on min(fanout, lower_count)
-    distinct packages from strictly lower layers.
+    distinct packages from strictly lower layers. A repair pass then gives
+    every package below the top layer at least one dependent (generator v2
+    reachability), adding the minimum edges to packages that fanout left
+    orphaned.
     """
     if n_packages < 1:
         raise ValueError("build_dag requires n_packages >= 1")
@@ -122,6 +162,8 @@ def build_dag(n_packages, layers, fanout, seed):
                 k = j + rng.below(len(candidates) - j)
                 candidates[j], candidates[k] = candidates[k], candidates[j]
             deps[pkg] = sorted(candidates[:want])
+
+    repair_orphans(deps, layer_vecs, layer_count, seed)
 
     return {"deps": deps, "layer_of": layer_of, "layers": layer_vecs}
 
@@ -405,21 +447,51 @@ def render_part_file(package, file, files_per_package):
     ) + "\n"
 
 
-def render_entrypoint(package, files_per_package):
+def render_entrypoint(package, files_per_package, deps):
+    """Package entry point: own files' functions plus dependencies' entries.
+
+    Calls every own file's helper and value functions (including the value
+    functions the bench edits) and constructs every own file's widget, all
+    unconditionally, so any body_edit in the package changes the AOT
+    program. Cross-package calls to the direct dependencies' entries are
+    guarded by [probe]: main passes a value from a runtime source the
+    compiler cannot fold that is zero at run time, so the whole transitive
+    closure stays reachable for AOT tree-shaking without running.
+    """
+    imports = [
+        "import 'package:pkg%d/src/f%s.dart';"
+        % (package, pad_file(files_per_package, f))
+        for f in range(files_per_package)
+    ]
+    imports.extend(
+        "import 'package:pkg%d/pkg%d.dart';" % (d, d) for d in deps
+    )
+    imports.sort()
     out = ["/// Public API of package pkg%d." % package]
-    for f in range(files_per_package):
-        out.append(
-            "import 'package:pkg%d/src/f%s.dart';"
-            % (package, pad_file(files_per_package, f))
-        )
+    out.extend(imports)
     for f in range(files_per_package):
         out.append("export 'src/f%s.dart';" % pad_file(files_per_package, f))
     out.append("")
     out.append("/// Entry point of package %d." % package)
-    out.append("int entry%d(int x) {" % package)
+    out.append("///")
+    out.append("/// Calls every own file's functions and — guarded by [probe]")
+    out.append("/// — the direct dependencies' entries.")
+    out.append("int entry%d(int x, int probe) {" % package)
     out.append("  var total = x;")
     for f in range(files_per_package):
         out.append("  total += fn%dx%d(x);" % (package, f))
+    for f in range(files_per_package):
+        out.append("  total += value%dx%d();" % (package, f))
+    for f in range(files_per_package):
+        widget = "W" if f % 2 == 0 else "S"
+        out.append(
+            "  total += const %s%dx%d(value: 1).value;" % (widget, package, f)
+        )
+    if deps:
+        out.append("  if (probe != 0) {")
+        for d in deps:
+            out.append("    total += entry%d(x, probe);" % d)
+        out.append("  }")
     out.append("  return total;")
     out.append("}")
     return "\n".join(out) + "\n"
@@ -448,7 +520,16 @@ def render_test_file(package):
 
 
 def render_app_main(top_layer):
-    """Application entrypoint wiring every top-layer feature package."""
+    """Application entrypoint wiring every top-layer feature package.
+
+    Builds every top-layer package's widget and calls every top-layer
+    package's entry point with a probe main reads from a runtime source
+    (`int.tryParse` on a non-numeric literal is always null here, so the
+    probe is zero at run time) the compiler cannot fold, keeping the
+    guarded cross-package calls reachable for AOT tree-shaking. The summed
+    entry results flow into a displayed string, so edited functions below
+    the top layer have a reachable use.
+    """
     out = ["import 'package:flutter/material.dart';"]
     dep_imports = sorted(
         "import 'package:pkg%d/pkg%d.dart';" % (a, a) for a in top_layer
@@ -457,6 +538,10 @@ def render_app_main(top_layer):
     out.append("")
     out.append("/// Bench application wiring the top-layer feature packages.")
     out.append("void main() {")
+    out.append("  final int probe = int.tryParse('probe') ?? 0;")
+    out.append("  var reach = 0;")
+    for a in top_layer:
+        out.append("  reach += entry%d(3, probe);" % a)
     out.append("  runApp(")
     out.append("    MaterialApp(")
     out.append("      home: Scaffold(")
@@ -466,6 +551,7 @@ def render_app_main(top_layer):
     out.append("            children: [")
     for a in top_layer:
         out.append("              W%dx0(value: value%dx0())," % (a, a))
+    out.append("              Text('reach: $reach'),")
     out.append("            ],")
     out.append("          ),")
     out.append("        ),")
@@ -566,7 +652,8 @@ def render_all_dart(opts, plan, render_one):
                 rel = "packages/pkg%d/lib/src/f%s.part.dart" % (
                     p, pad_file(opts.files_per_package, f))
                 render_one(rel, content)
-        content = render_entrypoint(p, opts.files_per_package)
+        content = render_entrypoint(
+            p, opts.files_per_package, plan.dag["deps"][p])
         lines += count_lines(content)
         render_one("packages/pkg%d/lib/pkg%d.dart" % (p, p), content)
         if plan.has_test[p]:
@@ -1025,6 +1112,10 @@ def generate_flutter_monorepo(out_dir, rules_flutter_dir, overrides, opts):
         "fan_out": fan_stats(fan_out),
         "files": tally["files"],
         "generator": "flutter-monorepo",
+        # Shape version: 2 = reachable program (entries call dep entries
+        # and own functions under an unfoldable guard, main calls top-layer
+        # entries). v1 numbers are never comparable with v2 numbers.
+        "generator_version": 2,
         "layers": opts.layers,
         "lines": tally["lines"],
         "packages": n,

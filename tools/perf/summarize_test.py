@@ -110,6 +110,42 @@ class CompareTest(unittest.TestCase):
         self.assertEqual(metrics["instructions"], [])
         self.assertFalse(metrics["instructions_complete"])
 
+    def test_skipped_counts_compared_and_rendered(self):
+        import summarize as summarize_mod
+        exe = [exe_summary(5, 100.0, 50.0, 0.5, {"Genrule": 2})]
+        rep = [dict(replay_report([10]),
+                    skipped_by_mnemonic={"host tools (not replayed)": 4,
+                                         "Genrule": 1})]
+        metrics = summarize_mod.scenario_metrics(exe, rep)
+        compared = summarize_mod.compare_metrics(metrics, metrics)
+        self.assertEqual(
+            compared["skipped"]["host tools (not replayed)"]["base"]
+            ["median"], 4)
+        md = summarize_mod.render_markdown({
+            "base_ref": "base", "head_ref": "head", "meta": {},
+            "configs": {"cfg": {"scenarios": {"clean": compared}}}})
+        self.assertIn("Not replayed", md)
+        self.assertIn("host tools (not replayed)", md)
+
+    def test_generator_version_mismatch_warns(self):
+        import summarize as summarize_mod
+        exe = [exe_summary(5, 100.0, 50.0, 0.5, {"Genrule": 2})]
+        rep = [replay_report([10])]
+        metrics = summarize_mod.scenario_metrics(exe, rep)
+        compared = summarize_mod.compare_metrics(metrics, metrics)
+        base = {"base_ref": "base", "head_ref": "head",
+                "meta": {"base_stats": {"generator_version": 1},
+                         "head_stats": {"generator_version": 2}},
+                "configs": {"cfg": {"scenarios": {"clean": compared}}}}
+        self.assertIn("not comparable",
+                      summarize_mod.render_markdown(base))
+        same = {"base_ref": "base", "head_ref": "head",
+                "meta": {"base_stats": {"generator_version": 2},
+                         "head_stats": {"generator_version": 2}},
+                "configs": {"cfg": {"scenarios": {"clean": compared}}}}
+        self.assertNotIn("not comparable",
+                         summarize_mod.render_markdown(same))
+
 
 class TreeTest(unittest.TestCase):
     def setUp(self):
