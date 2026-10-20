@@ -1,12 +1,17 @@
 # Manual-only iOS build-cost bench (free macOS runners, no caches).
 #
 # Compares two rules_flutter commits (base_ref vs head_ref) on a generated
-# layered Flutter monorepo with iOS app targets: for each ref it clean-builds
-# the iOS app, then rebuilds after a behaviour-changing top-layer app edit
+# layered Flutter monorepo in two configurations: device_release (the
+# App.framework only, //app:app_framework, -c opt --ios_multi_cpus=arm64;
+# no ios_application, so no signing or provisioning profile) and sim_debug
+# (the full simulator app, //app:app_ios, -c dbg --ios_multi_cpus=sim_arm64;
+# the simulator runs debug builds only). For each ref and config it
+# clean-builds, then rebuilds after a behaviour-changing top-layer app edit
 # and after a core body edit (layer 0). Every build records executed action
 # counts by mnemonic and action CPU time from the Bazel execution log; every
 # iOS-only action is replayed under /usr/bin/time -l for instructions
-# retired. Each scenario repeats and the summary reports medians + spread.
+# retired. Each scenario repeats and the summary reports medians + spread
+# per config.
 #
 # Cost: workflow_dispatch only (never automatic), macos-15, 5 h job timeout,
 # one small artifact (retention 3 days), no caches, build outputs never
@@ -67,34 +72,40 @@ jobs:
               --out "$RUNNER_TEMP/ws-$ref-pristine"
           done
       - name: Build, edit, replay
-        # One repeat at a time: run_rep.py builds all three scenarios first
-        # (clean, app_edit, core_edit), then makes bazel-out writable and
-        # replays the three execution logs, then shuts down. Replays never
-        # run before a build in the same output base, so replayed outputs
-        # cannot perturb the next incremental build.
+        # One repeat at a time: run_rep.py resets the workspace from the
+        # pristine copy before each config, then per config builds all three
+        # scenarios first (clean, app_edit, core_edit), makes bazel-out
+        # writable and replays the three execution logs, then shuts down.
+        # Each config gets its own output base under the per-repeat root
+        # (no shared server between configs). Replays never run before a
+        # build in the same output base, so replayed outputs cannot perturb
+        # the next incremental build.
         run: |
           set -euo pipefail
           tools="$GITHUB_WORKSPACE/tools-src/tools/perf"
           for ref in base head; do
             for rep in $(seq 1 "${{ inputs.repeats }}"); do
-              work="$RUNNER_TEMP/run-$ref-$rep"
-              rm -rf "$work" "$RUNNER_TEMP/out-$ref-$rep"
-              cp -R "$RUNNER_TEMP/ws-$ref-pristine" "$work"
-              python3 "$tools/run_rep.py" --tools "$tools" --work "$work" \
+              rm -rf "$RUNNER_TEMP/out-$ref-$rep" "$RUNNER_TEMP/run-$ref-$rep"
+              python3 "$tools/run_rep.py" --tools "$tools" \
+                --pristine "$RUNNER_TEMP/ws-$ref-pristine" \
+                --work "$RUNNER_TEMP/run-$ref-$rep" \
                 --out-base "$RUNNER_TEMP/out-$ref-$rep" \
                 --results-ref-dir "$GITHUB_WORKSPACE/results/$ref" \
-                --rep "$rep"
+                --rep "$rep" \
+                --config device_release --config sim_debug
             done
           done
       - name: Summarize repeats
         run: |
           set -euo pipefail
           tools="$GITHUB_WORKSPACE/tools-src/tools/perf"
-          meta="$(python3 - "$RUNNER_TEMP" "${{ inputs.target_loc }}" "${{ inputs.seed }}" \
+          meta="$(python3 - "$GITHUB_WORKSPACE/tools-src/tools/perf" "$RUNNER_TEMP" "${{ inputs.target_loc }}" "${{ inputs.seed }}" \
             "${{ inputs.repeats }}" "${{ inputs.base_ref }}" "${{ inputs.head_ref }}" <<'EOF'
           import json
           import sys
-          tmp, loc, seed, repeats, base_ref, head_ref = sys.argv[1:7]
+          sys.path.insert(0, sys.argv[1])
+          import run_rep
+          _, tmp, loc, seed, repeats, base_ref, head_ref = sys.argv[1:8]
           def stats(ref):
               with open("%s/ws-%s-pristine/bench-workspace-stats.json" % (tmp, ref)) as fh:
                   return json.load(fh)
@@ -104,6 +115,7 @@ jobs:
               "target_loc": int(loc),
               "seed": int(seed),
               "repeats": int(repeats),
+              "configs": run_rep.CONFIGS,
               "base_stats": stats("base"),
               "head_stats": stats("head"),
           }))
