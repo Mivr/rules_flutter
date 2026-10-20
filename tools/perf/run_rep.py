@@ -1,21 +1,37 @@
 #!/usr/bin/env python3
 """One bench repeat for the iOS perf workflow: builds, then replays.
 
-Ordering is the point. Per repeat, with a fresh workspace copy and a fresh
-output base, this driver runs all three scenario builds first (clean, then
-the top-layer app edit, then the layer-0 core edit, keeping each scenario's
-execution log), then makes the execroot's bazel-out user-writable (replays
-re-run actions in place and must not fail on read-only outputs), then
-summarizes and replays all three logs, then shuts the server down. No Bazel
-build follows a replay in the same output base, so a replay can never
-perturb the next incremental build's action cache.
+Ordering is the point. Per repeat, for each requested bench configuration,
+this driver resets the workspace from a pristine copy, runs all three
+scenario builds first (clean, then the top-layer app edit, then the layer-0
+core edit, keeping each scenario's execution log), then makes the execroot's
+bazel-out user-writable (replays re-run actions in place and must not fail
+on read-only outputs), then summarizes and replays all three logs, then
+shuts the server down. No Bazel build follows a replay in the same output
+base, so a replay can never perturb the next incremental build's action
+cache.
 
-Results land in <results-ref-dir>/<scenario>/rep<N>/{execlog.json,
-replay.json}, the layout summarize.py reads.
+Configurations (fixed table ``CONFIGS``):
+
+- ``device_release``: the Flutter iOS framework only
+  (``//app:app_framework``, an explicit public ``flutter_ios_framework_gen``
+  target: AOT gen_snapshot for arm64 plus App.framework assembly, no
+  ``ios_application`` and therefore no signing or provisioning profile),
+  built with ``-c opt --ios_multi_cpus=arm64``.
+- ``sim_debug``: the full simulator app (``//app:app_ios``, the developer
+  inner loop), built with ``-c dbg --ios_multi_cpus=sim_arm64``. The
+  simulator runs debug builds only, and simulator bundles need no
+  provisioning profile.
+
+Each configuration gets its own output base under the given root (no
+shared server between configs). Results land in
+<results-ref-dir>/<config>/<scenario>/rep<N>/{execlog.json, replay.json},
+the layout summarize.py reads.
 """
 
 import argparse
 import os
+import shutil
 import stat
 import subprocess
 import sys
@@ -26,7 +42,17 @@ SCENARIOS = [
     ("core_edit", "apply-body-edit"),
 ]
 
-DEFAULT_TARGET = "//app:app_ios"
+CONFIGS = {
+    "device_release": {
+        "target": "//app:app_framework",
+        "build_flags": ["-c", "opt", "--ios_multi_cpus=arm64"],
+    },
+    "sim_debug": {
+        "target": "//app:app_ios",
+        "build_flags": ["-c", "dbg", "--ios_multi_cpus=sim_arm64"],
+    },
+}
+CONFIG_ORDER = ["device_release", "sim_debug"]
 
 
 def real_run(argv, cwd=None, capture_output=False):
@@ -41,11 +67,18 @@ def real_run(argv, cwd=None, capture_output=False):
     )
 
 
-def bazel_build(run, work, out_base, target, log_path):
+def reset_work(pristine, work):
+    """Replaces work with a fresh copy of the pristine workspace."""
+    shutil.rmtree(work, ignore_errors=True)
+    shutil.copytree(pristine, work, symlinks=True)
+
+
+def bazel_build(run, work, out_base, target, build_flags, log_path):
     proc = run(
-        ["bazel", "--output_base=" + out_base, "build", target,
-         "--execution_log_json_file=" + log_path,
-         "--materialize_param_files"],
+        ["bazel", "--output_base=" + out_base, "build"] + list(build_flags)
+        + [target,
+             "--execution_log_json_file=" + log_path,
+             "--materialize_param_files"],
         cwd=work)
     if proc.returncode != 0:
         raise RuntimeError("bazel build %s failed (exit %s)"
@@ -120,10 +153,11 @@ def shutdown(run, work, out_base):
     return proc
 
 
-def run_rep(tools_dir, work, out_base, results_ref_dir, rep,
-            target=DEFAULT_TARGET, replay_timeout=600.0,
-            replay_budget=1800.0, run=None, chmod=None):
-    """Runs one full repeat: three builds, chmod, three replay passes."""
+def run_config(tools_dir, work, out_base, results_ref_dir, rep, config,
+               replay_timeout=600.0, replay_budget=1800.0, run=None,
+               chmod=None):
+    """Runs one configuration: three builds, chmod, three replay passes."""
+    spec = CONFIGS[config]
     run = run or real_run
     chmod = chmod or make_writable_tree
     logs = {}
@@ -131,13 +165,15 @@ def run_rep(tools_dir, work, out_base, results_ref_dir, rep,
         if edit_command is not None:
             apply_edit(run, tools_dir, work, edit_command)
         log_path = os.path.join(work, "execlog-%s.json" % scenario)
-        bazel_build(run, work, out_base, target, log_path)
+        bazel_build(run, work, out_base, spec["target"],
+                    spec["build_flags"], log_path)
         logs[scenario] = log_path
     execroot = get_execroot(run, work, out_base)
     bazel_out = os.path.join(execroot, "bazel-out")
     made_writable = chmod(bazel_out) if os.path.isdir(bazel_out) else 0
     for scenario, _ in SCENARIOS:
-        rep_dir = os.path.join(results_ref_dir, scenario, "rep%d" % rep)
+        rep_dir = os.path.join(results_ref_dir, config, scenario,
+                               "rep%d" % rep)
         os.makedirs(rep_dir, exist_ok=True)
         summarize_log(run, tools_dir, logs[scenario],
                       os.path.join(rep_dir, "execlog.json"))
@@ -149,24 +185,58 @@ def run_rep(tools_dir, work, out_base, results_ref_dir, rep,
             "made_writable": made_writable}
 
 
+def run_rep(tools_dir, pristine, work, out_base_root, results_ref_dir, rep,
+            configs=None, replay_timeout=600.0, replay_budget=1800.0,
+            run=None, chmod=None, reset=None):
+    """Runs one full repeat over configs, each with a fresh work copy.
+
+    The workspace is reset from pristine before every config so edits
+    applied by an earlier config can never leak into a later config's
+    clean build. Output bases are <root>/<config>: no shared server
+    between configs.
+    """
+    configs = list(configs) if configs else list(CONFIG_ORDER)
+    unknown = [c for c in configs if c not in CONFIGS]
+    if unknown:
+        raise ValueError("unknown config(s): %s" % ", ".join(unknown))
+    reset = reset or reset_work
+    records = {}
+    for config in configs:
+        reset(pristine, work)
+        records[config] = run_config(
+            tools_dir, work, os.path.join(out_base_root, config),
+            results_ref_dir, rep, config,
+            replay_timeout=replay_timeout, replay_budget=replay_budget,
+            run=run, chmod=chmod)
+    return records
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(
         description="Run one iOS bench repeat (builds first, replays last).")
     parser.add_argument("--tools", required=True)
-    parser.add_argument("--work", required=True)
-    parser.add_argument("--out-base", required=True)
+    parser.add_argument("--pristine", required=True,
+                        help="pristine generated workspace to copy per config")
+    parser.add_argument("--work", required=True,
+                        help="scratch workspace dir (reset per config)")
+    parser.add_argument("--out-base", required=True,
+                        help="output base root; per-config base is <root>/<config>")
     parser.add_argument("--results-ref-dir", required=True)
     parser.add_argument("--rep", type=int, required=True)
-    parser.add_argument("--target", default=DEFAULT_TARGET)
+    parser.add_argument("--config", action="append", default=[],
+                        choices=sorted(CONFIGS),
+                        help="repeatable; default is all configs in order")
     parser.add_argument("--replay-timeout", type=float, default=600.0)
     parser.add_argument("--replay-budget", type=float, default=1800.0)
     args = parser.parse_args(argv)
-    record = run_rep(args.tools, args.work, args.out_base,
-                     args.results_ref_dir, args.rep, target=args.target,
-                     replay_timeout=args.replay_timeout,
-                     replay_budget=args.replay_budget)
-    print("rep=%d execroot=%s made_writable=%d"
-          % (args.rep, record["execroot"], record["made_writable"]))
+    records = run_rep(args.tools, args.pristine, args.work, args.out_base,
+                      args.results_ref_dir, args.rep, configs=args.config,
+                      replay_timeout=args.replay_timeout,
+                      replay_budget=args.replay_budget)
+    for config, record in records.items():
+        print("config=%s rep=%d execroot=%s made_writable=%d"
+              % (config, args.rep, record["execroot"],
+                 record["made_writable"]))
     return 0
 
 

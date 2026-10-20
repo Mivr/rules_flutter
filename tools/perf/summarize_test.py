@@ -110,8 +110,9 @@ class TreeTest(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.tmp, ignore_errors=True)
 
-    def write_rep(self, ref, scenario, rep, wall, instr):
-        rep_dir = os.path.join(self.tmp, ref, scenario, "rep%d" % rep)
+    def write_rep(self, ref, config, scenario, rep, wall, instr):
+        rep_dir = os.path.join(self.tmp, ref, config, scenario,
+                               "rep%d" % rep)
         os.makedirs(rep_dir)
         with open(os.path.join(rep_dir, "execlog.json"), "w",
                   encoding="utf-8", newline="\n") as fh:
@@ -124,30 +125,37 @@ class TreeTest(unittest.TestCase):
     def test_build_summary_end_to_end(self):
         for rep, (wall, instr) in enumerate(
                 [(100.0, 1000), (110.0, 1100), (105.0, 1050)]):
-            self.write_rep("base", "clean", rep, wall, instr)
+            self.write_rep("base", "sim_debug", "clean", rep, wall, instr)
         for rep, (wall, instr) in enumerate(
                 [(200.0, 2000), (210.0, 2100), (205.0, 2050)]):
-            self.write_rep("head", "clean", rep, wall, instr)
+            self.write_rep("head", "sim_debug", "clean", rep, wall, instr)
+        self.write_rep("base", "device_release", "clean", 0, 50.0, 500)
+        self.write_rep("head", "device_release", "clean", 0, 60.0, 600)
         summary = build_summary(self.tmp, "base", "head",
                                 {"target_loc": 500000})
-        self.assertEqual(sorted(summary["scenarios"]), ["clean"])
-        clean = summary["scenarios"]["clean"]
+        self.assertEqual(sorted(summary["configs"]),
+                         ["device_release", "sim_debug"])
+        scenarios = summary["configs"]["sim_debug"]["scenarios"]
+        self.assertEqual(sorted(scenarios), ["clean"])
+        clean = scenarios["clean"]
         self.assertEqual(clean["wall_s"]["base"]["median"], 105.0)
         self.assertEqual(clean["wall_s"]["head"]["median"], 205.0)
         self.assertEqual(clean["instructions"]["base"]["median"], 1050)
         md = render_markdown(summary)
-        self.assertIn("## clean", md)
+        self.assertIn("## sim_debug / clean", md)
+        self.assertIn("## device_release / clean", md)
         self.assertIn("wall_s", md)
         self.assertIn("FlutterAotMacho", md)
 
     def test_missing_ref_is_error(self):
-        self.write_rep("base", "clean", 0, 100.0, 1000)
+        self.write_rep("base", "sim_debug", "clean", 0, 100.0, 1000)
         summary = build_summary(self.tmp, "base", "head", {})
-        self.assertIn("error", summary["scenarios"]["clean"])
+        scenarios = summary["configs"]["sim_debug"]["scenarios"]
+        self.assertIn("error", scenarios["clean"])
 
     def test_repeats_one_states_no_spread(self):
-        self.write_rep("base", "clean", 0, 100.0, 1000)
-        self.write_rep("head", "clean", 0, 200.0, 2000)
+        self.write_rep("base", "sim_debug", "clean", 0, 100.0, 1000)
+        self.write_rep("head", "sim_debug", "clean", 0, 200.0, 2000)
         summary = build_summary(self.tmp, "base", "head", {})
         md = render_markdown(summary)
         self.assertIn("repeats=1", md)
@@ -171,7 +179,7 @@ class TreeTest(unittest.TestCase):
             2)
         md = summarize_mod.render_markdown({
             "base_ref": "base", "head_ref": "head", "meta": {},
-            "scenarios": {"clean": compared}})
+            "configs": {"sim_debug": {"scenarios": {"clean": compared}}}})
         self.assertIn("time budget", md)
         self.assertIn("Replay failures", md)
         self.assertIn("FlutterAotMacho", md)

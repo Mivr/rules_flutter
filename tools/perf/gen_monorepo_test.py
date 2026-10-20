@@ -239,8 +239,10 @@ class GenerationTest(unittest.TestCase):
                   encoding="utf-8") as fh:
             app_build = fh.read()
         for target in ["flutter_application", "flutter_ios_app",
+                       "flutter_ios_framework_gen",
                        "flutter_ios_simulator_build_test"]:
             self.assertIn(target, app_build)
+        self.assertIn("name = \"app_framework\"", app_build)
         self.assertNotIn("android", app_build.lower())
 
     def test_options_validation(self):

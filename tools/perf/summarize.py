@@ -3,11 +3,12 @@
 
 Reads a results tree laid out by the perf-ios workflow::
 
-    <results>/<ref>/<scenario>/rep<k>/{execlog.json,replay.json}
+    <results>/<ref>/<config>/<scenario>/rep<k>/{execlog.json,replay.json}
 
 where ``execlog.json`` is :mod:`execlog` output and ``replay.json`` is
-:mod:`replay` output. For every scenario and metric it reports the median
-and spread (min/max) over repeats, per ref, plus the head-vs-base delta.
+:mod:`replay` output. For every config, scenario and metric it reports the
+median and spread (min/max) over repeats, per ref, plus the head-vs-base
+delta.
 """
 
 import argparse
@@ -128,10 +129,10 @@ def compare_metrics(base_m, head_m):
     return out
 
 
-def load_collection(results_dir, ref, scenario):
+def load_collection(results_dir, ref, config, scenario):
     exe_summaries = []
     replay_reports = []
-    scenario_dir = os.path.join(results_dir, ref, scenario)
+    scenario_dir = os.path.join(results_dir, ref, config, scenario)
     if not os.path.isdir(scenario_dir):
         return ([], [])
     for rep in sorted(os.listdir(scenario_dir)):
@@ -147,29 +148,45 @@ def load_collection(results_dir, ref, scenario):
     return (exe_summaries, replay_reports)
 
 
+def discover_configs(results_dir, ref):
+    ref_dir = os.path.join(results_dir, ref)
+    if not os.path.isdir(ref_dir):
+        return []
+    return sorted(
+        d for d in os.listdir(ref_dir)
+        if os.path.isdir(os.path.join(ref_dir, d)))
+
+
 def build_summary(results_dir, base_ref, head_ref, meta):
-    scenarios = []
-    for ref in [base_ref, head_ref]:
-        ref_dir = os.path.join(results_dir, ref)
-        if os.path.isdir(ref_dir):
-            scenarios.extend(
-                d for d in os.listdir(ref_dir)
-                if os.path.isdir(os.path.join(ref_dir, d)))
+    configs = sorted(set(discover_configs(results_dir, base_ref))
+                     | set(discover_configs(results_dir, head_ref)))
     summary = {
         "base_ref": base_ref,
         "head_ref": head_ref,
         "meta": meta,
-        "scenarios": {},
+        "configs": {},
     }
-    for scenario in sorted(set(scenarios)):
-        base_exe, base_replay = load_collection(results_dir, base_ref, scenario)
-        head_exe, head_replay = load_collection(results_dir, head_ref, scenario)
-        if not base_exe or not head_exe:
-            summary["scenarios"][scenario] = {"error": "missing repeats"}
-            continue
-        summary["scenarios"][scenario] = compare_metrics(
-            scenario_metrics(base_exe, base_replay),
-            scenario_metrics(head_exe, head_replay))
+    for config in configs:
+        scenarios = []
+        for ref in [base_ref, head_ref]:
+            config_dir = os.path.join(results_dir, ref, config)
+            if os.path.isdir(config_dir):
+                scenarios.extend(
+                    d for d in os.listdir(config_dir)
+                    if os.path.isdir(os.path.join(config_dir, d)))
+        compared = {}
+        for scenario in sorted(set(scenarios)):
+            base_exe, base_replay = load_collection(
+                results_dir, base_ref, config, scenario)
+            head_exe, head_replay = load_collection(
+                results_dir, head_ref, config, scenario)
+            if not base_exe or not head_exe:
+                compared[scenario] = {"error": "missing repeats"}
+                continue
+            compared[scenario] = compare_metrics(
+                scenario_metrics(base_exe, base_replay),
+                scenario_metrics(head_exe, head_replay))
+        summary["configs"][config] = {"scenarios": compared}
     return summary
 
 
@@ -199,10 +216,12 @@ def render_markdown(summary):
     lines.append("Medians over repeats; spread is [min, max]. "
                  "Delta is head-vs-base on the medians.")
     lines.append("")
-    for scenario in sorted(summary["scenarios"]):
-        lines.append("## %s" % scenario)
-        lines.append("")
-        entry = summary["scenarios"][scenario]
+    for config in sorted(summary["configs"]):
+        config_entry = summary["configs"][config]
+        for scenario in sorted(config_entry["scenarios"]):
+            lines.append("## %s / %s" % (config, scenario))
+            lines.append("")
+            entry = config_entry["scenarios"][scenario]
         if "error" in entry:
             lines.append("error: %s" % entry["error"])
             lines.append("")
@@ -282,7 +301,7 @@ def main(argv=None):
         fh.write(json.dumps(summary, indent=2, sort_keys=True) + "\n")
     with open(args.out_md, "w", encoding="utf-8", newline="\n") as fh:
         fh.write(render_markdown(summary))
-    print("scenarios=%s" % sorted(summary["scenarios"]))
+    print("configs=%s" % sorted(summary["configs"]))
     return 0
 
 

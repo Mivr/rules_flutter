@@ -88,6 +88,15 @@ class SelectTest(unittest.TestCase):
         self.assertIn("FlutterIOSNativeAssetFramework",
                       DEFAULT_IOS_MNEMONICS)
 
+    def test_framework_assemble_mnemonics_in_default(self):
+        # Every action the App.framework assembly emits
+        # (flutter_ios_application.bzl) must replay by default: release
+        # uses RetagDylib/CopyAssets, debug uses StubDylib/DebugAssets.
+        for mnemonic in ["FlutterAotMacho", "FlutterIOSRetagDylib",
+                         "FlutterIOSCopyAssets", "FlutterIOSStubDylib",
+                         "FlutterIOSDebugAssets"]:
+            self.assertIn(mnemonic, DEFAULT_IOS_MNEMONICS)
+
 
 class ReplayHelpersTest(unittest.TestCase):
     def test_argv_prefixes_time(self):

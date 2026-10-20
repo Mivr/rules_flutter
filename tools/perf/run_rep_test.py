@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Unit tests for run_rep.py (ordering: builds first, replays last)."""
+"""Unit tests for run_rep.py (configs, ordering: builds first, replays last)."""
 
 import json
 import os
@@ -12,7 +12,7 @@ import unittest
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import run_rep
-from run_rep import make_writable_tree, run_rep
+from run_rep import CONFIGS, make_writable_tree, run_rep
 
 
 class Proc:
@@ -30,10 +30,11 @@ class FakeRun:
 
     def __call__(self, argv, cwd=None, capture_output=False):
         self.calls.append(list(argv))
-        if argv[:2] == ["bazel", "--output_base=/fake/out"]:
-            if argv[2:4] == ["info", "execution_root"]:
-                return Proc(stdout=self.execroot + "\n")
-            return Proc()
+        if argv[0] == "bazel" and argv[2:4] == ["info", "execution_root"]:
+            # One execroot per output base.
+            base = argv[1].replace("--output_base=", "")
+            return Proc(stdout=os.path.join(
+                self.execroot, os.path.basename(base)) + "\n")
         if argv[0] == "bazel":
             return Proc()
         # Tool invocations: pretend to write their outputs.
@@ -69,63 +70,160 @@ class FakeRun:
         return kinds
 
 
+class ConfigTableTest(unittest.TestCase):
+    def test_two_configs_with_targets_and_flags(self):
+        self.assertEqual(
+            CONFIGS["device_release"]["target"], "//app:app_framework")
+        self.assertEqual(
+            CONFIGS["sim_debug"]["target"], "//app:app_ios")
+        device_flags = CONFIGS["device_release"]["build_flags"]
+        sim_flags = CONFIGS["sim_debug"]["build_flags"]
+        # Device framework builds AOT release; the simulator runs debug
+        # builds only (flutter_ios_application.bzl refuses anything else).
+        self.assertIn("opt", " ".join(device_flags))
+        self.assertIn("--ios_multi_cpus=arm64", device_flags)
+        self.assertIn("dbg", " ".join(sim_flags))
+        self.assertIn("--ios_multi_cpus=sim_arm64", sim_flags)
+
+    def test_unknown_config_rejected(self):
+        with self.assertRaises(ValueError):
+            run_rep("/tools", "/pristine", "/work", "/out", "/dest", 1,
+                    configs=["nope"], run=FakeRun(),
+                    chmod=lambda path: 0,
+                    reset=lambda pristine, work: None)
+
+
 class OrderingTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp(prefix="run-rep-test-")
+        self.pristine = os.path.join(self.tmp, "pristine")
         self.work = os.path.join(self.tmp, "work")
         self.dest = os.path.join(self.tmp, "results", "base")
-        os.makedirs(self.work)
+        os.makedirs(self.pristine)
+        with open(os.path.join(self.pristine, "marker.txt"), "w",
+                  encoding="utf-8") as fh:
+            fh.write("pristine\n")
         self.execroot = os.path.join(self.tmp, "execroot")
-        os.makedirs(os.path.join(self.execroot, "bazel-out"))
+        for config in CONFIGS:
+            os.makedirs(os.path.join(
+                self.execroot, config, "bazel-out"))
         self.chmods = []
+        self.resets = []
 
     def tearDown(self):
         shutil.rmtree(self.tmp, ignore_errors=True)
 
-    def drive(self):
-        fake = FakeRun(execroot=self.execroot)
-        record = run_rep(
-            "/tools", self.work, "/fake/out", self.dest, 2,
-            run=fake, chmod=lambda path: self.chmods.append(path) or 0)
-        return (fake, record)
+    def fake_execroot(self, out_base):
+        return os.path.join(
+            self.execroot, os.path.basename(out_base))
+
+    def drive(self, **kwargs):
+        kwargs.setdefault("run", FakeRun(execroot=self.execroot))
+
+        def chmod(path):
+            self.chmods.append(path)
+            return 0
+
+        def reset(pristine, work):
+            self.resets.append((pristine, work))
+            shutil.rmtree(work, ignore_errors=True)
+            shutil.copytree(pristine, work, symlinks=True)
+
+        kwargs.setdefault("chmod", chmod)
+        kwargs.setdefault("reset", reset)
+        records = run_rep(
+            "/tools", self.pristine, self.work, "/fake/out", self.dest, 2,
+            **kwargs)
+        return (kwargs["run"], records)
 
     def test_builds_before_replays_and_shutdown_last(self):
-        fake, record = self.drive()
+        fake, records = self.drive()
         kinds = fake.kinds()
-        self.assertEqual(kinds.count("build"), 3)
-        self.assertEqual(kinds.count("replay"), 3)
-        self.assertEqual(kinds[-1], "shutdown")
-        first_replay = kinds.index("replay")
-        self.assertNotIn("build", kinds[first_replay:])
-        self.assertNotIn("shutdown", kinds[:first_replay])
-        # Edit order: clean builds unedited, app edit before 2nd build,
-        # body edit before 3rd build.
-        self.assertEqual(kinds[:2], ["build", "edit"])
-        self.assertEqual(record["execroot"], self.execroot)
-        self.assertEqual(sorted(record["logs"]),
-                         ["app_edit", "clean", "core_edit"])
+        # Two configs x three scenarios.
+        self.assertEqual(kinds.count("build"), 6)
+        self.assertEqual(kinds.count("replay"), 6)
+        self.assertEqual(sorted(records), ["device_release", "sim_debug"])
+        for config, record in records.items():
+            self.assertEqual(sorted(record["logs"]),
+                             ["app_edit", "clean", "core_edit"])
+        # Per config, no build follows the first replay.
+        per_config = []
+        current = []
+        for argv, kind in zip(fake.calls, kinds):
+            current.append(kind)
+            if kind == "shutdown":
+                per_config.append(current)
+                current = []
+        self.assertEqual(len(per_config), 2)
+        for kinds_one in per_config:
+            self.assertEqual(kinds_one[-1], "shutdown")
+            first_replay = kinds_one.index("replay")
+            self.assertNotIn("build", kinds_one[first_replay:])
+            self.assertNotIn("shutdown", kinds_one[:first_replay])
+            self.assertEqual(kinds_one[:2], ["build", "edit"])
 
-    def test_chmod_between_last_build_and_first_replay(self):
-        fake, _ = self.drive()
-        kinds = fake.kinds()
-        last_build = len(kinds) - 1 - kinds[::-1].index("build")
-        first_replay = kinds.index("replay")
-        self.assertLess(last_build, first_replay)
-        self.assertEqual(self.chmods,
-                         [self.execroot + "/bazel-out"])
-
-    def test_results_layout(self):
+    def test_work_reset_per_config(self):
         self.drive()
-        for scenario in ["clean", "app_edit", "core_edit"]:
-            for name in ["execlog.json", "replay.json"]:
-                path = os.path.join(self.dest, scenario, "rep2", name)
-                self.assertTrue(os.path.isfile(path), path)
+        self.assertEqual(
+            self.resets,
+            [(self.pristine, self.work)] * 2)
+        self.assertTrue(os.path.isfile(
+            os.path.join(self.work, "marker.txt")))
+
+    def test_separate_output_base_per_config(self):
+        fake, _ = self.drive()
+        bases = [argv[1].replace("--output_base=", "")
+                 for argv in fake.calls if argv[0] == "bazel"]
+        self.assertTrue(bases)
+        self.assertEqual(sorted(set(bases)),
+                         ["/fake/out/device_release",
+                          "/fake/out/sim_debug"])
+        # No shared server between configs: every config's builds,
+        # info and shutdown use its own base.
+        self.assertEqual(
+            self.chmods,
+            [os.path.join(self.execroot, "device_release", "bazel-out"),
+             os.path.join(self.execroot, "sim_debug", "bazel-out")])
+
+    def test_build_flags_reach_bazel(self):
+        fake, _ = self.drive()
+        builds = [argv for argv in fake.calls
+                  if argv[0] == "bazel" and "build" in argv]
+        self.assertEqual(len(builds), 6)
+        for argv in builds:
+            if "//app:app_framework" in argv:
+                self.assertIn("-c", argv)
+                self.assertIn("opt", argv)
+                self.assertIn("--ios_multi_cpus=arm64", argv)
+            else:
+                self.assertIn("//app:app_ios", argv)
+                self.assertIn("dbg", argv)
+                self.assertIn("--ios_multi_cpus=sim_arm64", argv)
+
+    def test_results_layout_has_config(self):
+        self.drive()
+        for config in CONFIGS:
+            for scenario in ["clean", "app_edit", "core_edit"]:
+                for name in ["execlog.json", "replay.json"]:
+                    path = os.path.join(self.dest, config, scenario,
+                                        "rep2", name)
+                    self.assertTrue(os.path.isfile(path), path)
+
+    def test_config_subset(self):
+        fake, records = self.drive(configs=["sim_debug"])
+        self.assertEqual(sorted(records), ["sim_debug"])
+        builds = [argv for argv in fake.calls
+                  if argv[0] == "bazel" and "build" in argv]
+        self.assertEqual(len(builds), 3)
+        self.assertTrue(all("//app:app_ios" in argv for argv in builds))
 
     def test_replay_flags_forwarded(self):
         fake = FakeRun()
-        run_rep("/tools", self.work, "/fake/out", self.dest, 1,
+        run_rep("/tools", self.pristine, self.work, "/fake/out", self.dest,
+                1, configs=["device_release"],
                 replay_timeout=11.0, replay_budget=22.0,
-                run=fake, chmod=lambda path: 0)
+                run=fake, chmod=lambda path: 0,
+                reset=lambda pristine, work: None)
         replays = [c for c in fake.calls
                    if len(c) > 1 and "replay.py" in c[1]]
         self.assertEqual(len(replays), 3)
@@ -143,8 +241,9 @@ class OrderingTest(unittest.TestCase):
 
         fake = FailBuild()
         with self.assertRaises(RuntimeError):
-            run_rep("/tools", self.work, "/fake/out", self.dest, 1,
-                    run=fake, chmod=lambda path: 0)
+            run_rep("/tools", self.pristine, self.work, "/fake/out",
+                    self.dest, 1, run=fake, chmod=lambda path: 0,
+                    reset=lambda pristine, work: None)
         self.assertNotIn("replay", fake.kinds())
 
 

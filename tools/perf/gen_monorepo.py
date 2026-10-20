@@ -16,7 +16,8 @@ Dart lines of code (``target_loc``), mirroring the manager referee's
   The same inputs give a byte-identical tree.
 - One ``flutter_library`` per package plus an ``app/`` package with a
   ``flutter_application`` and the Tier-1 iOS app targets
-  (``flutter_ios_app`` + simulator build test). This bench measures iOS only,
+  (``flutter_ios_app`` + an explicit ``flutter_ios_framework_gen``
+  App.framework target + simulator build test). This bench measures iOS only,
   so unlike the referee generator there is no Android app and no
   ``flutter_test`` targets unless ``--test-ratio`` asks for them.
 - An edit manifest (``bench-edit-manifest.json``) records the file the
@@ -847,12 +848,17 @@ def write_app_build(out_dir, top_layer):
 
     flutter_ios_app tags every internal target "manual" itself, so iOS stays
     out of a Linux //... (the ios/Runner/ scaffold it discovers is copied
-    from the hello_world fixture). Four top-level targets.
+    from the hello_world fixture). Five top-level targets: the shared
+    flutter_application, its analyzer library, the full Tier-1 simulator/
+    device app, an explicit public App.framework target (Tier-2
+    flutter_ios_framework_gen over the same application, so the bench's
+    device_release config builds a stable public label instead of the
+    macro's private __app_ios_app_framework), and the simulator build test.
     """
     app_deps = "".join("        \"//packages/pkg%d\",\n" % a for a in top_layer)
     build = (
         "load(\"@rules_flutter//flutter:defs.bzl\", \"flutter_application\", \"flutter_library\")\n"
-        "load(\"@rules_flutter//flutter:ios.bzl\", \"flutter_ios_app\", \"flutter_ios_simulator_build_test\")\n"
+        "load(\"@rules_flutter//flutter:ios.bzl\", \"flutter_ios_app\", \"flutter_ios_framework_gen\", \"flutter_ios_simulator_build_test\")\n"
         "\n"
         "flutter_application(\n"
         "    name = \"app\",\n"
@@ -886,6 +892,14 @@ def write_app_build(out_dir, top_layer):
         "    bundle_id = \"com.example.bench\",\n"
         ")\n"
         "\n"
+        "# Explicit public App.framework target for the device_release bench\n"
+        "# config: AOT gen_snapshot for arm64 plus framework assembly, with no\n"
+        "# ios_application, so no signing and no provisioning profile.\n"
+        "flutter_ios_framework_gen(\n"
+        "    name = \"app_framework\",\n"
+        "    application = \":app\",\n"
+        ")\n"
+        "\n"
         "flutter_ios_simulator_build_test(\n"
         "    name = \"app_ios_sim\",\n"
         "    targets = [\":app_ios\"],\n"
@@ -893,7 +907,7 @@ def write_app_build(out_dir, top_layer):
         ")\n"
     )
     write_plain(out_dir, "app/BUILD.bazel", build)
-    return 4
+    return 5
 
 
 def write_scaffolding(out_dir, rules_flutter_dir, overrides, plan, tally):
