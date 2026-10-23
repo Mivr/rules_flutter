@@ -1089,6 +1089,30 @@ elif mode == "build":
             "exitCode": 0,
             "targetLabel": "//app:app_ios",
         }
+        if case == "prefail":
+            # A step fails before the bundling step runs: the bundle is
+            # moved aside and never re-created, so the after-chain read
+            # finds nothing. That is a flow verdict, not a config error.
+            inter = "bazel-out/x/intermediate.bin"
+            inter_dst = os.path.join(execroot, inter)
+            with open(inter_dst, "w", encoding="utf-8") as fh:
+                fh.write("intermediate")
+            fail = {
+                "commandArgs": ["sh", "-c", "exit 3"],
+                "environmentVariables": [],
+                "listedOutputs": [inter],
+                "actualOutputs": actual(inter, inter_dst),
+                "mnemonic": "SwiftStdlibCopy",
+                "exitCode": 0,
+                "targetLabel": "//app:app_ios",
+            }
+            bundle = dict(spawn)
+            bundle["inputs"] = {inter: {}}
+            bundle["mnemonic"] = "BundleApp"
+            with open(log, "w", encoding="utf-8") as fh:
+                fh.write(json.dumps(fail) + "\\n")
+                fh.write(json.dumps(bundle) + "\\n")
+            sys.exit(0)
     elif case == "dirfail":
         # The verify file lives inside a directory the step declares:
         # the step fails before recreating it (the round-3 restore
@@ -1363,6 +1387,44 @@ class SolEndToEndTest(unittest.TestCase):
                            "bazel-out", "x", "App.framework", "App")
         with open(dst, encoding="utf-8") as fh:
             self.assertTrue(fh.read().startswith("v1\nedit:apply-app-edit"))
+
+    def test_failed_step_before_bundle_is_flow_verdict(self):
+        # A step fails before the bundling step runs: the bundle is
+        # moved aside and never re-created, so the after-chain read
+        # finds nothing. The flow reports identical=false naming the
+        # failed step and the missing entries (no SOL number), Bazel's
+        # outputs are restored, and the run continues with the next
+        # scenario instead of failing the config.
+        out = os.path.join(self.tmp, "ios-sol.json")
+        env = dict(self.env, SOL_CASE="prefail")
+        with mock.patch.dict(os.environ, env):
+            self.assertEqual(sol.main(self.run_argv(["sim_debug"])), 0)
+            self.assertEqual(sol.main(self.summarize_argv(out)), 0)
+        with open(out, encoding="utf-8") as fh:
+            summary = json.load(fh)
+        for flow in ["ios-debug-clean", "ios-debug-app", "ios-debug-body"]:
+            entry = summary["flows"][flow]
+            self.assertFalse(entry["identical"], flow)
+            self.assertIsNone(entry["sol"], flow)
+            self.assertIn("SwiftStdlibCopy", entry["reason"], flow)
+            self.assertIn("exit 3", entry["reason"], flow)
+            self.assertIn("verify differ", entry["reason"], flow)
+            differ = entry["chain"]["verify_differ"]
+            self.assertEqual(differ["n"], 2, flow)
+            self.assertEqual(differ["differ"][0]["path"],
+                             "bazel-out/x/Bench.ipa::Payload/Bench.app/App",
+                             flow)
+            self.assertIsNone(differ["differ"][0]["after"], flow)
+        # Bazel's bundle is back with its own bytes for the next build.
+        dst = os.path.join(self.out_base, "sim_debug", "execroot",
+                           "bazel-out", "x", "Bench.ipa")
+        import zipfile
+        with zipfile.ZipFile(dst) as archive:
+            self.assertEqual(
+                sorted(archive.namelist()),
+                ["Payload/Bench.app/App",
+                 "Payload/Bench.app/Frameworks/App.framework/"
+                 "flutter_assets/kernel_blob.bin"])
 
     def test_directory_output_failure_restores_and_continues(self):
         out = os.path.join(self.tmp, "ios-sol.json")

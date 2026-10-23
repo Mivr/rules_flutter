@@ -738,12 +738,28 @@ def run_sol_scenario(args, config, scenario):
         exit_code = run_chain_proc(args, log_path, execroot, report_path)
         report = read_chain_report(report_path)
         drift = output_drift(chainable, execroot)
-        after = read_verify_snapshot(plan)
+        try:
+            after = read_verify_snapshot(plan)
+            read_error = None
+        except RuntimeError as exc:
+            # A missing or unreadable verify file or bundle after the
+            # chain is a flow verdict, not a config error: a step that
+            # failed before the final bundle was written leaves nothing
+            # to hash. The empty snapshot differs from every before
+            # entry, so the reason names the failed step and the missing
+            # file; the run continues with the next scenario. Only a
+            # fault in the tool itself escalates to a config error.
+            after = {}
+            read_error = str(exc)
     finally:
         swept = sweep_chain_side_effects(bazel_out, step_outputs,
                                          before_tree)
         restore_tree(aside)
     differ = verify_differences(before, after, execroot)
+    if read_error is not None and differ["n"] == 0:
+        differ = {"n": 1, "differ": [
+            {"path": "(unreadable verify set)", "before": None,
+             "after": read_error}]}
     chain = describe_chain(report, differ, drift)
     chain["side_effects_removed"] = swept
     failed = bool(chain["failed"]) or chain["status"] != "ok"
