@@ -350,14 +350,19 @@ ios_sim_debug_app(
 
 # Behavioral runtime test: launches the app on an iOS simulator and asserts the
 # bundled native-asset framework actually loaded (add(3, 4) == 7 at runtime).
-# "manual" — needs a usable simulator. Run:
+# "manual" — needs a usable simulator. `long` (with its `large` size): a cold
+# CI simulator boots for minutes, and every simctl phase inside carries its
+# own shorter deadline, so a hang fails naming its step long before Bazel
+# would kill the test. Run:
 #   bazel test :verify_ios_simulator_test --test_tag_filters=
 dart_test(
     name = "verify_ios_simulator_test",
     data = [":ffi_ios_sim_debug"],
     main = "test/verify_ios_simulator_test.dart",
+    size = "large",
     tags = ["manual"],
     target_compatible_with = ["@platforms//os:macos"],
+    timeout = "long",
 )
 
 # `manual`, so `bazel test //...` never gives it to the analysis aspect; this
