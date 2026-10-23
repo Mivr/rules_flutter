@@ -179,3 +179,14 @@ This workspace runs in CI on the macOS leg of `.github/workflows/full.yaml`
 test here, including the `verify_ios_*` bundle checks. The `ffi_example` iOS
 simulator runtime test runs beside it as an explicit step of the same job,
 since its `manual` tag keeps it out of `//...`.
+
+The release check (`verify_ios_release_framework_test`) proves a release
+build is what a release engineer ships: beside `:app_flutter` it builds
+`:app_flutter_release` — same sources, assets and deps, with `obfuscate`,
+`split_debug_info` and `tree_shake_icons` — for a physical iPhone (`-c opt`,
+`arm64`, reached through `ios_device_opt.bzl`), and inspects that device
+`App.framework` directly. No signing is needed. It parses the Mach-O header
+itself (arm64, iOS platform, AOT snapshot exports), asserts an un-obfuscated
+twin built beside it keeps the class name the release binary hides, and
+checks the `.symbols` file and the tree-shaken icon font against the debug
+simulator bundle.
