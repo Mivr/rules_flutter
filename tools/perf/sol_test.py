@@ -14,6 +14,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import sol
 from sol import (
+    app_dir_hashes,
     bazel_info,
     capture_bazel_output,
     chain_replayed,
@@ -23,11 +24,10 @@ from sol import (
     cpu_seconds,
     describe_chain,
     device_verify_files,
-    fallback_verify_files,
     flow_id,
     flow_reason,
     hashes_match,
-    kernel_beside,
+    ipa_entry_hashes,
     load_sol_records,
     measure_process_tree,
     measure_with_time,
@@ -35,17 +35,21 @@ from sol import (
     output_drift,
     path_depth,
     pick_unit,
+    plan_verify_snapshot,
     read_chain_report,
+    read_verify_snapshot,
     rep_sort_key,
     restore_tree,
     run_chain,
     select_sol_spawns,
     sha256_file,
+    sim_bundle_archives,
     sim_bundle_roots,
-    sim_verify_files,
     snapshot_hashes,
+    snapshot_tree,
     summarize_flow,
     summarize_sol,
+    sweep_chain_side_effects,
     verify_differences,
 )
 
@@ -261,6 +265,51 @@ class MoveAsideChainTest(unittest.TestCase):
                          ["/a", "/a/b", "/a/b/c"])
 
 
+class SweepSideEffectsTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="sol-sweep-")
+        self.bazel_out = os.path.join(self.tmp, "execroot", "bazel-out")
+        os.makedirs(os.path.join(self.bazel_out, "x"))
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+
+    def write(self, rel, data=b"x"):
+        path = os.path.join(self.bazel_out, rel)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "wb") as fh:
+            fh.write(data)
+        return path
+
+    def test_undeclared_sibling_removed_declared_kept(self):
+        # A step leaves an undeclared side-effect file next to its
+        # declared output: the sweep removes it, Bazel's own files and
+        # the declared outputs stay.
+        declared = self.write("x/App.framework.zip", b"declared")
+        self.write("x/Info.plist", b"bazel-own")
+        before = snapshot_tree(self.bazel_out)
+        side = self.write("x/App.framework/App", b"side-effect")
+        swept = sweep_chain_side_effects(self.bazel_out, [declared],
+                                         before)
+        self.assertEqual(swept["n"], 2)
+        self.assertIn("x/App.framework/App", swept["paths"])
+        self.assertIn("x/App.framework", swept["paths"])
+        self.assertFalse(os.path.lexists(side))
+        with open(declared, "rb") as fh:
+            self.assertEqual(fh.read(), b"declared")
+
+    def test_nothing_new_nothing_removed(self):
+        declared = self.write("x/o.zip")
+        before = snapshot_tree(self.bazel_out)
+        self.assertEqual(sweep_chain_side_effects(self.bazel_out,
+                                                 [declared], before),
+                         {"n": 0, "paths": []})
+
+    def test_missing_bazel_out_is_empty(self):
+        shutil.rmtree(self.bazel_out)
+        self.assertEqual(sweep_chain_side_effects(
+            self.bazel_out, ["/nowhere/o"], snapshot_tree(self.tmp)),
+            {"n": 0, "paths": []})
+
+
 class VerifyFilesTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp(prefix="sol-verify-")
@@ -298,31 +347,124 @@ class VerifyFilesTest(unittest.TestCase):
                   "/exec/bazel-out/x/bin/app/app.dill"]
         self.assertEqual(sim_bundle_roots(listed), [bundle])
 
-    def test_sim_finds_binary_and_kernel(self):
-        found = sim_verify_files([self.bundle])
-        self.assertEqual(len(found), 2)
-        self.assertTrue(found[0].endswith("App.framework/App"))
-        self.assertTrue(found[1].endswith("flutter_assets/kernel_blob.bin"))
+    def test_bundle_archives(self):
+        listed = ["/exec/bazel-out/x/Bench.ipa",
+                  "/exec/bazel-out/x/bin/app/app.dill"]
+        self.assertEqual(sim_bundle_archives(listed),
+                         ["/exec/bazel-out/x/Bench.ipa"])
+        self.assertEqual(sim_bundle_archives(["/exec/a.o"]), [])
 
-    def test_fallback_glob(self):
-        bazel_out = os.path.join(self.tmp, "bazel-out")
-        shutil.copytree(os.path.join(self.tmp, "out"), bazel_out)
-        fw_bin = os.path.join(
-            bazel_out, "Bench.app", "Frameworks", "App.framework", "App")
-        found = fallback_verify_files(self.tmp, "sim_debug")
-        self.assertIn(fw_bin, found)
-        self.assertTrue(any(p.endswith("kernel_blob.bin") for p in found))
-        device = fallback_verify_files(self.tmp, "device_release")
-        self.assertEqual(device, [fw_bin])
+    def write_ipa(self, path, stamp=(2020, 1, 1, 0, 0, 0)):
+        import zipfile
+        with zipfile.ZipFile(path, "w") as archive:
+            for entry in ("Payload/Bench.app/App",
+                          "Payload/Bench.app/flutter_assets/"
+                          "kernel_blob.bin"):
+                info = zipfile.ZipInfo(entry, date_time=stamp)
+                archive.writestr(info, b"bytes-for-" + entry.encode())
 
-    def test_kernel_beside(self):
-        binary = os.path.join(
-            self.bundle, "Frameworks", "App.framework", "App")
-        self.assertEqual(kernel_beside([binary]),
-                         [os.path.join(
-                             self.bundle, "Frameworks", "App.framework",
-                             "flutter_assets", "kernel_blob.bin")])
-        self.assertEqual(kernel_beside(["/nonexistent/App"]), [])
+    def test_ipa_payload_covers_kernel_and_binary(self):
+        ipa = os.path.join(self.tmp, "Bench.ipa")
+        self.write_ipa(ipa)
+        entries = ipa_entry_hashes(ipa)
+        self.assertEqual(sorted(entries),
+                         ["Payload/Bench.app/App",
+                          "Payload/Bench.app/flutter_assets/"
+                          "kernel_blob.bin"])
+        self.assertTrue(all(len(v) == 64 for v in entries.values()))
+
+    def test_ipa_metadata_only_matches(self):
+        # Same payload, different zip timestamps: archive bytes differ,
+        # but the proof (entry paths and contents) matches.
+        first = os.path.join(self.tmp, "first.ipa")
+        second = os.path.join(self.tmp, "second.ipa")
+        self.write_ipa(first, stamp=(2020, 1, 1, 0, 0, 0))
+        self.write_ipa(second, stamp=(2026, 5, 6, 7, 8, 0))
+        self.assertNotEqual(sha256_file(first), sha256_file(second))
+        self.assertEqual(ipa_entry_hashes(first),
+                         ipa_entry_hashes(second))
+
+    def test_ipa_payload_differs(self):
+        first = os.path.join(self.tmp, "first.ipa")
+        second = os.path.join(self.tmp, "second.ipa")
+        self.write_ipa(first)
+        import zipfile
+        with zipfile.ZipFile(second, "w") as archive:
+            archive.writestr("Payload/Bench.app/App", b"other-bytes")
+        self.assertNotEqual(ipa_entry_hashes(first),
+                            ipa_entry_hashes(second))
+
+    def test_ipa_unreadable_fails_closed(self):
+        bad = os.path.join(self.tmp, "bad.ipa")
+        with open(bad, "wb") as fh:
+            fh.write(b"not a zip")
+        with self.assertRaises(RuntimeError):
+            ipa_entry_hashes(bad)
+        with self.assertRaises(RuntimeError):
+            ipa_entry_hashes(os.path.join(self.tmp, "absent.ipa"))
+
+    def test_app_dir_covers_every_file(self):
+        found = app_dir_hashes(self.bundle)
+        self.assertIn("Frameworks/App.framework/App", found)
+        self.assertIn("Frameworks/App.framework/flutter_assets/"
+                      "kernel_blob.bin", found)
+        self.assertIn("Frameworks/App.framework/flutter_assets/"
+                      "AssetManifest.json", found)
+        self.assertIn("Frameworks/Other.framework/Other", found)
+
+    def test_app_dir_links_hashed(self):
+        inner = os.path.join(self.bundle, "Frameworks", "App.framework")
+        os.symlink(inner, os.path.join(self.bundle, "Current"))
+        alias = os.path.join(self.bundle, "App-alias")
+        os.symlink(os.path.join(inner, "App"), alias)
+        found = app_dir_hashes(self.bundle)
+        self.assertIn("Current", found)
+        self.assertEqual(found["App-alias"],
+                         found["Frameworks/App.framework/App"])
+        os.remove(os.path.join(inner, "App"))
+        dangling = app_dir_hashes(self.bundle)
+        self.assertIsNone(dangling["App-alias"])
+
+    def test_plan_rejects_bundle_less_listing(self):
+        # Declared outputs only, never a glob over bazel-out: a listing
+        # with no bundle fails loudly instead of globbing leftovers.
+        root = os.path.join(self.tmp, "execroot")
+        dill = os.path.join(root, "bazel-out", "x", "app.dill")
+        os.makedirs(os.path.dirname(dill))
+        with open(dill, "wb") as fh:
+            fh.write(b"dill")
+        capture = FakeCapture(root, ["bazel-out/x/app.dill"])
+        with self.assertRaisesRegex(RuntimeError, "no app bundle"):
+            plan_verify_snapshot(capture, self.tmp, self.tmp, root,
+                                 "sim_debug")
+
+    def test_plan_device_lists_framework_binary(self):
+        rel = ("bazel-out/x/bin/app/__app_framework_framework/"
+               "App.framework/App")
+        root = os.path.join(self.tmp, "execroot")
+        target = os.path.join(root, rel)
+        os.makedirs(os.path.dirname(target))
+        with open(target, "wb") as fh:
+            fh.write(b"app")
+        capture = FakeCapture(root, [rel])
+        plan = plan_verify_snapshot(capture, self.tmp, self.tmp, root,
+                                    "device_release")
+        self.assertEqual(plan[0], "files")
+        self.assertEqual(read_verify_snapshot(plan),
+                         snapshot_hashes([target]))
+
+    def test_plan_sim_reads_bundle_payload(self):
+        root = os.path.join(self.tmp, "execroot")
+        os.makedirs(root)
+        ipa = os.path.join(root, "Bench.ipa")
+        self.write_ipa(ipa)
+        capture = FakeCapture(root, [ipa])
+        plan = plan_verify_snapshot(capture, self.tmp, self.tmp, root,
+                                    "sim_debug")
+        snapshot = read_verify_snapshot(plan)
+        self.assertEqual(len(snapshot), 2)
+        self.assertTrue(all("::Payload/Bench.app/" in key
+                            for key in snapshot))
 
 
 class MeasureTest(unittest.TestCase):
@@ -442,17 +584,22 @@ class ChainRecordTest(unittest.TestCase):
                                         "cpu_s_missing": 0}},
             "skipped": {"host-tool build": 3},
             "failed": [],
+            "ordering_failed": None,
             "sol_cpu_s": 1.5,
             "sol_real_s": 2.0,
         }
 
+    def no_differ(self):
+        return {"n": 0, "differ": []}
+
     def test_describe_chain_shape(self):
-        chain = describe_chain(self.report(), [])
+        chain = describe_chain(self.report(), self.no_differ())
         self.assertEqual(chain["steps"],
                          {"Genrule": {"count": 2, "cpu_s": 1.5}})
         self.assertEqual(chain["skipped"], {"host-tool build": 3})
         self.assertEqual(chain["failed"], [])
-        self.assertEqual(chain["verify_differ"], [])
+        self.assertIsNone(chain["ordering_failed"])
+        self.assertEqual(chain["verify_differ"], self.no_differ())
         self.assertEqual(chain["output_drift"], {"n": 0, "paths": []})
         self.assertEqual(chain["sol_cpu_s"], 1.5)
         self.assertEqual(chain["status"], "ok")
@@ -461,27 +608,55 @@ class ChainRecordTest(unittest.TestCase):
     def test_describe_chain_missing_cpu(self):
         report = self.report()
         report["by_mnemonic"] = {"Genrule": {"count": 1}}
-        chain = describe_chain(report, [])
+        chain = describe_chain(report, self.no_differ())
         self.assertEqual(chain["steps"],
                          {"Genrule": {"count": 1, "cpu_s": None}})
 
     def test_describe_chain_no_report(self):
-        chain = describe_chain(None, [{"path": "a", "before": "b",
-                                       "after": None}])
+        chain = describe_chain(None, {"n": 1, "differ": [
+            {"path": "a", "before": "b", "after": None}]})
         self.assertEqual(chain["status"], "no report")
         self.assertIsNone(chain["sol_cpu_s"])
+
+    def test_describe_chain_ordering_status(self):
+        report = self.report()
+        report["ordering_failed"] = {"mnemonic": "SwiftStdlibCopy",
+                                     "input": "bazel-out/x/app_lipobin"}
+        report["failed"] = [{"mnemonic": "SwiftStdlibCopy",
+                             "exit": "ordering-failed",
+                             "stderr_tail": "ordering failure"}]
+        chain = describe_chain(report, self.no_differ())
+        self.assertEqual(chain["status"], "ordering-failed")
+        self.assertEqual(chain["ordering_failed"]["input"],
+                         "bazel-out/x/app_lipobin")
 
     def test_verify_differences_relative(self):
         before = {"/exec/a": "1", "/exec/b": "2"}
         after = {"/exec/a": "1", "/exec/b": "3", "/exec/c": "4"}
         differ = verify_differences(before, after, "/exec")
-        self.assertEqual(
-            differ,
-            [{"path": "b", "before": "2", "after": "3"},
-             {"path": "c", "before": None, "after": "4"}])
+        self.assertEqual(differ, {"n": 2, "differ": [
+            {"path": "b", "before": "2", "after": "3"},
+            {"path": "c", "before": None, "after": "4"}]})
+
+    def test_verify_differences_capped_at_ten(self):
+        before = {"f%02d" % n: "1" for n in range(12)}
+        after = {"f%02d" % n: "2" for n in range(12)}
+        differ = verify_differences(before, after, "/exec")
+        self.assertEqual(differ["n"], 12)
+        self.assertEqual(len(differ["differ"]), 10)
+        self.assertEqual(differ["differ"][0]["before"], "1")
+        self.assertEqual(differ["differ"][0]["after"], "2")
+
+    def test_bundle_keys_shown_as_is(self):
+        before = {"bazel-out/x/Bench.ipa::Payload/a": "1"}
+        differ = verify_differences(before, {}, "/exec")
+        self.assertEqual(differ["differ"][0]["path"],
+                         "bazel-out/x/Bench.ipa::Payload/a")
 
     def test_flow_reason_ok(self):
-        self.assertEqual(flow_reason(describe_chain(self.report(), []), 0),
+        self.assertEqual(flow_reason(describe_chain(self.report(),
+                                                    self.no_differ()),
+                                    0),
                          "ok")
 
     def test_flow_reason_names_step_and_files(self):
@@ -489,15 +664,32 @@ class ChainRecordTest(unittest.TestCase):
         report["failed"] = [{"mnemonic": "Genrule", "exit": 3,
                              "stderr_tail": "boom"}]
         chain = describe_chain(
-            report, [{"path": "b/App", "before": "1", "after": None}])
+            report, {"n": 1, "differ": [
+                {"path": "b/App", "before": "1", "after": None}]})
         reason = flow_reason(chain, 1)
         self.assertIn("Genrule", reason)
         self.assertIn("exit 3", reason)
         self.assertIn("b/App", reason)
 
+    def test_flow_reason_names_ordering(self):
+        report = self.report()
+        report["ordering_failed"] = {"mnemonic": "SwiftStdlibCopy",
+                                     "input": "bazel-out/x/app_lipobin"}
+        report["failed"] = [{"mnemonic": "SwiftStdlibCopy",
+                             "exit": "ordering-failed",
+                             "stderr_tail": "ordering failure"}]
+        reason = flow_reason(describe_chain(report, self.no_differ()), 0)
+        self.assertIn("SwiftStdlibCopy", reason)
+        self.assertIn("bazel-out/x/app_lipobin", reason)
+
     def test_flow_reason_no_report(self):
-        chain = describe_chain(None, [])
+        chain = describe_chain(None, self.no_differ())
         self.assertIn("no report", flow_reason(chain, 1))
+
+    def test_rep_sort_key_numeric(self):
+        names = ["rep10", "rep2", "rep1", "other"]
+        self.assertEqual(sorted(names, key=rep_sort_key),
+                         ["rep1", "rep2", "rep10", "other"])
 
     def test_rep_sort_key_numeric(self):
         names = ["rep10", "rep2", "rep1", "other"]
@@ -791,6 +983,8 @@ import json
 import os
 import shutil
 import sys
+import time
+import zipfile
 
 out_base = ""
 log = ""
@@ -814,22 +1008,88 @@ def actual(rel, dst):
     return [{"path": rel, "digest": {"hash": digest}}]
 
 
+IPA_ENTRIES = ("Payload/Bench.app/App",
+               "Payload/Bench.app/Frameworks/App.framework/"
+               "flutter_assets/kernel_blob.bin")
+
+
+def write_ipa(dst, data, stamp):
+    archive = zipfile.ZipFile(dst, "w")
+    for entry in IPA_ENTRIES:
+        archive.writestr(zipfile.ZipInfo(entry, date_time=stamp), data)
+    archive.close()
+
+
+# The chain command rebuilds the ipa from the edited source. Zip entry
+# timestamps come from the clock, so the chain's archive bytes always
+# differ from the build's while the payload (entry paths and contents)
+# matches: a metadata-only difference the proof must accept.
+IPA_CHAIN = (
+    "import sys, time, zipfile; "
+    "src, dst = sys.argv[1], sys.argv[2]; "
+    "data = open(src, 'rb').read(); "
+    "stamp = time.localtime()[:6]; "
+    "entries = %r; "
+    "archive = zipfile.ZipFile(dst, 'w'); "
+    "[archive.writestr(zipfile.ZipInfo(e, date_time=stamp), data) "
+    "for e in entries]; "
+    "archive.close()" % (IPA_ENTRIES,))
+
+# With SOL_DIRTY=1 the chain command writes constant wrong bytes: the
+# payload differs and the proof must fail naming the entry.
+IPA_DIRTY = (
+    "import sys, zipfile; "
+    "entries = %r; "
+    "archive = zipfile.ZipFile(sys.argv[2], 'w'); "
+    "[archive.writestr(e, b'wrong-content') for e in entries]; "
+    "archive.close()" % (IPA_ENTRIES,))
+
+
 execroot = os.path.join(out_base, "execroot")
 case = os.environ.get("SOL_CASE", "")
 fail_config = os.environ.get("SOL_FAIL_CONFIG", "")
+sidecar = os.environ.get("SOL_SIDEEFFECT", "") == "1"
+dirty = os.environ.get("SOL_DIRTY", "") == "1"
+is_sim = "sim_debug" in out_base
 rel = "bazel-out/x/App.framework/App"
+sim_rel = "bazel-out/x/Bench.ipa"
 if mode == "info":
     print(execroot)
 elif mode == "cquery":
     if case == "dirfail":
         print("bazel-out/x/App.framework/App")
+    elif is_sim:
+        print(sim_rel)
     else:
         print(rel)
 elif mode == "build":
     if fail_config and fail_config in out_base:
         sys.stderr.write("fake bazel: simulated build failure\\n")
         sys.exit(1)
-    if case == "dirfail":
+    if is_sim and case != "dirfail":
+        dst = os.path.join(execroot, sim_rel)
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
+        src = os.environ["SOL_SRC"]
+        with open(src, "rb") as fh:
+            data = fh.read()
+        write_ipa(dst, data, (2020, 1, 1, 0, 0, 0))
+        if dirty:
+            cmd = [sys.executable, "-c", IPA_DIRTY, src, dst]
+        else:
+            cmd = [sys.executable, "-c", IPA_CHAIN, src, dst]
+        spawn = {
+            "commandArgs": cmd,
+            "environmentVariables": [
+                {"name": "SOL_SRC", "value": src},
+                {"name": "SOL_DST", "value": dst},
+            ],
+            "listedOutputs": [sim_rel],
+            "actualOutputs": actual(sim_rel, dst),
+            "mnemonic": "Genrule",
+            "exitCode": 0,
+            "targetLabel": "//app:app_ios",
+        }
+    elif case == "dirfail":
         # The verify file lives inside a directory the step declares:
         # the step fails before recreating it (the round-3 restore
         # crash shape).
@@ -855,18 +1115,33 @@ elif mode == "build":
             with open(dst, "w", encoding="utf-8") as fh:
                 fh.write("stale-bytes")
             cmd = ["sh", "-c", "exit 3"]
+            env = []
         elif case == "drift":
             shutil.copyfile(src, dst)
             cmd = ["sh", "-c", 'echo drift > "$SOL_DST"']
+            env = [
+                {"name": "SOL_SRC", "value": src},
+                {"name": "SOL_DST", "value": dst},
+            ]
         else:
             shutil.copyfile(src, dst)
             cmd = ["sh", "-c", 'cp "$SOL_SRC" "$SOL_DST"']
-        spawn = {
-            "commandArgs": cmd,
-            "environmentVariables": [
+            env = [
                 {"name": "SOL_SRC", "value": src},
                 {"name": "SOL_DST", "value": dst},
-            ],
+            ]
+            if sidecar:
+                # The build leaves no sidecar: only the chain step
+                # writes one next to its declared output, and the sweep
+                # must remove it afterwards.
+                side = os.path.join(execroot, "bazel-out", "x",
+                                    "sidecar.tmp")
+                cmd = ["sh", "-c", 'cp "$SOL_SRC" "$SOL_DST"; '
+                       'echo side-effect > "$SOL_SIDE"']
+                env = env + [{"name": "SOL_SIDE", "value": side}]
+        spawn = {
+            "commandArgs": cmd,
+            "environmentVariables": env,
             "listedOutputs": [rel],
             "actualOutputs": actual(rel, dst),
             "mnemonic": "Genrule",
@@ -969,8 +1244,21 @@ class SolEndToEndTest(unittest.TestCase):
                 entry["chain"]["steps"]["Genrule"]["cpu_s"], 0.0, flow)
             self.assertEqual(entry["chain"]["failed"], [], flow)
             self.assertEqual(entry["chain"]["status"], "ok", flow)
-            self.assertEqual(entry["chain"]["output_drift"],
-                             {"n": 0, "paths": []}, flow)
+            self.assertEqual(entry["chain"]["verify_differ"],
+                             {"n": 0, "differ": []}, flow)
+        # The sim chain rebuilds its ipa with fresh zip timestamps, so
+        # its archive bytes always differ from the build's while the
+        # payload matches: drift without verify difference.
+        for flow in ["ios-debug-clean", "ios-debug-app", "ios-debug-body"]:
+            drift = summary["flows"][flow]["chain"]["output_drift"]
+            self.assertEqual(drift,
+                             {"n": 1,
+                              "paths": ["bazel-out/x/Bench.ipa"]}, flow)
+        for flow in ["ios-release-clean", "ios-release-app",
+                     "ios-release-body"]:
+            self.assertEqual(
+                summary["flows"][flow]["chain"]["output_drift"],
+                {"n": 0, "paths": []}, flow)
         # Bazel's outputs are back in place after the move-aside proof.
         dst = os.path.join(self.out_base, "device_release", "execroot",
                            "bazel-out", "x", "App.framework", "App")
@@ -996,10 +1284,85 @@ class SolEndToEndTest(unittest.TestCase):
             self.assertIn("verify differ", entry["reason"], flow)
             self.assertEqual(entry["chain"]["failed"][0]["exit"], 3)
             differ = entry["chain"]["verify_differ"]
-            self.assertEqual(len(differ), 1)
-            self.assertEqual(differ[0]["path"],
+            self.assertEqual(differ["n"], 1)
+            self.assertEqual(len(differ["differ"]), 1)
+            self.assertEqual(differ["differ"][0]["path"],
                              "bazel-out/x/App.framework/App")
-            self.assertIsNone(differ[0]["after"])
+            self.assertIsNone(differ["differ"][0]["after"])
+
+    def test_sim_ipa_metadata_only_still_identical(self):
+        # The chain rebuilds the ipa with fresh zip timestamps: the
+        # archive bytes differ from the build's, but the payload
+        # (entry paths and contents) matches, so the proof passes.
+        out = os.path.join(self.tmp, "ios-sol.json")
+        with mock.patch.dict(os.environ, self.env):
+            self.assertEqual(sol.main(self.run_argv(["sim_debug"])), 0)
+            self.assertEqual(sol.main(self.summarize_argv(out)), 0)
+        with open(out, encoding="utf-8") as fh:
+            summary = json.load(fh)
+        entry = summary["flows"]["ios-debug-clean"]
+        self.assertTrue(entry["identical"])
+        self.assertEqual(entry["reason"], "ok")
+        self.assertGreaterEqual(entry["sol"], 0.0)
+        self.assertEqual(entry["chain"]["verify_differ"],
+                         {"n": 0, "differ": []})
+        # The proof covers the bundle payload: the App binary and the
+        # kernel blob are among the verified entries.
+        record_path = os.path.join(self.results, "sol", "sim_debug",
+                                   "clean", "rep1", "record.json")
+        with open(record_path, encoding="utf-8") as fh:
+            record = json.load(fh)
+        self.assertEqual(
+            sorted(record["verify"]["before"]),
+            ["bazel-out/x/Bench.ipa::Payload/Bench.app/App",
+             "bazel-out/x/Bench.ipa::Payload/Bench.app/Frameworks/"
+             "App.framework/flutter_assets/kernel_blob.bin"])
+
+    def test_sim_payload_differs_not_identical(self):
+        # The chain writes different entry contents: the proof fails
+        # naming the payload entry, with no SOL number.
+        out = os.path.join(self.tmp, "ios-sol.json")
+        env = dict(self.env, SOL_DIRTY="1")
+        with mock.patch.dict(os.environ, env):
+            self.assertEqual(sol.main(self.run_argv(["sim_debug"])), 0)
+            self.assertEqual(sol.main(self.summarize_argv(out)), 0)
+        with open(out, encoding="utf-8") as fh:
+            summary = json.load(fh)
+        entry = summary["flows"]["ios-debug-clean"]
+        self.assertFalse(entry["identical"])
+        self.assertIsNone(entry["sol"])
+        self.assertIn("verify differ", entry["reason"])
+        differ = entry["chain"]["verify_differ"]
+        self.assertEqual(differ["n"], 2)
+        self.assertEqual(differ["differ"][0]["path"],
+                         "bazel-out/x/Bench.ipa::Payload/Bench.app/App")
+        self.assertNotEqual(differ["differ"][0]["before"],
+                            differ["differ"][0]["after"])
+
+    def test_chain_side_effect_swept(self):
+        # The chain step leaves an undeclared file next to its declared
+        # output: the sweep removes it, Bazel's outputs are restored,
+        # and the proof still passes.
+        out = os.path.join(self.tmp, "ios-sol.json")
+        env = dict(self.env, SOL_SIDEEFFECT="1")
+        with mock.patch.dict(os.environ, env):
+            self.assertEqual(
+                sol.main(self.run_argv(["device_release"])), 0)
+            self.assertEqual(sol.main(self.summarize_argv(out)), 0)
+        with open(out, encoding="utf-8") as fh:
+            summary = json.load(fh)
+        entry = summary["flows"]["ios-release-clean"]
+        self.assertTrue(entry["identical"])
+        self.assertEqual(entry["reason"], "ok")
+        self.assertEqual(entry["chain"]["side_effects_removed"],
+                         {"n": 1, "paths": ["x/sidecar.tmp"]})
+        side = os.path.join(self.out_base, "device_release", "execroot",
+                            "bazel-out", "x", "sidecar.tmp")
+        self.assertFalse(os.path.lexists(side))
+        dst = os.path.join(self.out_base, "device_release", "execroot",
+                           "bazel-out", "x", "App.framework", "App")
+        with open(dst, encoding="utf-8") as fh:
+            self.assertTrue(fh.read().startswith("v1\nedit:apply-app-edit"))
 
     def test_directory_output_failure_restores_and_continues(self):
         out = os.path.join(self.tmp, "ios-sol.json")

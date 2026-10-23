@@ -25,14 +25,22 @@ change for an edit are skipped as a person would skip them: the
 execution log records executed spawns only.
 
 Proof the SOL did the same work: each chain step runs as Bazel runs it
-(its declared outputs are removed before it starts), and the scenario's
-final outputs are moved aside before the chain and hashed after (the
-App.framework binary for device_release; the app's kernel blob and the
-App.framework binary for sim_debug). A step that exits non-zero, times
-out or cannot start — or any verify file that differs afterwards —
-reports ``identical`` false with no SOL number. Bazel's outputs are
-moved back afterwards, so a chain can never perturb the next incremental
-build's action cache.
+(its declared outputs are removed before it starts), steps run in
+dependency order even for edges the execution log never records (a
+step whose input is, or resolves to, another step's output runs after
+it), and the scenario's final outputs are moved aside before the chain
+and hashed after. device_release hashes the App.framework binary;
+sim_debug hashes every file in the final app bundle's payload (an
+.ipa archive's entries, or every file under an .app directory),
+compared by entry path and content: archive metadata such as zip
+timestamps is not part of the proof. The verify set comes from
+declared outputs only, never a glob over bazel-out. A step that exits
+non-zero, times out or cannot start — a step that would start while an
+input is still a moved-aside output no earlier step re-created — or
+any verify entry that differs afterwards — reports ``identical``
+false with no SOL number. Bazel's outputs are moved back afterwards
+and chain-created files no step declares are removed, so a chain can
+never perturb the next incremental build's action cache.
 
 Subcommands: ``run`` measures repeats, ``chain`` runs one chain (an
 unmeasured child process), ``summarize`` writes medians into
@@ -279,70 +287,207 @@ def sim_bundle_roots(target_files):
     return sorted(roots)
 
 
-def find_under(root, wanted):
-    """Absolute paths of files named in wanted under root, sorted."""
-    found = []
-    for dirpath, _, filenames in os.walk(root):
+def sim_bundle_archives(target_files):
+    """Declared .ipa bundle archives among a target's listed outputs."""
+    return sorted(path for path in target_files if path.endswith(".ipa"))
+
+
+def ipa_entry_hashes(ipa_path):
+    """{entry path: hex digest} of an .ipa archive's payload.
+
+    Only entry paths and contents prove the chain's work: archive
+    metadata (timestamps, permissions, entry order) is not part of the
+    proof, so an archive whose bytes differ only in metadata still
+    matches. An unreadable archive or one holding no files fails loudly.
+    """
+    import zipfile
+    try:
+        archive = zipfile.ZipFile(ipa_path, "r")
+    except (OSError, zipfile.BadZipFile) as exc:
+        raise RuntimeError("sol cannot read bundle archive %s (%s)"
+                           % (ipa_path, exc))
+    try:
+        entries = {}
+        for info in archive.infolist():
+            if info.is_dir():
+                continue
+            try:
+                with archive.open(info, "r") as entry:
+                    digest = hashlib.sha256(entry.read()).hexdigest()
+            except (OSError, zipfile.BadZipFile, KeyError,
+                    RuntimeError) as exc:
+                raise RuntimeError("sol cannot read entry %s of %s (%s)"
+                                   % (info.filename, ipa_path, exc))
+            entries[info.filename] = digest
+    finally:
+        archive.close()
+    if not entries:
+        raise RuntimeError("sol bundle archive %s holds no files"
+                           % ipa_path)
+    return entries
+
+
+def app_dir_hashes(app_dir):
+    """{relative path: hex digest} of every file under an .app directory.
+
+    File symlinks hash by content; directory symlinks (macOS framework
+    version links) hash by their target string. A dangling link hashes
+    None and fails the proof closed, like any missing file. An empty
+    bundle fails loudly.
+    """
+    entries = {}
+    for dirpath, dirnames, filenames in os.walk(app_dir,
+                                                followlinks=False):
         for name in filenames:
-            if name in wanted:
-                found.append(os.path.join(dirpath, name))
-    return sorted(found)
+            full = os.path.join(dirpath, name)
+            entries[os.path.relpath(full, app_dir)] = sha256_file(full)
+        for name in dirnames:
+            full = os.path.join(dirpath, name)
+            if not os.path.islink(full):
+                continue
+            try:
+                target = os.readlink(full)
+            except OSError:
+                target = None
+            if target is None:
+                entries[os.path.relpath(full, app_dir)] = None
+            else:
+                entries[os.path.relpath(full, app_dir)] = hashlib.sha256(
+                    ("symlink->" + target).encode("utf-8")).hexdigest()
+    if not entries:
+        raise RuntimeError("sol app bundle %s holds no files" % app_dir)
+    return entries
 
 
-def sim_verify_files(bundles):
-    """Kernel blob plus App.framework binary inside app bundles."""
-    verify = []
-    for bundle in bundles:
-        for path in find_under(bundle, ("App", "kernel_blob.bin")):
-            if "App.framework" in path:
-                verify.append(path)
-    return sorted(verify)
+def plan_verify_snapshot(capture, work, out_base, execroot, config):
+    """Discovers the verify set from declared outputs only, never a glob.
 
-
-def glob_framework_binaries(bazel_out):
-    """Fallback discovery: every App.framework/App under bazel-out."""
-    found = []
-    for dirpath, dirnames, filenames in os.walk(bazel_out):
-        if os.path.basename(dirpath) == "App.framework" and "App" in filenames:
-            found.append(os.path.join(dirpath, "App"))
-            del dirnames[:]
-    return sorted(found)
-
-
-def kernel_beside(framework_binaries):
-    """kernel_blob.bin files sitting next to framework binaries."""
-    blobs = []
-    for binary in framework_binaries:
-        blob = os.path.join(os.path.dirname(binary), "flutter_assets",
-                            "kernel_blob.bin")
-        if os.path.isfile(blob):
-            blobs.append(blob)
-    return sorted(blobs)
-
-
-def fallback_verify_files(execroot, config):
-    """Verify files by glob when cquery lists nothing usable."""
-    binaries = glob_framework_binaries(os.path.join(execroot, "bazel-out"))
-    if config == "device_release":
-        return binaries
-    return sorted(binaries + kernel_beside(binaries))
-
-
-def verify_paths_for_config(capture, work, out_base, config):
-    """Final-output files whose hashes prove the SOL chain's work."""
+    device_release hashes the App.framework binary among the framework
+    target's listed outputs. sim_debug hashes the final app bundle's
+    payload: every entry of each listed .ipa archive, and every file
+    under each listed .app directory (the kernel blob and the
+    App.framework binary are among those files). Anything else —
+    no bundle among the listed outputs — fails loudly instead of
+    globbing bazel-out, whose leftovers are not this build's outputs.
+    Returns an opaque plan; read_verify_snapshot reads it right now.
+    """
     spec = CONFIGS[config]
     listed = query_target_files(capture, work, out_base, spec["target"],
                                 spec["build_flags"])
     if config == "device_release":
         found = device_verify_files(listed)
-    else:
-        found = sim_verify_files(sim_bundle_roots(listed))
-    if not found:
-        execroot = bazel_info(capture, work, out_base, "execution_root")
-        found = fallback_verify_files(execroot, config)
-    if not found:
-        raise RuntimeError("sol found no verify files for %s" % config)
-    return found
+        if not found:
+            raise RuntimeError("sol found no verify files for %s" % config)
+        return ("files", found)
+    archives = sim_bundle_archives(listed)
+    bundles = sim_bundle_roots(listed)
+    if not archives and not bundles:
+        raise RuntimeError("sol found no app bundle for %s" % config)
+    return ("bundles", archives, bundles, execroot)
+
+
+def read_verify_snapshot(plan):
+    """{key: digest} over the planned verify set, read right now.
+
+    Bundle keys are execroot-relative bundle paths plus "::" plus the
+    entry path, so the chain record names payload entries portably; a
+    bundle that reads empty fails loudly.
+    """
+    if plan[0] == "files":
+        return snapshot_hashes(plan[1])
+    _, archives, bundles, execroot = plan
+    base = os.path.abspath(execroot)
+    snapshot = {}
+    for archive in archives:
+        prefix = os.path.relpath(archive, base) + "::"
+        for entry, digest in ipa_entry_hashes(archive).items():
+            snapshot[prefix + entry] = digest
+    for bundle in bundles:
+        prefix = os.path.relpath(bundle, base) + "::"
+        for entry, digest in app_dir_hashes(bundle).items():
+            snapshot[prefix + entry] = digest
+    if not snapshot:
+        raise RuntimeError("sol bundle payload is empty")
+    return snapshot
+
+
+def snapshot_tree(root):
+    """Every path under root (files, links and dirs), absolute normpaths."""
+    seen = {os.path.normpath(os.path.abspath(root))}
+    if not os.path.isdir(root):
+        return seen
+    for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
+        seen.add(os.path.normpath(dirpath))
+        for name in filenames:
+            seen.add(os.path.normpath(os.path.join(dirpath, name)))
+        for name in dirnames:
+            full = os.path.join(dirpath, name)
+            if os.path.islink(full):
+                seen.add(os.path.normpath(full))
+    return seen
+
+
+def sweep_chain_side_effects(bazel_out, declared_outputs, before):
+    """Removes chain-created files/dirs under bazel-out no step declares.
+
+    Besides restoring every declared output, the chain must leave the
+    execroot as Bazel left it: an unsandboxed step may leave files next
+    to its declared output (an undeclared sibling of App.framework.zip,
+    say), and those leftovers would both perturb the next incremental
+    build and pollute any later proof. Anything under bazel-out that is
+    neither Bazel's own (in before) nor a declared output (equal to,
+    under, or above one) is removed: files and links first, then the
+    emptied directories. Returns {"n": removed count, "paths": first 10,
+    bazel-out relative}. A removal failure raises RuntimeError naming
+    the path instead of leaving the next build over a hole.
+    """
+    base = os.path.abspath(bazel_out)
+    declared = [os.path.normpath(path) for path in declared_outputs]
+
+    def protected(path):
+        for root in declared:
+            if (path == root or path.startswith(root + os.sep)
+                    or root.startswith(path + os.sep)):
+                return True
+        return False
+
+    def drop_file(full):
+        try:
+            os.remove(full)
+        except OSError as exc:
+            raise RuntimeError("sol cannot remove chain side effect %s "
+                               "(%s)" % (full, exc))
+
+    removed = []
+    if not os.path.isdir(base):
+        return {"n": 0, "paths": []}
+    for dirpath, dirnames, filenames in os.walk(base, followlinks=False):
+        for name in filenames:
+            full = os.path.normpath(os.path.join(dirpath, name))
+            if full not in before and not protected(full):
+                drop_file(full)
+                removed.append(os.path.relpath(full, base))
+        for name in list(dirnames):
+            full = os.path.join(dirpath, name)
+            if not os.path.islink(full):
+                continue
+            norm = os.path.normpath(full)
+            if norm not in before and not protected(norm):
+                drop_file(full)
+                removed.append(os.path.relpath(norm, base))
+    for dirpath, _, _ in os.walk(base, followlinks=False, topdown=False):
+        norm = os.path.normpath(dirpath)
+        if norm == base or norm in before or protected(norm):
+            continue
+        try:
+            if not os.listdir(norm):
+                os.rmdir(norm)
+                removed.append(os.path.relpath(norm, base))
+        except OSError as exc:
+            raise RuntimeError("sol cannot remove chain side-effect dir "
+                               "%s (%s)" % (norm, exc))
+    removed = sorted(set(removed))
+    return {"n": len(removed), "paths": removed[:10]}
 
 
 def measure_process_tree(argv, cwd):
@@ -439,18 +584,27 @@ def read_chain_report(report_path):
 
 
 def verify_differences(before, after, execroot):
-    """Verify files that differ, with execroot-relative paths and digests."""
+    """Verify entries that differ: {"n": count, "differ": first 10}.
+
+    Each entry names the path with both digests ({path, before, after});
+    at most 10 entries travel in the chain record, plus the total count.
+    Absolute file paths show execroot-relative; bundle payload keys are
+    already portable.
+    """
     differ = []
-    for path in sorted(set(before) | set(after)):
-        if before.get(path) == after.get(path):
+    for key in sorted(set(before) | set(after)):
+        if before.get(key) == after.get(key):
             continue
-        try:
-            shown = os.path.relpath(path, execroot)
-        except ValueError:
-            shown = path
-        differ.append({"path": shown, "before": before.get(path),
-                       "after": after.get(path)})
-    return differ
+        if "::" in key:
+            shown = key
+        else:
+            try:
+                shown = os.path.relpath(key, execroot)
+            except ValueError:
+                shown = key
+        differ.append({"path": shown, "before": before.get(key),
+                       "after": after.get(key)})
+    return {"n": len(differ), "differ": differ[:10]}
 
 
 def output_drift(chainable, execroot):
@@ -489,6 +643,7 @@ def describe_chain(report, differ, drift=None):
         drift = {"n": 0, "paths": []}
     if report is None:
         return {"steps": {}, "skipped": {}, "failed": [],
+                "ordering_failed": None,
                 "verify_differ": differ, "output_drift": drift,
                 "sol_cpu_s": None, "status": "no report"}
     steps = {}
@@ -500,30 +655,41 @@ def describe_chain(report, differ, drift=None):
             cpu = entry["user_s_total"] + entry["sys_s_total"]
         steps[mnemonic] = {"count": entry.get("count", 0), "cpu_s": cpu}
     failed = report.get("failed") or []
+    status = "failed" if failed else "ok"
+    if report.get("ordering_failed") is not None:
+        status = "ordering-failed"
     return {"steps": steps, "skipped": dict(report.get("skipped") or {}),
             "failed": [{"mnemonic": entry.get("mnemonic", ""),
                         "exit": entry.get("exit"),
                         "stderr_tail": entry.get("stderr_tail")}
                        for entry in failed],
+            "ordering_failed": report.get("ordering_failed"),
             "verify_differ": differ, "output_drift": drift,
             "sol_cpu_s": report.get("sol_cpu_s"),
-            "status": "failed" if failed else "ok"}
+            "status": status}
 
 
 def flow_reason(chain, exit_code):
     """One-line verdict reason for the job log and the flow record."""
     if chain["status"] == "no report":
         return "chain wrote no report (exit %s)" % (exit_code,)
+    if chain.get("ordering_failed"):
+        item = chain["ordering_failed"]
+        return ("ordering failure: step %s needs %s (a moved-aside "
+                "output no earlier step re-created)"
+                % (item.get("mnemonic", ""), item.get("input", "")))
     if chain["failed"]:
         first = chain["failed"][0]
         reason = "step %s failed (exit %s)" % (first["mnemonic"],
                                                first["exit"])
     else:
         reason = "ok"
-    if chain["verify_differ"]:
-        shown = chain["verify_differ"][0]["path"]
+    differ = chain.get("verify_differ") or {"n": 0, "differ": []}
+    if differ.get("n"):
+        entries = differ.get("differ") or []
+        shown = entries[0]["path"] if entries else "?"
         reason += "; verify differ: %d file(s), e.g. %s" % (
-            len(chain["verify_differ"]), shown)
+            differ["n"], shown)
     elif chain["failed"] and exit_code != 0:
         reason += "; chain exit %s" % (exit_code,)
     return reason
@@ -554,30 +720,35 @@ def run_sol_scenario(args, config, scenario):
     bazel_out = os.path.join(execroot, "bazel-out")
     if os.path.isdir(bazel_out):
         make_writable_tree(bazel_out)
-    verify = verify_paths_for_config(args.capture, args.work, out_base,
-                                     config)
+    plan = plan_verify_snapshot(args.capture, args.work, out_base,
+                                execroot, config)
     record_dir = os.path.join(args.results, "sol", config, scenario,
                               "rep%d" % args.rep)
     os.makedirs(record_dir, exist_ok=True)
     report_path = os.path.join(record_dir, _CHAIN_REPORT)
-    before = snapshot_hashes(verify)
+    before = read_verify_snapshot(plan)
     chainable, _ = select_sol_spawns(load_spawns(log_path))
     step_outputs = []
     for spawn in chainable:
         step_outputs.extend(spawn_output_paths(spawn, execroot))
+    before_tree = snapshot_tree(bazel_out)
     aside = move_aside_chain(step_outputs, os.path.join(
         args.work, "sol-backup-" + scenario))
     try:
         exit_code = run_chain_proc(args, log_path, execroot, report_path)
         report = read_chain_report(report_path)
         drift = output_drift(chainable, execroot)
-        after = snapshot_hashes(verify)
+        after = read_verify_snapshot(plan)
     finally:
+        swept = sweep_chain_side_effects(bazel_out, step_outputs,
+                                         before_tree)
         restore_tree(aside)
     differ = verify_differences(before, after, execroot)
     chain = describe_chain(report, differ, drift)
+    chain["side_effects_removed"] = swept
     failed = bool(chain["failed"]) or chain["status"] != "ok"
-    identical = hashes_match(before, after) and not failed and not differ
+    identical = (hashes_match(before, after) and not failed
+                 and not differ["n"])
     if identical:
         sol = {"cpu_s": chain["sol_cpu_s"],
                "real_s": (report or {}).get("sol_real_s")}
@@ -613,7 +784,8 @@ def error_record(config, scenario, reason):
             "n_sol_actions": 0,
             "verify": {"before": {}, "after": {}},
             "chain": {"steps": {}, "skipped": {}, "failed": [],
-                      "verify_differ": [],
+                      "ordering_failed": None,
+                      "verify_differ": {"n": 0, "differ": []},
                       "output_drift": {"n": 0, "paths": []},
                       "sol_cpu_s": None, "status": "error"}}
 
