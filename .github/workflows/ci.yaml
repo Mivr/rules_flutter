@@ -27,7 +27,7 @@
 # Linux carries every workspace whose targets can build there (Apple-only
 # targets skip themselves through Bazel's own `target_compatible_with`; no
 # new tag filters). The complete macOS coverage runs in full.yaml instead
-# (weekly, on release tags, or on demand), which releases wait for.
+# (nightly, on release tags, or on demand), which releases wait for.
 #   e2e-macos-apple:     hello_world's Apple bundles (macOS + iOS simulator),
 #     plus min_versions' iOS/macOS legs against the Apple version floor
 #   e2e-macos-toolchain: smoke workspace (toolchain resolution, all platforms)

@@ -53,9 +53,10 @@ jobs:
   e2e-macos:
     name: E2E full (${{ matrix.workspace }}, macos-latest)
     runs-on: macos-latest
-    # Cold tag and nightly runs rebuild every workspace from scratch; the
-    # ceiling is GitHub's 6-hour per-job limit.
-    timeout-minutes: 360
+    # Cold tag and nightly runs rebuild every workspace from scratch; fork
+    # policy caps every job at 300 minutes on the free runners, and a cold
+    # leg takes under an hour.
+    timeout-minutes: 300
     strategy:
       fail-fast: false
       # At most 2 of the 5 macOS slots shared with rules_dart, so a push run's
@@ -75,6 +76,12 @@ jobs:
             shard: macos-a
             cache-save: false
           - workspace: ffi_example
+            shard: none
+            cache-save: false
+          # The iOS proof lane: every target here needs macOS
+          # (`target_compatible_with = ["@platforms//os:macos"]`), so this
+          # workspace runs nowhere else.
+          - workspace: ios_example
             shard: none
             cache-save: false
           - workspace: plugin_example
@@ -126,6 +133,13 @@ jobs:
       - name: bazel test //... (e2e/${{ matrix.workspace }})
         working-directory: e2e/${{ matrix.workspace }}
         run: bazel test //... --test_output=errors
+      # The simulator runtime behind `manual`: `//...` never picks up
+      # `:verify_ios_simulator_test`, so the ffi_example leg runs it by name.
+      # No `continue-on-error`: a failing simulator run fails the job.
+      - name: iOS simulator runtime (e2e/ffi_example)
+        if: matrix.workspace == 'ffi_example'
+        working-directory: e2e/ffi_example
+        run: bazel test //:verify_ios_simulator_test --test_output=errors
       - name: Report cache sizes
         if: always()
         run: du -sh ~/.cache/bazel-disk ~/.cache/bazel-repo 2>/dev/null || true
@@ -153,9 +167,10 @@ jobs:
   e2e-linux-nightly:
     name: E2E nightly (android_example, ubuntu-latest)
     runs-on: ubuntu-latest
-    # Cold tag and nightly runs rebuild the APK actions from scratch; the
-    # ceiling is GitHub's 6-hour per-job limit.
-    timeout-minutes: 360
+    # Cold tag and nightly runs rebuild the APK actions from scratch; fork
+    # policy caps every job at 300 minutes on the free runners, and a cold
+    # leg takes under an hour.
+    timeout-minutes: 300
     env:
       WORKSPACES: android_example
       DISK_CACHE_DIR: ~/.cache/bazel-disk
