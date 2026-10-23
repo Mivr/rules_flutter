@@ -171,3 +171,11 @@ This example demonstrates three ways to build the iOS runner:
 3. **Custom runner** (`:app_custom_runner`) — Full control. Write your own AppDelegate/SceneDelegate.
 
 Approaches 2 and 3 are tagged `manual` and must be built explicitly.
+
+## Continuous integration
+
+This workspace runs in CI on the macOS leg of `.github/workflows/full.yaml`
+(nightly, release tags, manual dispatch): `bazel test //...` executes every
+test here, including the `verify_ios_*` bundle checks. The `ffi_example` iOS
+simulator runtime test runs beside it as an explicit step of the same job,
+since its `manual` tag keeps it out of `//...`.
