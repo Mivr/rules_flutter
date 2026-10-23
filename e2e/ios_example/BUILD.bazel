@@ -326,8 +326,8 @@ dart_test(
 dart_test(
     name = "verify_ios_bundle_assets_test",
     data = [
-        ":app_simulator",
         "assets/message.txt",
+        ":app_simulator",
     ],
     main = "test/verify_ios_bundle_assets_test.dart",
     target_compatible_with = ["@platforms//os:macos"],
