@@ -12,7 +12,7 @@ import unittest
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import run_rep
-from run_rep import CONFIGS, make_writable_tree, run_rep
+from run_rep import CONFIGS, make_writable_tree, real_run, run_rep
 
 
 class Proc:
@@ -320,6 +320,31 @@ class ChmodTest(unittest.TestCase):
     def test_missing_root_is_zero(self):
         self.assertEqual(
             make_writable_tree(os.path.join(self.tmp, "absent")), 0)
+
+
+class RealRunTest(unittest.TestCase):
+    """Captured stdout must exclude stderr (JVM warnings corrupt paths)."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="run-rep-real-")
+        self.script = os.path.join(self.tmp, "noisy.sh")
+        with open(self.script, "w", encoding="utf-8", newline="\n") as fh:
+            fh.write("#!/bin/sh\n"
+                     "echo 'OpenJDK 64-Bit Server VM warning: deprecated' >&2\n"
+                     "echo '/out-base/execroot/ws'\n")
+        os.chmod(self.script, os.stat(self.script).st_mode
+                 | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_capture_keeps_streams_separate(self):
+        proc = real_run([self.script], cwd=self.tmp,
+                        capture_output=True)
+        self.assertEqual(proc.returncode, 0)
+        self.assertEqual(proc.stdout.strip(), "/out-base/execroot/ws")
+        self.assertNotIn("OpenJDK", proc.stdout)
+        self.assertIn("OpenJDK", proc.stderr)
 
 
 if __name__ == "__main__":

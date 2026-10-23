@@ -8,13 +8,17 @@ import stat
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import sol
 from sol import (
     backup_files,
+    bazel_info,
+    capture_bazel_output,
     chain_replayed,
+    check_under_base,
     collect_runner_info,
     cpu_seconds,
     device_verify_files,
@@ -35,12 +39,6 @@ from sol import (
     summarize_flow,
     summarize_sol,
 )
-
-
-class Proc:
-    def __init__(self, returncode=0, stdout=""):
-        self.returncode = returncode
-        self.stdout = stdout
 
 
 def kernel_spawn():
@@ -329,45 +327,178 @@ class ChainTest(unittest.TestCase):
             chain_replayed(os.path.join(self.tmp, "absent.json"))
 
 
-class FakeBazel:
-    """Emulates `bazel --batch info/cquery` for verify discovery."""
+JVM_WARNING = (
+    "OpenJDK 64-Bit Server VM warning: Options -Xverify:none and "
+    "-noverify were deprecated in JDK 13 and will likely be removed in "
+    "a future release.")
+
+
+class FakeCapture:
+    """Canned stdout for info/cquery, like capture_bazel_output."""
 
     def __init__(self, execroot, files):
         self.execroot = execroot
         self.files = files
 
-    def __call__(self, argv, cwd=None, capture_output=False):
+    def __call__(self, argv, cwd=None):
         if "cquery" in argv:
-            return Proc(stdout="\n".join(self.files) + "\n")
+            return "\n".join(self.files) + "\n"
         if "info" in argv:
-            return Proc(stdout=self.execroot + "\n")
-        return Proc()
+            return self.execroot + "\n"
+        return ""
 
 
 class QueryTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="sol-query-")
+        self.out_base = os.path.join(self.tmp, "out")
+        self.execroot = os.path.join(self.out_base, "execroot", "ws")
+        self.rel = ("bazel-out/x/bin/app/__app_framework_framework/"
+                    "App.framework/App")
+        abs_path = os.path.join(self.execroot, self.rel)
+        os.makedirs(os.path.dirname(abs_path))
+        with open(abs_path, "wb") as fh:
+            fh.write(b"app")
+        self.abs_path = abs_path
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
     def test_cquery_relative_paths_resolve_against_execroot(self):
         import sol as sol_mod
-        fake = FakeBazel(
-            "/out/execroot",
-            ["bazel-out/x/bin/app/__app_framework_framework/"
-             "App.framework/App"])
+        fake = FakeCapture(self.execroot, [self.rel])
         files = sol_mod.query_target_files(
-            fake, "/work", "/out/base", "//app:__app_framework_framework",
+            fake, self.tmp, self.out_base, "//app:__app_framework_framework",
             ["-c", "opt"])
-        self.assertEqual(files, ["/out/execroot/bazel-out/x/bin/app/"
-                                 "__app_framework_framework/"
-                                 "App.framework/App"])
+        self.assertEqual(files, [self.abs_path])
 
-    def test_cquery_failure_raises(self):
+    def test_absolute_paths_accepted(self):
+        import sol as sol_mod
+        fake = FakeCapture(self.execroot, [self.abs_path])
+        self.assertEqual(
+            sol_mod.query_target_files(fake, self.tmp, self.out_base,
+                                       "//app:x", []),
+            [self.abs_path])
+
+    def test_cquery_failure_propagates(self):
         import sol as sol_mod
 
-        class Fail:
-            def __call__(self, argv, cwd=None, capture_output=False):
-                return Proc(returncode=1)
+        def fail(argv, cwd=None):
+            raise RuntimeError("bazel cquery //app:x failed (exit 1): boom")
 
         with self.assertRaises(RuntimeError):
-            sol_mod.query_target_files(Fail(), "/work", "/out",
+            sol_mod.query_target_files(fail, self.tmp, self.out_base,
                                        "//app:x", [])
+
+    def test_warning_line_in_stdout_rejected(self):
+        import sol as sol_mod
+        fake = FakeCapture(self.execroot, [JVM_WARNING, self.rel])
+        with self.assertRaises(RuntimeError):
+            sol_mod.query_target_files(fake, self.tmp, self.out_base,
+                                       "//app:x", [])
+
+    def test_missing_path_rejected(self):
+        import sol as sol_mod
+        fake = FakeCapture(
+            self.execroot, ["bazel-out/x/absent.o"])
+        with self.assertRaisesRegex(RuntimeError, "does not exist"):
+            sol_mod.query_target_files(fake, self.tmp, self.out_base,
+                                       "//app:x", [])
+
+    def test_path_outside_base_rejected(self):
+        import sol as sol_mod
+        fake = FakeCapture(self.execroot, ["/etc/hostname"])
+        with self.assertRaisesRegex(RuntimeError, "not under output base"):
+            sol_mod.query_target_files(fake, self.tmp, self.out_base,
+                                       "//app:x", [])
+
+    def test_empty_listing_rejected(self):
+        import sol as sol_mod
+        fake = FakeCapture(self.execroot, [])
+        with self.assertRaisesRegex(RuntimeError, "no files"):
+            sol_mod.query_target_files(fake, self.tmp, self.out_base,
+                                       "//app:x", [])
+
+    def test_info_validates_single_line(self):
+        self.assertEqual(
+            bazel_info(FakeCapture(self.execroot, []), self.tmp,
+                       self.out_base, "execution_root"),
+            self.execroot)
+        with self.assertRaises(RuntimeError):
+            bazel_info(FakeCapture(self.execroot + "\n" + self.execroot, []),
+                       self.tmp, self.out_base, "execution_root")
+
+    def test_check_under_base(self):
+        self.assertEqual(
+            check_under_base(self.abs_path, self.out_base, "test"),
+            self.abs_path)
+        with self.assertRaises(RuntimeError):
+            check_under_base("/elsewhere/x", self.out_base, "test")
+
+
+class NoisyStderrTest(unittest.TestCase):
+    """A JVM warning on stderr must never corrupt parsed Bazel output.
+
+    Runs the real capture (separate pipes) against a fake `bazel` that
+    reproduces the dispatch failure: the warning on stderr, paths on
+    stdout. With a merged capture the warning becomes a bogus path.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="sol-noisy-")
+        self.out_base = os.path.join(self.tmp, "out")
+        self.execroot = os.path.join(self.out_base, "execroot", "ws")
+        self.rel = "bazel-out/x/bin/app/App.framework/App"
+        abs_path = os.path.join(self.execroot, self.rel)
+        os.makedirs(os.path.dirname(abs_path))
+        with open(abs_path, "wb") as fh:
+            fh.write(b"app")
+        self.bazel = os.path.join(self.tmp, "bazel")
+        with open(self.bazel, "w", encoding="utf-8", newline="\n") as fh:
+            fh.write("#!/bin/sh\n"
+                     "echo '%s' >&2\n"
+                     "if [ \"$SOL_BAZEL_FAIL\" = \"1\" ]; then\n"
+                     "  echo 'BUILD FAILED: missing input' >&2\n"
+                     "  exit 1\n"
+                     "fi\n"
+                     "for arg in \"$@\"; do\n"
+                     "  case \"$arg\" in\n"
+                     "    cquery) printf '%%s\\n' \"$SOL_CQUERY_OUT\";;\n"
+                     "    info) printf '%%s\\n' \"$SOL_INFO_OUT\";;\n"
+                     "  esac\n"
+                     "done\n" % JVM_WARNING)
+        os.chmod(self.bazel, os.stat(self.bazel).st_mode
+                 | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def swap(self, argv, cwd):
+        """capture_bazel_output with the fake script as argv[0]."""
+        swapped = [self.bazel if a == "bazel" else a for a in argv]
+        return capture_bazel_output(swapped, cwd)
+
+    def test_info_stdout_excludes_warning(self):
+        with mock.patch.dict(os.environ, {"SOL_INFO_OUT": self.execroot}):
+            out = self.swap(
+                ["bazel", "--batch", "--output_base=" + self.out_base,
+                 "info", "execution_root"], self.tmp)
+        self.assertEqual(out.strip(), self.execroot)
+        self.assertNotIn("OpenJDK", out)
+
+    def test_cquery_resolves_despite_warning(self):
+        import sol as sol_mod
+        with mock.patch.dict(os.environ, {"SOL_INFO_OUT": self.execroot,
+                                           "SOL_CQUERY_OUT": self.rel}):
+            files = sol_mod.query_target_files(
+                self.swap, self.tmp, self.out_base, "//app:x", [])
+        self.assertEqual(files, [os.path.join(self.execroot, self.rel)])
+
+    def test_failure_shows_stderr(self):
+        with mock.patch.dict(os.environ, {"SOL_BAZEL_FAIL": "1"}):
+            with self.assertRaisesRegex(RuntimeError, "BUILD FAILED"):
+                self.swap(["bazel", "--batch", "info", "execution_root"],
+                          self.tmp)
 
 
 def sol_record(flow, bazel_instr, sol_instr, identical, bazel_cpu=1.0,

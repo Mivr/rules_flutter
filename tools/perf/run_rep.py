@@ -70,12 +70,16 @@ DEFAULT_MIN_CLEAN_ACTIONS = 10
 
 
 def real_run(argv, cwd=None, capture_output=False):
+    # Captured stdout stays stdout-only: Bazel relays JVM warnings on
+    # stderr, and merging the streams lets a warning line corrupt a parsed
+    # output path (as bit the SOL verify discovery). Stderr is inherited
+    # live when not capturing, and available on the result when capturing.
     return subprocess.run(
         argv,
         cwd=cwd,
         stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE if capture_output else None,
-        stderr=subprocess.STDOUT if capture_output else None,
+        stderr=subprocess.PIPE if capture_output else None,
         text=True,
         check=False,
     )

@@ -155,31 +155,71 @@ def restore_files(mapping):
             raise RuntimeError("sol restore of %s failed (%s)" % (path, exc))
 
 
-def bazel_info(run, work, out_base, key):
-    """One `bazel --batch info` value (execroot, bazel-bin, ...)."""
-    proc = run(["bazel", "--batch", "--output_base=" + out_base,
-                "info", key], cwd=work, capture_output=True)
+def capture_bazel_output(argv, cwd):
+    """stdout of a Bazel info/query command; stderr stays separate.
+
+    Bazel relays JVM warnings on stderr. Merging the streams (as a
+    combined capture does) lets a warning line corrupt parsed output
+    paths, so stdout is captured alone and stderr is shown on failure.
+    """
+    proc = subprocess.run(
+        list(argv),
+        cwd=cwd,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        check=False,
+    )
     if proc.returncode != 0:
-        raise RuntimeError("bazel info %s failed (exit %s)"
-                           % (key, proc.returncode))
-    return proc.stdout.strip()
+        raise RuntimeError("bazel %s failed (exit %s): %s"
+                           % (" ".join(list(argv)[1:]), proc.returncode,
+                              tail_lines(proc.stderr)))
+    return proc.stdout
 
 
-def query_target_files(run, work, out_base, target, build_flags):
-    """Absolute output paths of a target via `cquery --output=files`."""
-    proc = run(["bazel", "--batch", "--output_base=" + out_base,
-                "cquery", "--output=files", target] + list(build_flags),
-               cwd=work, capture_output=True)
-    if proc.returncode != 0:
-        raise RuntimeError("bazel cquery %s failed (exit %s)"
-                           % (target, proc.returncode))
-    execroot = bazel_info(run, work, out_base, "execution_root")
+def check_under_base(path, out_base, what):
+    """Fails closed unless path exists under the output base."""
+    abs_path = os.path.abspath(path)
+    if not abs_path.startswith(os.path.abspath(out_base) + os.sep):
+        raise RuntimeError("sol %s %s is not under output base %s"
+                           % (what, path, out_base))
+    if not os.path.exists(abs_path):
+        raise RuntimeError("sol %s %s does not exist" % (what, path))
+    return abs_path
+
+
+def bazel_info(capture, work, out_base, key):
+    """One `bazel --batch info` path (execroot, ...), validated."""
+    out = capture(["bazel", "--batch", "--output_base=" + out_base,
+                   "info", key], cwd=work)
+    lines = [line.strip() for line in out.splitlines() if line.strip()]
+    if len(lines) != 1:
+        raise RuntimeError("bazel info %s returned %d line(s)"
+                           % (key, len(lines)))
+    return check_under_base(lines[0], out_base, "info " + key)
+
+
+def query_target_files(capture, work, out_base, target, build_flags):
+    """Absolute output paths of a target via `cquery --output=files`.
+
+    Every non-blank line must resolve to an existing path under the
+    output base; anything else (a warning leaked into stdout, a format
+    change) fails loudly instead of becoming a bogus verify path.
+    """
+    out = capture(["bazel", "--batch", "--output_base=" + out_base,
+                   "cquery", "--output=files", target] + list(build_flags),
+                  cwd=work)
+    execroot = bazel_info(capture, work, out_base, "execution_root")
     files = []
-    for line in proc.stdout.splitlines():
+    for line in out.splitlines():
         line = line.strip()
-        if line:
-            files.append(line if os.path.isabs(line)
-                         else os.path.join(execroot, line))
+        if not line:
+            continue
+        path = line if os.path.isabs(line) else os.path.join(execroot, line)
+        files.append(check_under_base(path, out_base, "cquery " + target))
+    if not files:
+        raise RuntimeError("bazel cquery %s listed no files" % target)
     return files
 
 
@@ -249,17 +289,17 @@ def fallback_verify_files(execroot, config):
     return sorted(binaries + kernel_beside(binaries))
 
 
-def verify_paths_for_config(run, work, out_base, config):
+def verify_paths_for_config(capture, work, out_base, config):
     """Final-output files whose hashes prove the SOL chain's work."""
     spec = CONFIGS[config]
-    listed = query_target_files(run, work, out_base, spec["target"],
+    listed = query_target_files(capture, work, out_base, spec["target"],
                                 spec["build_flags"])
     if config == "device_release":
         found = device_verify_files(listed)
     else:
         found = sim_verify_files(sim_bundle_roots(listed))
     if not found:
-        execroot = bazel_info(run, work, out_base, "execution_root")
+        execroot = bazel_info(capture, work, out_base, "execution_root")
         found = fallback_verify_files(execroot, config)
     if not found:
         raise RuntimeError("sol found no verify files for %s" % config)
@@ -375,11 +415,13 @@ def run_sol_scenario(args, config, scenario):
         check_clean_actions(log_path, spec["target"],
                             args.min_clean_actions)
     out_base = out_base_of(args, config)
-    execroot = bazel_info(args.run, args.work, out_base, "execution_root")
+    execroot = bazel_info(args.capture, args.work, out_base,
+                            "execution_root")
     bazel_out = os.path.join(execroot, "bazel-out")
     if os.path.isdir(bazel_out):
         make_writable_tree(bazel_out)
-    verify = verify_paths_for_config(args.run, args.work, out_base, config)
+    verify = verify_paths_for_config(args.capture, args.work, out_base,
+                                     config)
     before = snapshot_hashes(verify)
     backup = backup_files(verify, os.path.join(args.work,
                                                "sol-backup-" + scenario))
@@ -504,6 +546,7 @@ def summarize_sol(results_dir, meta):
 
 def main_run(cmd):
     cmd.run = real_run
+    cmd.capture = capture_bazel_output
     cmd.measure = lambda argv, cwd: measure_with_time(
         argv, cwd, cmd.time_bin)
     configs = list(cmd.config) if cmd.config else list(CONFIG_ORDER)

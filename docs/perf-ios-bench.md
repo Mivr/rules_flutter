@@ -192,7 +192,10 @@ mode measures two numbers in the same unit:
 Proof the SOL did the same work: its final outputs are hashed before
 and after the chain (the App.framework binary for device_release; the
 app's kernel blob and the App.framework binary for sim_debug, located
-via `cquery --output=files` with a bazel-out glob fallback). A scenario
+via `cquery --output=files` with a bazel-out glob fallback). Bazel
+info/query output is captured stdout-only (Bazel's stderr carries JVM
+warnings that once corrupted a parsed path), and every parsed line must
+resolve to an existing path under the output base. A scenario
 whose outputs differ is reported with `identical: false` and no SOL
 number. Verify files are backed up before each chain and restored
 after, so a chain can never perturb the next incremental build.
