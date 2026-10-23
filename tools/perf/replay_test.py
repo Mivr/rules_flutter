@@ -267,10 +267,49 @@ class ExecConfigTest(unittest.TestCase):
             "targetLabel": "@@abseil-cpp+//absl/base:base",
         }
 
+    def plain_exec_spawn(self):
+        # Bazel 9's default exec configuration has no -ST-<hash>
+        # suffix: bazel-out/darwin_arm64-opt-exec/... (as in the
+        # runner's own log for swift_stdlib_tool).
+        return {
+            "commandArgs": [
+                "bazel-out/darwin_arm64-opt-exec/bin/external/"
+                "rules_apple+/tools/swift_stdlib_tool/swift_stdlib_tool",
+                "--output",
+                "bazel-out/darwin_arm64-opt-exec/bin/external/"
+                "rules_apple+/tools/swift_stdlib_tool/out.zip",
+            ],
+            "environmentVariables": [],
+            "listedOutputs": [
+                "bazel-out/darwin_arm64-opt-exec/bin/external/"
+                "rules_apple+/tools/swift_stdlib_tool/out.zip",
+            ],
+            "mnemonic": "CppCompile",
+            "exitCode": 0,
+            "targetLabel": "@@rules_apple+//tools/swift_stdlib_tool:tool",
+        }
+
     def test_exec_config_detected(self):
         self.assertTrue(is_exec_config(self.exec_spawn()))
         self.assertFalse(is_exec_config(AOT_SPAWN))
         self.assertFalse(is_exec_config(SWIFT_SPAWN))
+
+    def test_plain_exec_config_detected(self):
+        self.assertTrue(is_exec_config(self.plain_exec_spawn()))
+
+    def test_plain_exec_outputs_are_host_tool_builds(self):
+        spawn = self.plain_exec_spawn()
+        self.assertTrue(builds_host_tool(spawn))
+        chainable, skipped = select_chain_spawns(
+            [spawn, chain_spawn(TARGET_OUTPUTS)])
+        self.assertEqual(len(chainable), 1)
+        self.assertEqual(skipped, {CHAIN_SKIP_HOST_TOOL: 1})
+
+    def test_plain_exec_skipped_as_host_tools_in_compare(self):
+        replayable, skipped = select_spawns(
+            [self.plain_exec_spawn(), AOT_SPAWN], DEFAULT_IOS_MNEMONICS)
+        self.assertEqual(replayable, [AOT_SPAWN])
+        self.assertEqual(skipped, {HOST_TOOLS_SKIPPED_KEY: 1})
 
     def test_target_config_bazel_out_not_exec(self):
         spawn = dict(self.exec_spawn(), commandArgs=[

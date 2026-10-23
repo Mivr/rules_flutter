@@ -86,9 +86,12 @@ DEFAULT_IOS_MNEMONICS = frozenset([
 ])
 
 # Exec-configuration output directory: bazel-out/<config>-exec-<hash>/...
-# builds host tools, not the app. Matched against command arguments and
-# declared outputs, never source inputs (which live outside bazel-out).
-EXEC_CONFIG_RE = re.compile(r"(?:^|/)bazel-out/[^/\s\"']*-exec-[^/\s\"']*/")
+# or bazel-out/<config>-exec/... (Bazel 9's default exec configuration
+# has no -ST-<hash> suffix) builds host tools, not the app. Matched
+# against command arguments and declared outputs, never source inputs
+# (which live outside bazel-out).
+EXEC_CONFIG_RE = re.compile(
+    r"(?:^|/)bazel-out/[^/\s\"']*-exec(?:-[^/\s\"']*)?/")
 
 # Skipped-bucket label for exec-configuration spawns in the report's
 # skipped_by_mnemonic table and the summary ("host tools (not replayed)").
