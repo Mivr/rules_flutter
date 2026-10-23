@@ -186,7 +186,10 @@ build is what a release engineer ships: beside `:app_flutter` it builds
 `split_debug_info` and `tree_shake_icons` — for a physical iPhone (`-c opt`,
 `arm64`, reached through `ios_device_opt.bzl`), and inspects that device
 `App.framework` directly. No signing is needed. It parses the Mach-O header
-itself (arm64, iOS platform, AOT snapshot exports), asserts an un-obfuscated
+itself (arm64, iOS platform, AOT snapshot exports), checks the snapshot's own
+VM features string names `arm64` and `ios` (the framework rule stamps
+`LC_BUILD_VERSION` itself, so the load command alone cannot show what the
+snapshot was compiled for), asserts an un-obfuscated
 twin built beside it keeps the class name the release binary hides, and
 checks the `.symbols` file and the tree-shaken icon font against the debug
 simulator bundle.
