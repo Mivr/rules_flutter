@@ -3,30 +3,40 @@
 
 For each bench configuration (``device_release``, ``sim_debug``) and each
 scenario (``clean``, ``app_edit``, ``core_edit``) this tool measures two
-numbers in the same unit:
+numbers in the same unit, whole-tree user+sys CPU seconds:
 
-- the Bazel cost: the whole ``bazel --batch build`` process tree, timed
-  with ``/usr/bin/time -l`` (instructions retired where the VM exposes
-  them, otherwise user+sys CPU seconds);
+- the Bazel cost: the whole ``bazel --batch build`` process tree (Bazel's
+  own work plus every action), measured with wait4 rusage deltas, which
+  include reaped descendants on both macOS and Linux;
 - the SOL cost: the minimal chain of the same tool binaries Bazel ran
   for that scenario, taken from that build's execution log (kernel
   compile, gen_snapshot, assembler/linker, bundling steps, with the same
-  flags and inputs) and run by hand in order under the same measurement.
+  flags and inputs), run by hand in order. The SOL number is the sum of
+  the chain steps' own process-tree CPU: the driver's own cost (loading
+  the log, hashing, moving files) is never included.
 
-Steps whose outputs did not change for an edit are skipped as a person
-would skip them: the execution log records executed spawns only, so
-replaying the log replays exactly the work the edit required.
+A host-tool build is a spawn whose declared outputs land in an exec
+configuration (``bazel-out/*-exec-*/``); those are not part of the chain
+(building Bazel's helper tools is part of the gap). Every other executed
+spawn runs, whatever tool binary it invokes: an action that runs an
+exec-built tool to produce target-configuration outputs (the kernel
+compile, for example) belongs in the chain. Steps whose outputs did not
+change for an edit are skipped as a person would skip them: the
+execution log records executed spawns only.
 
-Proof the SOL did the same work: the scenario's final outputs are hashed
-before and after the chain (the App.framework binary for
-device_release; the app's kernel blob and the App.framework binary for
-sim_debug). A scenario whose outputs differ is reported with
-``identical`` false and no SOL number. Verify files are backed up before
-the chain and restored after, so a chain can never perturb the next
-incremental build's action cache.
+Proof the SOL did the same work: each chain step runs as Bazel runs it
+(its declared outputs are removed before it starts), and the scenario's
+final outputs are moved aside before the chain and hashed after (the
+App.framework binary for device_release; the app's kernel blob and the
+App.framework binary for sim_debug). A step that exits non-zero, times
+out or cannot start — or any verify file that differs afterwards —
+reports ``identical`` false with no SOL number. Bazel's outputs are
+moved back afterwards, so a chain can never perturb the next incremental
+build's action cache.
 
-Subcommands: ``run`` measures repeats, ``chain`` runs one chain (the
-measured child process), ``summarize`` writes medians into ios-sol.json.
+Subcommands: ``run`` measures repeats, ``chain`` runs one chain (an
+unmeasured child process), ``summarize`` writes medians into
+ios-sol.json.
 """
 
 import argparse
@@ -43,9 +53,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from execlog import load_spawns  # noqa: E402
 from replay import (  # noqa: E402
     TIME_BIN,
-    parse_time_l_output,
-    replay_all,
-    select_spawns,
+    chain_all,
+    select_chain_spawns,
     tail_lines,
 )
 from run_rep import (  # noqa: E402
@@ -78,18 +87,14 @@ def out_base_of(args, config):
     return os.path.join(args.out_base, config)
 
 
-def select_sol_spawns(spawns, include_exec_config=False):
-    """Runnable SOL chain: every executed spawn with a command.
+def select_sol_spawns(spawns):
+    """Runnable SOL chain: every executed spawn that is not a host build.
 
-    Unlike the instruction-replay allowlist, the SOL chain covers every
-    mnemonic Bazel executed (kernel compiles included): it is the whole
-    minimal chain, so its outputs must equal Bazel's. Selection itself
-    reuses the status filtering (exit code, cache hits, exec-config host
-    tools); only the mnemonic filter is "everything executed".
+    Delegates to replay's output-based selection: a spawn is a host-tool
+    build only when its declared outputs land in an exec configuration,
+    never because its argv names an exec-built tool.
     """
-    mnemonics = {s.get("mnemonic", "") for s in spawns if isinstance(s, dict)}
-    return select_spawns(spawns, mnemonics,
-                         include_exec_config=include_exec_config)
+    return select_chain_spawns(spawns)
 
 
 def cpu_seconds(cost):
@@ -97,13 +102,6 @@ def cpu_seconds(cost):
     if cost.get("user_s") is None or cost.get("sys_s") is None:
         return None
     return cost["user_s"] + cost["sys_s"]
-
-
-def pick_cost(cost):
-    """The comparable numbers kept per repeat (unit is chosen at summary)."""
-    return {"instructions": cost.get("instructions"),
-            "cpu_s": cpu_seconds(cost),
-            "real_s": cost.get("real_s")}
 
 
 def sha256_file(path):
@@ -130,27 +128,42 @@ def hashes_match(before, after):
             and all(v is not None for v in before.values()))
 
 
-def backup_files(paths, backup_dir):
-    """Copies verify files aside; returns {original: backup}."""
+def move_aside(paths, backup_dir):
+    """Moves verify files aside with rename; returns {original: backup}.
+
+    Rename-not-copy: after the chain the originals move back untouched,
+    so the next incremental build sees Bazel's own outputs (mtimes and
+    all). A missing file fails loudly: the chain must recreate exactly
+    the files Bazel wrote, so hashing "before" against nothing left
+    behind can never report identical=true.
+    """
     shutil.rmtree(backup_dir, ignore_errors=True)
     os.makedirs(backup_dir, exist_ok=True)
     mapping = {}
-    for index, path in enumerate(sorted(paths)):
-        dst = os.path.join(backup_dir, "%d%s" % (
-            index, os.path.splitext(path)[1]))
-        try:
-            shutil.copy2(path, dst)
-        except OSError as exc:
-            raise RuntimeError("sol backup of %s failed (%s)" % (path, exc))
-        mapping[path] = dst
+    try:
+        for index, path in enumerate(sorted(paths)):
+            dst = os.path.join(backup_dir, "%d%s" % (
+                index, os.path.splitext(path)[1]))
+            os.rename(path, dst)
+            mapping[path] = dst
+    except OSError as exc:
+        restore_moved(mapping)
+        raise RuntimeError("sol move-aside of %s failed (%s)" % (path, exc))
     return mapping
 
 
-def restore_files(mapping):
-    """Restores verify files from a backup_files mapping."""
+def restore_moved(mapping):
+    """Removes chain-written files and moves Bazel's originals back."""
     for path in sorted(mapping):
+        backup = mapping[path]
+        if not os.path.exists(backup):
+            raise RuntimeError("sol backup for %s is gone" % path)
         try:
-            shutil.copy2(mapping[path], path)
+            if os.path.islink(path) or os.path.isfile(path):
+                os.remove(path)
+            elif os.path.isdir(path):
+                shutil.rmtree(path)
+            os.rename(backup, path)
         except OSError as exc:
             raise RuntimeError("sol restore of %s failed (%s)" % (path, exc))
 
@@ -306,32 +319,15 @@ def verify_paths_for_config(capture, work, out_base, config):
     return found
 
 
-def measure_with_time(argv, cwd, time_bin=TIME_BIN):
-    """Times argv's whole process tree with time -l.
+def measure_process_tree(argv, cwd):
+    """Whole-tree user+sys CPU seconds of argv (wait4 rusage deltas).
 
-    Falls back to getrusage (direct children only) where time_bin is
-    absent, which is the Linux CI case; SOL mode itself runs on macOS
-    where /usr/bin/time always exists.
+    The same method on macOS and Linux, with no time binary:
+    RUSAGE_CHILDREN includes reaped descendants, so the number covers
+    the child plus every process it spawns (Bazel's own work plus every
+    action for a build). Per-step instruction counters cannot do this:
+    on macOS they describe the timed child alone, never its tree.
     """
-    if time_bin is None or not os.path.isfile(time_bin):
-        return measure_with_getrusage(argv, cwd)
-    proc = subprocess.run(
-        [time_bin, "-l"] + list(argv),
-        cwd=cwd,
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.PIPE,
-        text=True,
-        check=False,
-    )
-    instructions, real_s, user_s, sys_s = parse_time_l_output(proc.stderr)
-    return {"instructions": instructions, "real_s": real_s,
-            "user_s": user_s, "sys_s": sys_s,
-            "returncode": proc.returncode, "method": "time -l"}
-
-
-def measure_with_getrusage(argv, cwd):
-    """Fallback measurement: user+sys CPU of waited-for children."""
     import resource
     start = time.monotonic()
     before = resource.getrusage(resource.RUSAGE_CHILDREN)
@@ -345,13 +341,21 @@ def measure_with_getrusage(argv, cwd):
         check=False,
     )
     after = resource.getrusage(resource.RUSAGE_CHILDREN)
-    record = {"instructions": None, "real_s": time.monotonic() - start,
-              "user_s": after.ru_utime - before.ru_utime,
-              "sys_s": after.ru_stime - before.ru_stime,
-              "returncode": proc.returncode, "method": "getrusage"}
-    if proc.returncode != 0:
-        record["stderr_tail"] = tail_lines(proc.stderr)
-    return record
+    return {"instructions": None, "real_s": time.monotonic() - start,
+            "user_s": after.ru_utime - before.ru_utime,
+            "sys_s": after.ru_stime - before.ru_stime,
+            "returncode": proc.returncode, "method": "rusage-children"}
+
+
+def measure_with_time(argv, cwd, time_bin=TIME_BIN):
+    """Measures argv's whole process tree (kept CLI-compatible name).
+
+    time_bin is accepted for compatibility and ignored: both numbers are
+    whole-tree user+sys CPU seconds on every host, so there is exactly
+    one CPU method and no platform-specific binary to miss.
+    """
+    del time_bin
+    return measure_process_tree(argv, cwd)
 
 
 def bazel_batch_build(args, config, log_path):
@@ -371,40 +375,106 @@ def bazel_batch_build(args, config, log_path):
 def run_chain(log_path, execroot, report_path, timeout, runner=None):
     """Runs an execution log's SOL chain in order; writes its report."""
     spawns = load_spawns(log_path)
-    mnemonics = {s.get("mnemonic", "") for s in spawns if isinstance(s, dict)}
-    report = replay_all(spawns, mnemonics, execroot, timeout,
-                        budget_seconds=None, runner=runner)
+    report = chain_all(spawns, execroot, timeout, runner=runner)
     with open(report_path, "w", encoding="utf-8", newline="\n") as fh:
         fh.write(json.dumps(report, indent=2, sort_keys=True) + "\n")
-    print("replayed=%d skipped=%s" % (report["n_replayed"],
-                                      report["skipped_by_mnemonic"]))
+    print("replayed=%d failed=%d skipped=%s" % (
+        report["n_replayed"], len(report["failed"]), report["skipped"]))
     return report
 
 
-def measure_sol_chain(args, log_path, execroot, report_path):
-    """Runs the chain subcommand as the measured child process."""
+def run_chain_proc(args, log_path, execroot, report_path):
+    """Runs the chain subcommand as a plain, unmeasured child process.
+
+    The SOL number comes from the chain report (the steps' own CPU),
+    never from timing this driver: its stdout and stderr stay attached
+    so the job log shows what the chain did.
+    """
     argv = [sys.executable, os.path.abspath(__file__), "chain",
             "--log", log_path, "--execroot", execroot,
             "--report", report_path, "--timeout", str(args.timeout)]
-    cost = args.measure(argv, args.work)
-    if cost["returncode"] != 0:
-        raise RuntimeError("sol chain driver failed (exit %s)"
-                           % cost["returncode"])
-    return cost
+    proc = subprocess.run(list(argv), cwd=args.work, stdin=subprocess.DEVNULL,
+                          check=False)
+    return proc.returncode
+
+
+def read_chain_report(report_path):
+    """Chain report dict, or None when the chain never wrote one.
+
+    None is not swallowed: the caller reports identical=false with a
+    reason naming the missing report.
+    """
+    try:
+        with open(report_path, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def verify_differences(before, after, execroot):
+    """Verify files that differ, with execroot-relative paths and digests."""
+    differ = []
+    for path in sorted(set(before) | set(after)):
+        if before.get(path) == after.get(path):
+            continue
+        try:
+            shown = os.path.relpath(path, execroot)
+        except ValueError:
+            shown = path
+        differ.append({"path": shown, "before": before.get(path),
+                       "after": after.get(path)})
+    return differ
+
+
+def describe_chain(report, differ):
+    """Small per-flow chain record for ios-sol.json (no command lines)."""
+    if report is None:
+        return {"steps": {}, "skipped": {}, "failed": [],
+                "verify_differ": differ, "sol_cpu_s": None,
+                "status": "no report"}
+    steps = {}
+    for mnemonic, entry in (report.get("by_mnemonic") or {}).items():
+        steps[mnemonic] = entry.get("count", 0)
+    failed = report.get("failed") or []
+    return {"steps": steps, "skipped": dict(report.get("skipped") or {}),
+            "failed": [{"mnemonic": entry.get("mnemonic", ""),
+                        "exit": entry.get("exit"),
+                        "stderr_tail": entry.get("stderr_tail")}
+                       for entry in failed],
+            "verify_differ": differ, "sol_cpu_s": report.get("sol_cpu_s"),
+            "status": "failed" if failed else "ok"}
+
+
+def flow_reason(chain, exit_code):
+    """One-line verdict reason for the job log and the flow record."""
+    if chain["status"] == "no report":
+        return "chain wrote no report (exit %s)" % (exit_code,)
+    if chain["failed"]:
+        first = chain["failed"][0]
+        reason = "step %s failed (exit %s)" % (first["mnemonic"],
+                                               first["exit"])
+    else:
+        reason = "ok"
+    if chain["verify_differ"]:
+        shown = chain["verify_differ"][0]["path"]
+        reason += "; verify differ: %d file(s), e.g. %s" % (
+            len(chain["verify_differ"]), shown)
+    elif chain["failed"] and exit_code != 0:
+        reason += "; chain exit %s" % (exit_code,)
+    return reason
 
 
 def chain_replayed(report_path):
     """Replayed-action count from a chain report (loud when missing)."""
-    try:
-        with open(report_path, encoding="utf-8") as fh:
-            return json.load(fh).get("n_replayed", 0)
-    except (OSError, ValueError) as exc:
-        raise RuntimeError("sol chain report %s unreadable (%s)"
-                           % (report_path, exc))
+    report = read_chain_report(report_path)
+    if report is None or not isinstance(report.get("n_replayed"), int):
+        raise RuntimeError("sol chain report %s unreadable" % report_path)
+    return report["n_replayed"]
 
 
 def run_sol_scenario(args, config, scenario):
-    """Builds one scenario, replays its SOL chain, proves the outputs."""
+    """Builds one scenario, runs its SOL chain, proves the outputs."""
     spec = CONFIGS[config]
     edit = _EDITS[scenario]
     if edit is not None:
@@ -416,29 +486,47 @@ def run_sol_scenario(args, config, scenario):
                             args.min_clean_actions)
     out_base = out_base_of(args, config)
     execroot = bazel_info(args.capture, args.work, out_base,
-                            "execution_root")
+                          "execution_root")
     bazel_out = os.path.join(execroot, "bazel-out")
     if os.path.isdir(bazel_out):
         make_writable_tree(bazel_out)
     verify = verify_paths_for_config(args.capture, args.work, out_base,
                                      config)
-    before = snapshot_hashes(verify)
-    backup = backup_files(verify, os.path.join(args.work,
-                                               "sol-backup-" + scenario))
     record_dir = os.path.join(args.results, "sol", config, scenario,
                               "rep%d" % args.rep)
     os.makedirs(record_dir, exist_ok=True)
-    sol_cost = measure_sol_chain(args, log_path, execroot,
-                                 os.path.join(record_dir, _CHAIN_REPORT))
-    after = snapshot_hashes(verify)
-    restore_files(backup)
+    report_path = os.path.join(record_dir, _CHAIN_REPORT)
+    before = snapshot_hashes(verify)
+    aside = move_aside(verify, os.path.join(args.work,
+                                            "sol-backup-" + scenario))
+    try:
+        exit_code = run_chain_proc(args, log_path, execroot, report_path)
+        report = read_chain_report(report_path)
+        after = snapshot_hashes(verify)
+    finally:
+        restore_moved(aside)
+    differ = verify_differences(before, after, execroot)
+    chain = describe_chain(report, differ)
+    failed = bool(chain["failed"]) or chain["status"] != "ok"
+    identical = hashes_match(before, after) and not failed and not differ
+    if identical:
+        sol = {"cpu_s": chain["sol_cpu_s"],
+               "real_s": (report or {}).get("sol_real_s")}
+    else:
+        sol = None
+    if sol is not None and sol["cpu_s"] is None:
+        identical = False
+        sol = None
     record = {"flow": flow_id(config, scenario), "config": config,
-              "scenario": scenario, "bazel": pick_cost(bazel_cost),
-              "sol": pick_cost(sol_cost),
-              "identical": hashes_match(before, after),
-              "n_sol_actions": chain_replayed(
-                  os.path.join(record_dir, _CHAIN_REPORT)),
-              "verify": {"before": before, "after": after}}
+              "scenario": scenario,
+              "bazel": {"cpu_s": cpu_seconds(bazel_cost),
+                        "real_s": bazel_cost["real_s"]},
+              "sol": sol,
+              "identical": identical,
+              "reason": flow_reason(chain, exit_code),
+              "n_sol_actions": (report or {}).get("n_replayed", 0),
+              "verify": {"before": before, "after": after},
+              "chain": chain}
     with open(os.path.join(record_dir, _RECORD), "w", encoding="utf-8",
               newline="\n") as fh:
         fh.write(json.dumps(record, indent=2, sort_keys=True) + "\n")
@@ -459,13 +547,20 @@ def run_sol_rep(args, rep, configs):
     return records
 
 
+def rep_sort_key(name):
+    """Numeric-aware sort for repN directories (rep10 follows rep9)."""
+    if name.startswith("rep") and name[3:].isdigit():
+        return (0, int(name[3:]), name)
+    return (1, 0, name)
+
+
 def load_sol_records(results_dir, config, scenario):
     """Per-repeat record dicts for one config and scenario."""
     scenario_dir = os.path.join(results_dir, "sol", config, scenario)
     records = []
     if not os.path.isdir(scenario_dir):
         return records
-    for rep in sorted(os.listdir(scenario_dir)):
+    for rep in sorted(os.listdir(scenario_dir), key=rep_sort_key):
         path = os.path.join(scenario_dir, rep, _RECORD)
         if not os.path.isfile(path):
             continue
@@ -475,26 +570,37 @@ def load_sol_records(results_dir, config, scenario):
 
 
 def pick_unit(collected):
-    """One unit for the artifact: instructions iff every repeat has them."""
-    for records in collected.values():
-        for record in records:
-            for key in ("bazel", "sol"):
-                if record[key].get("instructions") is None:
-                    return "cpu_seconds"
-    return "instructions"
+    """One unit for the artifact: always cpu_seconds.
+
+    Both numbers are whole-tree user+sys CPU seconds on every host (a
+    macOS instruction counter describes the timed child alone, never
+    its process tree, so it cannot measure a build). Per-step
+    instruction detail may live in chain.json; it is never the flow
+    number.
+    """
+    del collected
+    return "cpu_seconds"
 
 
 def summarize_flow(records, unit):
     """Median costs over repeats; no SOL number unless all repeats match."""
-    key = "instructions" if unit == "instructions" else "cpu_s"
+    del unit
     identical = all(record["identical"] for record in records)
-    bazel = summarize_values([record["bazel"][key] for record in records
-                              if record["bazel"][key] is not None])
-    sol = summarize_values([record["sol"][key] for record in records
-                            if record["sol"][key] is not None])
+    bazel = summarize_values([record["bazel"]["cpu_s"] for record in records
+                              if record["bazel"]["cpu_s"] is not None])
+    sol_vals = [record["sol"]["cpu_s"] for record in records
+                if record["sol"] is not None
+                and record["sol"].get("cpu_s") is not None]
+    sol = summarize_values(sol_vals) if identical else summarize_values([])
+    reasons = []
+    for record in records:
+        if record.get("reason") not in reasons:
+            reasons.append(record.get("reason"))
     return {"bazel": bazel["median"],
             "sol": sol["median"] if identical else None,
             "identical": identical,
+            "reason": "ok" if identical else "; ".join(reasons),
+            "chain": records[0].get("chain"),
             "spread": {"n": len(records),
                        "bazel": [bazel["min"], bazel["max"]],
                        "sol": [sol["min"], sol["max"]] if identical else None}}
@@ -556,15 +662,15 @@ def main_run(cmd):
     records = run_sol_rep(cmd, cmd.rep, configs)
     for config, flows in records.items():
         for scenario, record in flows.items():
-            print("flow=%s identical=%s n_sol_actions=%d"
+            print("flow=%s identical=%s n_sol_actions=%d reason=%s"
                   % (record["flow"], record["identical"],
-                     record["n_sol_actions"]))
+                     record["n_sol_actions"], record["reason"]))
     return 0
 
 
 def main_chain(cmd):
-    run_chain(cmd.log, cmd.execroot, cmd.report, cmd.timeout)
-    return 0
+    report = run_chain(cmd.log, cmd.execroot, cmd.report, cmd.timeout)
+    return 1 if report.get("failed") else 0
 
 
 def main_summarize(cmd):
@@ -578,9 +684,9 @@ def main_summarize(cmd):
         if "error" in entry:
             print("flow=%s error=%s" % (flow, entry["error"]))
             continue
-        print("flow=%s unit=%s bazel=%s sol=%s identical=%s" % (
+        print("flow=%s unit=%s bazel=%s sol=%s identical=%s reason=%s" % (
             flow, summary["unit"], entry["bazel"], entry["sol"],
-            entry["identical"]))
+            entry["identical"], entry.get("reason")))
     return 0
 
 
@@ -606,7 +712,8 @@ def build_parser():
                      default=DEFAULT_MIN_CLEAN_ACTIONS,
                      help="clean builds executing fewer actions fail")
     run.add_argument("--time-bin", default=TIME_BIN,
-                     help="time binary for whole-tree measurement")
+                     help="accepted for compatibility; ignored: measurement "
+                     "is whole-tree rusage on every host")
     chain = sub.add_parser("chain", help="run one SOL chain (measured child)")
     chain.add_argument("--log", required=True, help="execution log path")
     chain.add_argument("--execroot", required=True,

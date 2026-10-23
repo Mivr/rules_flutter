@@ -14,22 +14,27 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import sol
 from sol import (
-    backup_files,
     bazel_info,
     capture_bazel_output,
     chain_replayed,
     check_under_base,
     collect_runner_info,
     cpu_seconds,
+    describe_chain,
     device_verify_files,
     fallback_verify_files,
     flow_id,
+    flow_reason,
     hashes_match,
     kernel_beside,
     load_sol_records,
+    measure_process_tree,
     measure_with_time,
+    move_aside,
     pick_unit,
-    restore_files,
+    read_chain_report,
+    rep_sort_key,
+    restore_moved,
     run_chain,
     select_sol_spawns,
     sha256_file,
@@ -38,13 +43,19 @@ from sol import (
     snapshot_hashes,
     summarize_flow,
     summarize_sol,
+    verify_differences,
 )
 
 
 def kernel_spawn():
+    # Runs an exec-built frontend server (argv[0] under -exec-) to
+    # produce target-configuration outputs: it belongs in the chain.
     return {
-        "commandArgs": ["frontend_server", "--target=flutter", "main.dart"],
+        "commandArgs": ["bazel-out/darwin_arm64-opt-exec-1234ABCD/bin/"
+                        "frontend_server",
+                        "--target=flutter", "main.dart"],
         "environmentVariables": [],
+        "listedOutputs": ["bazel-out/darwin_arm64-dbg/bin/app/app.dill"],
         "mnemonic": "FlutterKernelCompile",
         "exitCode": 0,
         "targetLabel": "//packages/pkg0:pkg0",
@@ -55,6 +66,7 @@ def aot_spawn():
     return {
         "commandArgs": ["gen_snapshot", "--macho", "out.dill"],
         "environmentVariables": [],
+        "listedOutputs": ["bazel-out/darwin_arm64-opt/bin/app/App.dill"],
         "mnemonic": "FlutterAotMacho",
         "exitCode": 0,
         "targetLabel": "//app:app",
@@ -68,6 +80,8 @@ def exec_spawn():
             "bazel-out/darwin_arm64-opt-exec-1234ABCD/bin/x/y.cc",
         ],
         "environmentVariables": [],
+        "listedOutputs": ["bazel-out/darwin_arm64-opt-exec-1234ABCD/bin/"
+                          "x/y.o"],
         "mnemonic": "CppCompile",
         "exitCode": 0,
         "targetLabel": "@@abseil-cpp+//x:y",
@@ -92,28 +106,30 @@ class FlowIdTest(unittest.TestCase):
 
 
 class SelectSolTest(unittest.TestCase):
-    def test_every_executed_mnemonic_is_chain(self):
-        genrule = {
-            "commandArgs": ["merge_plists", "a.plist"],
-            "environmentVariables": [],
-            "mnemonic": "Genrule",
-            "exitCode": 0,
-            "targetLabel": "//app:app",
-        }
-        runnable, skipped = select_sol_spawns(
-            [kernel_spawn(), aot_spawn(), genrule])
-        self.assertEqual(len(runnable), 3)
+    def test_exec_tool_argv_with_target_outputs_is_chain(self):
+        # The defect: the old argv-based classifier dropped every action
+        # that runs an exec-built tool (the kernel compile above), so the
+        # SOL never did the dominant step. Output-based selection keeps it.
+        runnable, skipped = select_sol_spawns([kernel_spawn(), aot_spawn()])
+        self.assertEqual(len(runnable), 2)
         self.assertEqual(skipped, {})
 
-    def test_host_tools_cached_failed_and_bare_skipped(self):
+    def test_host_tool_builds_skipped(self):
+        runnable, skipped = select_sol_spawns(
+            [exec_spawn(), aot_spawn()])
+        self.assertEqual(runnable, [aot_spawn()])
+        self.assertEqual(skipped, {"host-tool build": 1})
+
+    def test_cached_failed_and_bare_skipped(self):
         cached = dict(aot_spawn(), cacheHit=True)
         failed = dict(kernel_spawn(), exitCode=1)
         bare = dict(aot_spawn(), commandArgs=[])
         runnable, skipped = select_sol_spawns(
-            [exec_spawn(), cached, failed, bare, aot_spawn()])
+            [cached, failed, bare, aot_spawn()])
         self.assertEqual(runnable, [aot_spawn()])
-        self.assertEqual(skipped["host tools (not replayed)"], 1)
-        self.assertEqual(sum(skipped.values()), 4)
+        self.assertEqual(skipped["cache hit"], 1)
+        self.assertEqual(skipped["bazel exit 1"], 1)
+        self.assertEqual(sum(skipped.values()), 3)
 
 
 class HashTest(unittest.TestCase):
@@ -158,23 +174,48 @@ class HashTest(unittest.TestCase):
         self.assertIsNone(cpu_seconds({"user_s": None, "sys_s": 0.2}))
         self.assertIsNone(cpu_seconds({}))
 
-    def test_backup_and_restore(self):
+
+class MoveAsideTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="sol-aside-")
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def write(self, name, data):
+        path = os.path.join(self.tmp, name)
+        with open(path, "wb") as fh:
+            fh.write(data)
+        return path
+
+    def test_move_aside_and_back_preserves_files(self):
         first = self.write("App", b"original")
         second = self.write("kernel_blob.bin", b"kernel")
-        mapping = backup_files([first, second],
-                               os.path.join(self.tmp, "backup"))
-        self.write("App", b"corrupted")
-        os.remove(second)
-        restore_files(mapping)
+        backup_dir = os.path.join(self.tmp, "backup")
+        mapping = move_aside([first, second], backup_dir)
+        self.assertFalse(os.path.lexists(first))
+        self.assertFalse(os.path.lexists(second))
+        # The chain writes fresh files in their place.
+        self.write("App", b"chain-wrote-this")
+        restore_moved(mapping)
         with open(first, "rb") as fh:
             self.assertEqual(fh.read(), b"original")
         with open(second, "rb") as fh:
             self.assertEqual(fh.read(), b"kernel")
+        self.assertFalse(os.path.exists(backup_dir + "/0"))
 
-    def test_backup_missing_raises(self):
+    def test_missing_file_raises_and_restores_partial(self):
+        first = self.write("App", b"original")
         with self.assertRaises(RuntimeError):
-            backup_files([os.path.join(self.tmp, "absent")],
-                         os.path.join(self.tmp, "backup"))
+            move_aside([first, os.path.join(self.tmp, "absent")],
+                       os.path.join(self.tmp, "backup"))
+        with open(first, "rb") as fh:
+            self.assertEqual(fh.read(), b"original")
+
+    def test_restore_with_missing_backup_raises(self):
+        with self.assertRaises(RuntimeError):
+            restore_moved({os.path.join(self.tmp, "App"):
+                           os.path.join(self.tmp, "gone")})
 
 
 class VerifyFilesTest(unittest.TestCase):
@@ -244,54 +285,42 @@ class VerifyFilesTest(unittest.TestCase):
 class MeasureTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp(prefix="sol-measure-")
-        self.fake_time = os.path.join(self.tmp, "time")
-        with open(self.fake_time, "w", encoding="utf-8",
-                  newline="\n") as fh:
-            fh.write("#!/bin/sh\n"
-                     'if [ "$1" = "-l" ]; then shift; fi\n'
-                     'echo "  2.50 real         2.00 user         0.30 sys" >&2\n'
-                     'echo "  987,654,321  instructions retired" >&2\n'
-                     'exec "$@"\n')
-        os.chmod(self.fake_time, os.stat(self.fake_time).st_mode
-                 | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
 
     def tearDown(self):
         shutil.rmtree(self.tmp, ignore_errors=True)
 
-    def test_time_l_parses_instructions_and_cpu(self):
-        cost = measure_with_time(
-            [sys.executable, "-c", "pass"], self.tmp,
-            time_bin=self.fake_time)
-        self.assertEqual(cost["instructions"], 987654321)
-        self.assertAlmostEqual(cost["user_s"], 2.00)
-        self.assertAlmostEqual(cost["sys_s"], 0.30)
-        self.assertEqual(cost["returncode"], 0)
-        self.assertEqual(cost["method"], "time -l")
-
-    def test_exit_code_passes_through(self):
-        cost = measure_with_time(
-            [sys.executable, "-c", "import sys; sys.exit(3)"], self.tmp,
-            time_bin=self.fake_time)
-        self.assertEqual(cost["returncode"], 3)
-        self.assertEqual(cost["instructions"], 987654321)
-
-    def test_missing_time_bin_falls_back_to_getrusage(self):
-        cost = measure_with_time(
-            [sys.executable, "-c", "pass"], self.tmp,
-            time_bin=os.path.join(self.tmp, "absent"))
+    def test_whole_tree_cpu_without_time_bin(self):
+        cost = measure_process_tree(
+            [sys.executable, "-c", "pass"], self.tmp)
         self.assertIsNone(cost["instructions"])
-        self.assertEqual(cost["method"], "getrusage")
         self.assertEqual(cost["returncode"], 0)
+        self.assertEqual(cost["method"], "rusage-children")
         self.assertGreaterEqual(cost["user_s"], 0.0)
         self.assertGreaterEqual(cost["sys_s"], 0.0)
 
-    def test_fallback_records_stderr_tail_on_failure(self):
+    def test_time_bin_flag_ignored_same_method(self):
         cost = measure_with_time(
-            [sys.executable, "-c",
-             "import sys; sys.stderr.write('boom\\n'); sys.exit(2)"],
-            self.tmp, time_bin=os.path.join(self.tmp, "absent"))
-        self.assertEqual(cost["returncode"], 2)
-        self.assertIn("boom", cost["stderr_tail"])
+            [sys.executable, "-c", "pass"], self.tmp,
+            time_bin=os.path.join(self.tmp, "absent"))
+        self.assertEqual(cost["method"], "rusage-children")
+        self.assertGreaterEqual(cost["user_s"], 0.0)
+
+    def test_exit_code_passes_through(self):
+        cost = measure_process_tree(
+            [sys.executable, "-c", "import sys; sys.exit(3)"], self.tmp)
+        self.assertEqual(cost["returncode"], 3)
+
+    def test_grandchild_cpu_included(self):
+        child = ("import subprocess, sys\n"
+                 "subprocess.run([sys.executable, '-c',\n"
+                 " 'import time\\n'\n"
+                 " 's=time.perf_counter()\\n'\n"
+                 " 'while time.perf_counter()-s<0.5:\\n'\n"
+                 " ' pass'])")
+        cost = measure_process_tree(
+            [sys.executable, "-c", child], self.tmp)
+        self.assertEqual(cost["returncode"], 0)
+        self.assertGreater(cost["user_s"] + cost["sys_s"], 0.1)
 
 
 class ChainTest(unittest.TestCase):
@@ -308,23 +337,117 @@ class ChainTest(unittest.TestCase):
 
     def fake_runner(self, spawn):
         return {"mnemonic": spawn["mnemonic"], "target": "",
-                "instructions": 42, "real_s": 0.1, "user_s": 0.08,
-                "sys_s": 0.02, "exit_code": 0, "command": []}
+                "instructions": None, "real_s": 0.1, "user_s": 0.08,
+                "sys_s": 0.02, "exit_code": 0, "stderr_tail": None,
+                "command": []}
 
     def test_chain_runs_executed_only_and_writes_report(self):
         report = run_chain(self.log, self.tmp, self.report, 60.0,
                            runner=self.fake_runner)
         self.assertEqual(report["n_replayed"], 1)
-        self.assertFalse(report["truncated"])
+        self.assertFalse(report["stopped_early"])
+        self.assertEqual(report["failed"], [])
+        self.assertEqual(report["skipped"], {"cache hit": 1})
+        self.assertAlmostEqual(report["sol_cpu_s"], 0.1)
         self.assertEqual(chain_replayed(self.report), 1)
         with open(self.report, encoding="utf-8") as fh:
             saved = json.load(fh)
         self.assertEqual(
-            saved["by_mnemonic"]["FlutterAotMacho"]["instructions_total"], 42)
+            saved["by_mnemonic"]["FlutterAotMacho"]["count"], 1)
+
+    def test_kernel_with_exec_tool_argv_is_in_chain(self):
+        log = os.path.join(self.tmp, "kernel.json")
+        with open(log, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps(kernel_spawn()) + "\n")
+        report = run_chain(log, self.tmp, self.report, 60.0,
+                           runner=self.fake_runner)
+        self.assertEqual(report["n_replayed"], 1)
+        self.assertEqual(report["skipped"], {})
 
     def test_missing_report_raises(self):
         with self.assertRaises(RuntimeError):
             chain_replayed(os.path.join(self.tmp, "absent.json"))
+
+    def test_read_chain_report_none_when_absent(self):
+        self.assertIsNone(read_chain_report(
+            os.path.join(self.tmp, "absent.json")))
+
+    def test_main_chain_exit_codes(self):
+        ok_log = os.path.join(self.tmp, "ok.json")
+        with open(ok_log, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps(aot_spawn()) + "\n")
+        import types
+        cmd = types.SimpleNamespace(log=ok_log, execroot=self.tmp,
+                                    report=self.report, timeout=60.0)
+        with mock.patch("sol.chain_all",
+                        return_value={"failed": [], "n_replayed": 1,
+                                      "skipped": {}}):
+            self.assertEqual(sol.main_chain(cmd), 0)
+        with mock.patch("sol.chain_all",
+                        return_value={"failed": [{"mnemonic": "X"}],
+                                      "n_replayed": 1, "skipped": {}}):
+            self.assertEqual(sol.main_chain(cmd), 1)
+
+
+class ChainRecordTest(unittest.TestCase):
+    def report(self):
+        return {
+            "n_replayed": 2,
+            "by_mnemonic": {"Genrule": {"count": 2}},
+            "skipped": {"host-tool build": 3},
+            "failed": [],
+            "sol_cpu_s": 1.5,
+            "sol_real_s": 2.0,
+        }
+
+    def test_describe_chain_shape(self):
+        chain = describe_chain(self.report(), [])
+        self.assertEqual(chain["steps"], {"Genrule": 2})
+        self.assertEqual(chain["skipped"], {"host-tool build": 3})
+        self.assertEqual(chain["failed"], [])
+        self.assertEqual(chain["verify_differ"], [])
+        self.assertEqual(chain["sol_cpu_s"], 1.5)
+        self.assertEqual(chain["status"], "ok")
+        self.assertNotIn("command", json.dumps(chain))
+
+    def test_describe_chain_no_report(self):
+        chain = describe_chain(None, [{"path": "a", "before": "b",
+                                       "after": None}])
+        self.assertEqual(chain["status"], "no report")
+        self.assertIsNone(chain["sol_cpu_s"])
+
+    def test_verify_differences_relative(self):
+        before = {"/exec/a": "1", "/exec/b": "2"}
+        after = {"/exec/a": "1", "/exec/b": "3", "/exec/c": "4"}
+        differ = verify_differences(before, after, "/exec")
+        self.assertEqual(
+            differ,
+            [{"path": "b", "before": "2", "after": "3"},
+             {"path": "c", "before": None, "after": "4"}])
+
+    def test_flow_reason_ok(self):
+        self.assertEqual(flow_reason(describe_chain(self.report(), []), 0),
+                         "ok")
+
+    def test_flow_reason_names_step_and_files(self):
+        report = self.report()
+        report["failed"] = [{"mnemonic": "Genrule", "exit": 3,
+                             "stderr_tail": "boom"}]
+        chain = describe_chain(
+            report, [{"path": "b/App", "before": "1", "after": None}])
+        reason = flow_reason(chain, 1)
+        self.assertIn("Genrule", reason)
+        self.assertIn("exit 3", reason)
+        self.assertIn("b/App", reason)
+
+    def test_flow_reason_no_report(self):
+        chain = describe_chain(None, [])
+        self.assertIn("no report", flow_reason(chain, 1))
+
+    def test_rep_sort_key_numeric(self):
+        names = ["rep10", "rep2", "rep1", "other"]
+        self.assertEqual(sorted(names, key=rep_sort_key),
+                         ["rep1", "rep2", "rep10", "other"])
 
 
 JVM_WARNING = (
@@ -501,13 +624,18 @@ class NoisyStderrTest(unittest.TestCase):
                           self.tmp)
 
 
-def sol_record(flow, bazel_instr, sol_instr, identical, bazel_cpu=1.0,
-               sol_cpu=0.9):
-    return {"flow": flow, "identical": identical,
-            "bazel": {"instructions": bazel_instr, "cpu_s": bazel_cpu,
-                      "real_s": 1.0},
-            "sol": {"instructions": sol_instr, "cpu_s": sol_cpu,
-                    "real_s": 0.9}}
+CHAIN_OK = {"steps": {"Genrule": 1}, "skipped": {}, "failed": [],
+            "verify_differ": [], "sol_cpu_s": 0.9, "status": "ok"}
+
+
+def sol_record(flow, bazel_cpu, sol_cpu, identical, reason="ok", chain=None):
+    return {"flow": flow, "config": "device_release", "scenario": "clean",
+            "identical": identical, "reason": reason,
+            "bazel": {"cpu_s": bazel_cpu, "real_s": 1.0},
+            "sol": (None if sol_cpu is None
+                    else {"cpu_s": sol_cpu, "real_s": 0.9}),
+            "n_sol_actions": 1,
+            "chain": dict(CHAIN_OK) if chain is None else chain}
 
 
 class SummarizeSolTest(unittest.TestCase):
@@ -526,54 +654,60 @@ class SummarizeSolTest(unittest.TestCase):
                       encoding="utf-8", newline="\n") as fh:
                 fh.write(json.dumps(record) + "\n")
 
-    def test_unit_instructions_and_medians(self):
+    def test_unit_always_cpu_seconds(self):
+        self.assertEqual(pick_unit({}), "cpu_seconds")
+        records = [sol_record("f", 1.0, 0.9, True)]
+        self.assertEqual(pick_unit({"f": records}), "cpu_seconds")
+
+    def test_medians_and_chain_passthrough(self):
         self.write_records("device_release", "clean", [
-            sol_record("ios-release-clean", 300, 250, True),
-            sol_record("ios-release-clean", 100, 150, True),
-            sol_record("ios-release-clean", 200, 200, True),
+            sol_record("ios-release-clean", 3.0, 2.5, True),
+            sol_record("ios-release-clean", 1.0, 1.5, True),
+            sol_record("ios-release-clean", 2.0, 2.0, True),
         ])
         records = load_sol_records(self.tmp, "device_release", "clean")
         self.assertEqual(len(records), 3)
-        self.assertEqual(pick_unit({"ios-release-clean": records}),
-                         "instructions")
-        flow = summarize_flow(records, "instructions")
-        self.assertEqual(flow["bazel"], 200)
-        self.assertEqual(flow["sol"], 200)
-        self.assertTrue(flow["identical"])
-        self.assertEqual(flow["spread"]["n"], 3)
-        self.assertEqual(flow["spread"]["bazel"], [100, 300])
-
-    def test_missing_instructions_falls_back_to_cpu(self):
-        records = [sol_record("f", 100, 90, True),
-                   sol_record("f", None, 80, True)]
-        self.assertEqual(pick_unit({"f": records}), "cpu_seconds")
         flow = summarize_flow(records, "cpu_seconds")
-        self.assertAlmostEqual(flow["bazel"], 1.0)
-        self.assertAlmostEqual(flow["sol"], 0.9)
+        self.assertEqual(flow["bazel"], 2.0)
+        self.assertEqual(flow["sol"], 2.0)
+        self.assertTrue(flow["identical"])
+        self.assertEqual(flow["reason"], "ok")
+        self.assertEqual(flow["chain"], CHAIN_OK)
+        self.assertEqual(flow["spread"]["n"], 3)
+        self.assertEqual(flow["spread"]["bazel"], [1.0, 3.0])
 
     def test_mismatch_drops_sol_number(self):
-        records = [sol_record("f", 100, 90, True),
-                   sol_record("f", 110, 95, False)]
-        flow = summarize_flow(records, "instructions")
+        failed_chain = dict(CHAIN_OK, status="failed",
+                            failed=[{"mnemonic": "Genrule", "exit": 1,
+                                     "stderr_tail": "boom"}])
+        records = [sol_record("f", 1.0, 0.9, True),
+                   sol_record("f", 1.1, None, False,
+                              reason="step Genrule failed (exit 1)",
+                              chain=failed_chain)]
+        flow = summarize_flow(records, "cpu_seconds")
         self.assertFalse(flow["identical"])
         self.assertIsNone(flow["sol"])
         self.assertIsNone(flow["spread"]["sol"])
-        self.assertEqual(flow["bazel"], 110)
+        self.assertEqual(flow["bazel"], 1.1)
+        self.assertIn("failed (exit 1)", flow["reason"])
+        self.assertEqual(flow["chain"], CHAIN_OK)
 
     def test_summarize_sol_shape(self):
         self.write_records("device_release", "clean",
-                           [sol_record("ios-release-clean", 100, 90, True)])
+                           [sol_record("ios-release-clean", 1.0, 0.9, True)])
         self.write_records("sim_debug", "app_edit",
-                           [sol_record("ios-debug-app", 50, 40, True)])
+                           [sol_record("ios-debug-app", 0.5, 0.4, True)])
         summary = summarize_sol(
             self.tmp, {"sha": "0" * 40, "repeats": 1, "target_loc": 20000,
                        "seed": 1})
         self.assertEqual(summary["rules_flutter"], "0" * 40)
-        self.assertEqual(summary["unit"], "instructions")
+        self.assertEqual(summary["unit"], "cpu_seconds")
         self.assertIn("system", summary["runner"])
         self.assertIn("cpu_count", summary["runner"])
-        self.assertEqual(summary["flows"]["ios-release-clean"]["bazel"], 100)
-        self.assertEqual(summary["flows"]["ios-debug-app"]["sol"], 40)
+        self.assertEqual(summary["flows"]["ios-release-clean"]["bazel"], 1.0)
+        self.assertEqual(summary["flows"]["ios-debug-app"]["sol"], 0.4)
+        self.assertEqual(summary["flows"]["ios-release-clean"]["chain"],
+                         CHAIN_OK)
         self.assertEqual(summary["flows"]["ios-debug-clean"],
                          {"error": "missing repeats"})
         self.assertEqual(summary["meta"]["repeats"], 1)
@@ -591,6 +725,179 @@ class RunnerInfoTest(unittest.TestCase):
         self.assertTrue(info["system"])
         self.assertTrue(info["machine"])
         self.assertIn("cpu_count", info)
+
+
+FAKE_BAZEL = """\
+#!/usr/bin/env python3
+import json
+import os
+import shutil
+import sys
+
+out_base = ""
+log = ""
+mode = ""
+for arg in sys.argv[1:]:
+    if arg.startswith("--output_base="):
+        out_base = arg.split("=", 1)[1]
+    elif arg.startswith("--execution_log_json_file="):
+        log = arg.split("=", 1)[1]
+    elif arg == "info":
+        mode = "info"
+    elif arg == "cquery":
+        mode = "cquery"
+    elif arg == "build":
+        mode = "build"
+execroot = os.path.join(out_base, "execroot")
+rel = "bazel-out/x/App.framework/App"
+if mode == "info":
+    print(execroot)
+elif mode == "cquery":
+    print(rel)
+elif mode == "build":
+    dst = os.path.join(execroot, rel)
+    os.makedirs(os.path.dirname(dst), exist_ok=True)
+    src = os.environ["SOL_SRC"]
+    if os.environ.get("SOL_FAIL") == "1":
+        with open(dst, "w", encoding="utf-8") as fh:
+            fh.write("stale-bytes")
+        cmd = ["sh", "-c", "exit 3"]
+    else:
+        shutil.copyfile(src, dst)
+        cmd = ["sh", "-c", 'cp "$SOL_SRC" "$SOL_DST"']
+    spawn = {
+        "commandArgs": cmd,
+        "environmentVariables": [
+            {"name": "SOL_SRC", "value": src},
+            {"name": "SOL_DST", "value": dst},
+        ],
+        "listedOutputs": [rel],
+        "mnemonic": "Genrule",
+        "exitCode": 0,
+        "targetLabel": "//app:app",
+    }
+    with open(log, "w", encoding="utf-8") as fh:
+        fh.write(json.dumps(spawn) + "\\n")
+else:
+    sys.stderr.write("fake bazel: unknown mode\\n")
+    sys.exit(1)
+"""
+
+STUB_GEN = """\
+#!/usr/bin/env python3
+import sys
+work = sys.argv[sys.argv.index("--workspace") + 1]
+with open(work + "/src.txt", "a", encoding="utf-8") as fh:
+    fh.write("edit:%s\\n" % sys.argv[1])
+"""
+
+
+class SolEndToEndTest(unittest.TestCase):
+    """run -> chain -> summarize without macOS or a real Bazel.
+
+    A fake `bazel` on PATH answers build/info/cquery: the build copies
+    a source file to a framework-style output and logs one spawn whose
+    command reproduces that copy. The real chain subprocess replays it
+    (with per-step output removal and move-aside proof), and summarize
+    writes ios-sol.json. --time-bin points nowhere to prove measurement
+    never needs it.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="sol-e2e-")
+        self.bindir = os.path.join(self.tmp, "bin")
+        os.makedirs(self.bindir)
+        bazel = os.path.join(self.bindir, "bazel")
+        with open(bazel, "w", encoding="utf-8", newline="\n") as fh:
+            fh.write(FAKE_BAZEL)
+        os.chmod(bazel, os.stat(bazel).st_mode
+                 | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+        self.tools = os.path.join(self.tmp, "tools")
+        os.makedirs(self.tools)
+        with open(os.path.join(self.tools, "gen_monorepo.py"), "w",
+                  encoding="utf-8", newline="\n") as fh:
+            fh.write(STUB_GEN)
+        self.pristine = os.path.join(self.tmp, "pristine")
+        os.makedirs(self.pristine)
+        with open(os.path.join(self.pristine, "src.txt"), "w",
+                  encoding="utf-8", newline="\n") as fh:
+            fh.write("v1\n")
+        self.work = os.path.join(self.tmp, "work")
+        self.out_base = os.path.join(self.tmp, "out")
+        self.results = os.path.join(self.tmp, "results")
+        self.env = {"PATH": self.bindir + os.pathsep + os.environ["PATH"],
+                    "SOL_SRC": os.path.join(self.work, "src.txt")}
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def run_argv(self, configs):
+        argv = ["run", "--tools", self.tools, "--pristine", self.pristine,
+                "--work", self.work, "--out-base", self.out_base,
+                "--results", self.results, "--rep", "1",
+                "--min-clean-actions", "1",
+                "--time-bin", os.path.join(self.tmp, "absent")]
+        for config in configs:
+            argv += ["--config", config]
+        return argv
+
+    def summarize_argv(self, out):
+        return ["summarize", "--results", self.results, "--sha", "a" * 40,
+                "--repeats", "1", "--target-loc", "100", "--seed", "7",
+                "--out", out]
+
+    def test_run_chain_summarize_identical(self):
+        out = os.path.join(self.tmp, "ios-sol.json")
+        with mock.patch.dict(os.environ, self.env):
+            self.assertEqual(
+                sol.main(self.run_argv(["device_release", "sim_debug"])), 0)
+            self.assertEqual(sol.main(self.summarize_argv(out)), 0)
+        with open(out, encoding="utf-8") as fh:
+            summary = json.load(fh)
+        self.assertEqual(summary["unit"], "cpu_seconds")
+        self.assertEqual(summary["rules_flutter"], "a" * 40)
+        expected = ["ios-debug-app", "ios-debug-body", "ios-debug-clean",
+                    "ios-release-app", "ios-release-body",
+                    "ios-release-clean"]
+        self.assertEqual(sorted(summary["flows"]), expected)
+        for flow in expected:
+            entry = summary["flows"][flow]
+            self.assertTrue(entry["identical"], flow)
+            self.assertEqual(entry["reason"], "ok", flow)
+            self.assertGreaterEqual(entry["bazel"], 0.0, flow)
+            self.assertGreaterEqual(entry["sol"], 0.0, flow)
+            self.assertEqual(entry["chain"]["steps"], {"Genrule": 1}, flow)
+            self.assertEqual(entry["chain"]["failed"], [], flow)
+            self.assertEqual(entry["chain"]["status"], "ok", flow)
+        # Bazel's outputs are back in place after the move-aside proof.
+        dst = os.path.join(self.out_base, "device_release", "execroot",
+                           "bazel-out", "x", "App.framework", "App")
+        with open(dst, encoding="utf-8") as fh:
+            self.assertTrue(fh.read().startswith("v1\nedit:apply-app-edit"))
+
+    def test_failed_chain_is_not_identical(self):
+        out = os.path.join(self.tmp, "ios-sol.json")
+        env = dict(self.env, SOL_FAIL="1")
+        with mock.patch.dict(os.environ, env):
+            self.assertEqual(
+                sol.main(self.run_argv(["device_release"])), 0)
+            self.assertEqual(sol.main(self.summarize_argv(out)), 0)
+        with open(out, encoding="utf-8") as fh:
+            summary = json.load(fh)
+        for flow in ["ios-release-clean", "ios-release-app",
+                     "ios-release-body"]:
+            entry = summary["flows"][flow]
+            self.assertFalse(entry["identical"], flow)
+            self.assertIsNone(entry["sol"], flow)
+            self.assertIn("Genrule", entry["reason"], flow)
+            self.assertIn("exit 3", entry["reason"], flow)
+            self.assertIn("verify differ", entry["reason"], flow)
+            self.assertEqual(entry["chain"]["failed"][0]["exit"], 3)
+            differ = entry["chain"]["verify_differ"]
+            self.assertEqual(len(differ), 1)
+            self.assertEqual(differ[0]["path"],
+                             "bazel-out/x/App.framework/App")
+            self.assertIsNone(differ[0]["after"])
 
 
 if __name__ == "__main__":
