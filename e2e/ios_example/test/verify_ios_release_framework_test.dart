@@ -147,7 +147,7 @@ Never _abort(String message) {
 /// Every file under [root], following the runfiles symlinks.
 List<File> _allFiles(Directory root) {
   final out = <File>[];
-  for (final entity in root.listSync(recursive: true, followLinks: true)) {
+  for (final entity in root.listSync(recursive: true)) {
     if (entity is File) out.add(entity);
   }
   return out;
@@ -188,9 +188,10 @@ File _takeSingle(
       if (matches(f)) f,
   ];
   if (hits.length != 1) {
+    final paths = [for (final f in hits.take(4)) f.path].join(', ');
     _abort(
       'FAIL: expected $description; found ${hits.length}'
-      '${hits.isEmpty ? '' : ': ${hits.map((f) => f.path).take(4).join(', ')}'}',
+      '${paths.isEmpty ? '' : ': $paths'}',
     );
   }
   return hits[0];
@@ -238,19 +239,20 @@ void _checkMachO(_Report report, String role, String path, Uint8List bytes) {
     );
     return;
   }
-  report.check(
-    'a $role App binary that is a 64-bit Mach-O for arm64',
-    ok: macho.cpuType == _cpuArm64,
-    found: 'cputype 0x${macho.cpuType.toRadixString(16)} in $path',
-  );
-  report.check(
-    'a $role App binary targeting iOS (platform $_platformIos), '
-    'not the simulator',
-    ok: macho.platform == _platformIos,
-    found: macho.platform == null
-        ? 'no LC_BUILD_VERSION in $path'
-        : 'platform ${macho.platform} in $path',
-  );
+  report
+    ..check(
+      'a $role App binary that is a 64-bit Mach-O for arm64',
+      ok: macho.cpuType == _cpuArm64,
+      found: 'cputype 0x${macho.cpuType.toRadixString(16)} in $path',
+    )
+    ..check(
+      'a $role App binary targeting iOS (platform $_platformIos), '
+      'not the simulator',
+      ok: macho.platform == _platformIos,
+      found: macho.platform == null
+          ? 'no LC_BUILD_VERSION in $path'
+          : 'platform ${macho.platform} in $path',
+    );
   for (final symbol in [_vmInstructions, _isolateInstructions]) {
     report.check(
       'a $role App binary exporting the AOT snapshot symbol $symbol',
@@ -271,22 +273,23 @@ void _checkMachO(_Report report, String role, String path, Uint8List bytes) {
 void _checkFeatures(_Report report, String role, String path, Uint8List bytes) {
   final features = _featuresString(bytes);
   final words = features.split(' ');
-  report.check(
-    'a $role App binary whose snapshot features start with product '
-    '(a release snapshot)',
-    ok: words.isNotEmpty && words.first == 'product',
-    found: features.isEmpty ? 'no features string in $path' : '$features',
-  );
-  report.check(
-    'a $role App binary whose snapshot features name arm64',
-    ok: words.contains('arm64'),
-    found: features.isEmpty ? 'no features string in $path' : '$features',
-  );
-  report.check(
-    'a $role App binary whose snapshot features name ios, not macos',
-    ok: words.contains('ios') && !words.contains('macos'),
-    found: features.isEmpty ? 'no features string in $path' : '$features',
-  );
+  report
+    ..check(
+      'a $role App binary whose snapshot features start with product '
+      '(a release snapshot)',
+      ok: words.isNotEmpty && words.first == 'product',
+      found: features.isEmpty ? 'no features string in $path' : features,
+    )
+    ..check(
+      'a $role App binary whose snapshot features name arm64',
+      ok: words.contains('arm64'),
+      found: features.isEmpty ? 'no features string in $path' : features,
+    )
+    ..check(
+      'a $role App binary whose snapshot features name ios, not macos',
+      ok: words.contains('ios') && !words.contains('macos'),
+      found: features.isEmpty ? 'no features string in $path' : features,
+    );
 }
 
 /// The VM features string in [bytes], or empty when the binary holds none.
@@ -318,17 +321,18 @@ void _checkObfuscation(
   String twinPath,
 ) {
   final needle = utf8.encode(_obfuscatedClass);
-  report.check(
-    'a release App binary that hides $_obfuscatedClass (obfuscated)',
-    ok: !_hasBytes(releaseBytes, needle),
-    found: 'the name $_obfuscatedClass in $releasePath',
-  );
-  report.check(
-    'an un-obfuscated twin App binary that keeps $_obfuscatedClass, '
-    'so the check above cannot pass vacuously',
-    ok: _hasBytes(twinBytes, needle),
-    found: 'no $_obfuscatedClass bytes in $twinPath',
-  );
+  report
+    ..check(
+      'a release App binary that hides $_obfuscatedClass (obfuscated)',
+      ok: !_hasBytes(releaseBytes, needle),
+      found: 'the name $_obfuscatedClass in $releasePath',
+    )
+    ..check(
+      'an un-obfuscated twin App binary that keeps $_obfuscatedClass, '
+      'so the check above cannot pass vacuously',
+      ok: _hasBytes(twinBytes, needle),
+      found: 'no $_obfuscatedClass bytes in $twinPath',
+    );
 }
 
 /// Checks the `.symbols` file is non-empty and carries an object magic.
@@ -342,7 +346,7 @@ void _checkSymbols(_Report report, File symbols) {
   if (bytes.length < 4) return;
   final view = ByteData.sublistView(bytes, 0, 4);
   final magic = view.getUint32(0, Endian.little);
-  final magicBig = view.getUint32(0, Endian.big);
+  final magicBig = view.getUint32(0);
   final isElf =
       bytes[0] == 0x7f &&
       bytes[1] == 0x45 &&
@@ -361,22 +365,24 @@ void _checkSymbols(_Report report, File symbols) {
   );
 }
 
-/// Checks the release icon font is a small, still-valid subset of [debug].
+/// Checks the release icon font is a small, still-valid subset of the debug
+/// font.
 void _checkIconSubset(_Report report, File releaseFont, _FontPair fonts) {
   final releaseBytes = _readOrAbort(releaseFont);
-  report.check(
-    'a tree-shaken icon font at most a tenth of the debug font '
-    '(${fonts.debugBytes.length} bytes)',
-    ok: releaseBytes.length * 10 <= fonts.debugBytes.length,
-    found: '${releaseBytes.length} bytes at ${releaseFont.path}',
-  );
-  report.check(
-    'a tree-shaken icon font that stays a valid OpenType file',
-    ok: _isOpenType(releaseBytes),
-    found:
-        '${releaseBytes.length} bytes at ${releaseFont.path} '
-        'starting with ${_fontTag(releaseBytes)}',
-  );
+  report
+    ..check(
+      'a tree-shaken icon font at most a tenth of the debug font '
+      '(${fonts.debugBytes.length} bytes)',
+      ok: releaseBytes.length * 10 <= fonts.debugBytes.length,
+      found: '${releaseBytes.length} bytes at ${releaseFont.path}',
+    )
+    ..check(
+      'a tree-shaken icon font that stays a valid OpenType file',
+      ok: _isOpenType(releaseBytes),
+      found:
+          '${releaseBytes.length} bytes at ${releaseFont.path} '
+          'starting with ${_fontTag(releaseBytes)}',
+    );
 }
 
 /// The release font under test beside the debug font it is measured against.
@@ -512,20 +518,20 @@ _MachO _parseMachO(Uint8List bytes) {
       case _lcDyldExportsTrie:
         names.addAll(_exportsTrieNames(bytes, commandAt));
     }
-    head.seek(commandAt + cmdsize);
+    head.offset = commandAt + cmdsize;
   }
   return _MachO(cpuType: cpuType, platform: platform, exportNames: names);
 }
 
 /// The platform field of the `LC_BUILD_VERSION` at [commandAt].
 int _buildVersionPlatform(Uint8List bytes, int commandAt) {
-  final reader = _Reader(bytes)..seek(commandAt + 8);
+  final reader = _Reader(bytes)..offset = commandAt + 8;
   return reader.u32();
 }
 
 /// Symbol names from the `LC_SYMTAB` string table at [commandAt].
 Set<String> _symtabNames(Uint8List bytes, int commandAt) {
-  final reader = _Reader(bytes)..seek(commandAt + 8);
+  final reader = _Reader(bytes)..offset = commandAt + 8;
   final symoff = reader.u32();
   final nsyms = reader.u32();
   final stroff = reader.u32();
@@ -546,8 +552,9 @@ Set<String> _symtabNames(Uint8List bytes, int commandAt) {
 
 /// Export names from the `LC_DYLD_INFO_ONLY` export trie at [commandAt].
 Set<String> _infoTrieNames(Uint8List bytes, int commandAt) {
-  final reader = _Reader(bytes)..seek(commandAt + 8);
-  reader.skip(32);
+  final reader = _Reader(bytes)
+    ..offset = commandAt + 8
+    ..skip(32);
   final dataoff = reader.u32();
   final datasize = reader.u32();
   return _Trie(bytes, dataoff, datasize).names();
@@ -555,7 +562,7 @@ Set<String> _infoTrieNames(Uint8List bytes, int commandAt) {
 
 /// Export names from the `LC_DYLD_EXPORTS_TRIE` at [commandAt].
 Set<String> _exportsTrieNames(Uint8List bytes, int commandAt) {
-  final reader = _Reader(bytes)..seek(commandAt + 8);
+  final reader = _Reader(bytes)..offset = commandAt + 8;
   final dataoff = reader.u32();
   final datasize = reader.u32();
   return _Trie(bytes, dataoff, datasize).names();
@@ -617,7 +624,7 @@ class _Trie {
         '(size $size)',
       );
     }
-    final reader = _Reader(bytes)..seek(node);
+    final reader = _Reader(bytes)..offset = node;
     final terminalSize = reader.uleb();
     final terminalEnd = reader.offset + terminalSize;
     if (terminalEnd > start + size) {
@@ -628,7 +635,7 @@ class _Trie {
     if (terminalSize > 0) {
       reader.uleb();
       out.add(prefix);
-      reader.seek(terminalEnd);
+      reader.offset = terminalEnd;
     }
     final children = reader.u8();
     for (var i = 0; i < children; i++) {
@@ -645,11 +652,6 @@ class _Reader {
 
   final Uint8List bytes;
   int offset = 0;
-
-  /// Moves the cursor to [position].
-  void seek(int position) {
-    offset = position;
-  }
 
   /// Skips [count] bytes.
   void skip(int count) {
