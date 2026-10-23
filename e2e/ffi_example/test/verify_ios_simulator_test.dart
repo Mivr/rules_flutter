@@ -18,7 +18,7 @@
 ///   bazel test :verify_ios_simulator_test --test_tag_filters=
 ///
 /// A cold CI simulator boots for minutes, so the target carries Bazel
-/// `timeout = "long"`. Every `simctl` call below carries its own shorter
+/// `timeout = "eternal"`. Every `simctl` call below carries its own shorter
 /// deadline instead: a hang fails with the step name and its elapsed time
 /// rather than consuming the Bazel timeout as a bare `TIMEOUT`.
 ///
@@ -43,22 +43,26 @@ const _bundleId = 'com.example.ffi';
 const _marker = 'ffi_example_result add(3,4)=7 mul(3,4)=12 sqlite=HELLO';
 const _resultFile = 'tmp/ffi_result.txt';
 
-/// One step's own deadline. Together they stay under the target's Bazel
-/// `long` timeout (900 s) even when every step runs its full budget, so the
-/// slowest CI failure is still a named step failure, never a bare TIMEOUT.
+/// One step's own deadline, sized from a healthy cold CI runner (boot ~13 s,
+/// `bootstatus -b` ~136 s, uninstall ~18 s, install ~30 s, first launch past
+/// a minute): each budget clears its healthy cost several times over, so only
+/// a real hang hits one. Together they stay under the target's Bazel
+/// `eternal` timeout (3600 s) even when every step runs its full budget, so
+/// the slowest CI failure is still a named step failure, never a bare
+/// TIMEOUT.
 const _findBudget = Duration(seconds: 30);
 const _unzipBudget = Duration(seconds: 60);
 const _listBudget = Duration(seconds: 60);
-const _bootBudget = Duration(seconds: 90);
-const _bootStatusBudget = Duration(seconds: 240);
-const _uninstallBudget = Duration(seconds: 30);
-const _installBudget = Duration(seconds: 120);
-const _launchBudget = Duration(seconds: 60);
+const _bootBudget = Duration(seconds: 120);
+const _bootStatusBudget = Duration(seconds: 300);
+const _uninstallBudget = Duration(seconds: 60);
+const _installBudget = Duration(seconds: 180);
+const _launchBudget = Duration(seconds: 240);
 const _containerBudget = Duration(seconds: 30);
-const _terminateBudget = Duration(seconds: 30);
+const _terminateBudget = Duration(seconds: 60);
 
 /// How long the test waits, in total, for the app to write its result file.
-const _resultBudget = Duration(minutes: 2);
+const _resultBudget = Duration(minutes: 3);
 
 /// How long the test waits between result-file polls.
 const _pollInterval = Duration(seconds: 2);
