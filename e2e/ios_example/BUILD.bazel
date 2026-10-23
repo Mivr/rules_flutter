@@ -318,6 +318,21 @@ dart_test(
     target_compatible_with = ["@platforms//os:macos"],
 )
 
+# The workspace's own asset plus the manifests describing it, as the engine
+# on the simulator loads them: `verify_ios_bundle_assets_test` unzips the
+# same `app.ipa` the plist test reads and checks the asset bytes, the decoded
+# `AssetManifest.bin` keys and the `FontManifest.json` font files under
+# `App.framework/flutter_assets/`.
+dart_test(
+    name = "verify_ios_bundle_assets_test",
+    data = [
+        ":app_simulator",
+        "assets/message.txt",
+    ],
+    main = "test/verify_ios_bundle_assets_test.dart",
+    target_compatible_with = ["@platforms//os:macos"],
+)
+
 flutter_ios_simulator_build(
     name = "app_intents_simulator",
     testonly = True,
