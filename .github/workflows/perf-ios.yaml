@@ -15,10 +15,12 @@
 #
 # Speed-of-light (SOL) mode (mode=sol) checks head_ref only: for each config
 # and scenario it times the whole `bazel --batch build` process tree with
-# /usr/bin/time -l, then runs the minimal chain of the same tool binaries
-# Bazel ran (taken from that build's execution log) by hand under the same
-# measurement, and proves the chain did the same work by comparing
-# byte-identical final outputs. Medians over repeats go to ios-sol.json.
+# wait4 rusage deltas (whole-tree user+sys CPU seconds, the same method on
+# macOS and Linux), then runs the minimal chain of the same tool binaries
+# Bazel ran (taken from that build's execution log) by hand, and proves
+# the chain did the same work by comparing byte-identical final outputs.
+# The SOL number is the sum of the chain steps' own process-tree CPU, and
+# `unit` is always `cpu_seconds`. Medians over repeats go to ios-sol.json.
 #
 # Cost: workflow_dispatch only (never automatic), macos-15, 5 h job timeout,
 # one small artifact (retention 3 days), no caches, build outputs never
@@ -157,12 +159,15 @@ jobs:
         if: inputs.mode == 'sol'
         # Per repeat and config: fresh workspace copy and output base, then
         # per scenario (clean, app_edit, core_edit, cumulative like compare
-        # mode) a measured `bazel --batch build` followed by the measured
-        # hand-run chain from that build's execution log, with a
-        # byte-identical proof on the final outputs. sol.py backs the verify
-        # files up before each chain and restores them after, so a chain can
-        # never perturb the next incremental build. --batch needs no server,
-        # so there is no shutdown step.
+        # mode) a measured `bazel --batch build` followed by the hand-run
+        # chain from that build's execution log, with a byte-identical
+        # proof on the final outputs. Each chain step runs as Bazel runs
+        # it (declared outputs removed first); the verify files are moved
+        # aside before each chain and moved back after, so a chain can
+        # never perturb the next incremental build, and a step that fails
+        # (or output that differs) reports identical=false with no SOL
+        # number plus a one-line reason in the job log. --batch needs no
+        # server, so there is no shutdown step.
         run: |
           set -euo pipefail
           tools="$GITHUB_WORKSPACE/tools-src/tools/perf"
