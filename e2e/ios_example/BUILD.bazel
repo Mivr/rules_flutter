@@ -18,6 +18,7 @@ load(
     "flutter_ios_simulator_build_test",
 )
 load("@rules_swift//swift:swift.bzl", "swift_library")
+load(":ios_device_opt.bzl", "ios_device_opt_bundle")
 load(":simulator_mode_test.bzl", "simulator_fastbuild_refused_test")
 
 exports_files(["pubspec.lock"])
@@ -183,6 +184,79 @@ flutter_ios_app(
         "//extensions:widgets_device",
     ],
     provisioning_profile = "//device:profile",
+)
+
+# =============================================================================
+# Release device framework (what a release engineer ships)
+#
+# A second application from the same main, assets and deps, with the release
+# flags on: `obfuscate`, `split_debug_info` and `tree_shake_icons`. It needs
+# its own `package_name` for the same reason `:app_flutter_second` does: two
+# applications in one package must not share outputs.
+#
+# The un-obfuscated twin exists so the release test's obfuscation check cannot
+# pass vacuously: the twin is built the same way except for `obfuscate`, and
+# the test asserts the class name IS present in the twin's binary.
+# =============================================================================
+
+flutter_application(
+    name = "app_flutter_release",
+    package_name = "ios_example_release",
+    assets = glob(["assets/**"]),
+    main = "lib/main.dart",
+    min_os_version = IOS_MINIMUM_OS_VERSION,
+    obfuscate = True,
+    split_debug_info = True,
+    tree_shake_icons = True,
+    deps = [
+        "@deps//:flutter",
+        "@rules_flutter//flutter:material_icons",
+    ],
+)
+
+flutter_application(
+    name = "app_flutter_release_plain",
+    package_name = "ios_example_release_plain",
+    assets = glob(["assets/**"]),
+    main = "lib/main.dart",
+    min_os_version = IOS_MINIMUM_OS_VERSION,
+    split_debug_info = True,
+    tree_shake_icons = True,
+    deps = [
+        "@deps//:flutter",
+        "@rules_flutter//flutter:material_icons",
+    ],
+)
+
+flutter_ios_framework_gen(
+    name = "app_release_framework",
+    application = ":app_flutter_release",
+)
+
+flutter_ios_framework_gen(
+    name = "app_release_plain_framework",
+    application = ":app_flutter_release_plain",
+)
+
+# The release frameworks as a physical iPhone builds them: `-c opt` for a
+# device (`arm64`), reached through the transition so the test runner itself
+# stays in the default configuration. No signing and no `ios_application`
+# are needed: the test reads `App.framework` directly. macOS-only, so a
+# Linux `bazel test //...` skips these the way it skips the tests below.
+ios_device_opt_bundle(
+    name = "app_release_device",
+    testonly = True,
+    application = ":app_flutter_release",
+    framework = ":app_release_framework",
+    target_compatible_with = ["@platforms//os:macos"],
+)
+
+ios_device_opt_bundle(
+    name = "app_release_plain_device",
+    testonly = True,
+    application = ":app_flutter_release_plain",
+    framework = ":app_release_plain_framework",
+    target_compatible_with = ["@platforms//os:macos"],
 )
 
 # =============================================================================
@@ -370,6 +444,22 @@ dart_test(
     name = "verify_ios_app_icon_test",
     data = [":app_simulator"],
     main = "test/verify_ios_app_icon_test.dart",
+    target_compatible_with = ["@platforms//os:macos"],
+)
+
+# The device release framework beside the debug simulator bundle: a 64-bit
+# arm64 Mach-O for iOS (not the simulator) exporting the AOT snapshot
+# symbols, obfuscated (a class name the un-obfuscated twin keeps), with a
+# non-empty `.symbols` object file and a tree-shaken icon font. macOS-only,
+# like the checks above: it runs on the macOS leg of full.yaml.
+dart_test(
+    name = "verify_ios_release_framework_test",
+    data = [
+        ":app_release_device",
+        ":app_release_plain_device",
+        ":app_simulator",
+    ],
+    main = "test/verify_ios_release_framework_test.dart",
     target_compatible_with = ["@platforms//os:macos"],
 )
 
