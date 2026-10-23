@@ -80,10 +80,11 @@ Per scenario run it records:
 - Executed-but-not-replayed actions are counted per reason in
   `replay.json` (`skipped_by_mnemonic`) and shown in the summary's "Not
   replayed" table. Exec-configuration (host tool) spawns — outputs
-  under a `-exec-` configuration directory such as
-  `bazel-out/darwin_arm64-opt-exec-*/`, which build host tools (abseil,
-  the Swift worker) rather than the iOS app — are skipped by default
-  under the single reason "host tools (not replayed)"
+  under an exec configuration directory such as
+  `bazel-out/darwin_arm64-opt-exec-*/` or (Bazel 9's default, with no
+  `-ST-<hash>` suffix) `bazel-out/darwin_arm64-opt-exec/`, which build
+  host tools (abseil, the Swift worker) rather than the iOS app — are
+  skipped by default under the single reason "host tools (not replayed)"
   (`--include-exec-config` opts back in).
 
 ## Generator v2: a reachable program
@@ -197,13 +198,14 @@ seconds:
 
 Chain selection is output-based: a host-tool build is a spawn whose
 declared outputs land in an exec configuration
-(`bazel-out/*-exec-*/`), and only those are left out (building Bazel's
-helper tools is part of the gap). Every other executed spawn runs,
-whatever tool binary it invokes — an action that runs an exec-built
-tool to produce target-configuration outputs (the kernel compile, for
-example) belongs in the chain. Command arguments never classify: they
-name the tool that runs, not what is built. (Compare mode's replay
-allowlist is unchanged.)
+(`bazel-out/*-exec-*/`, or Bazel 9's default with no `-ST-<hash>`
+suffix, `bazel-out/*-exec/`), and only those are left out (building
+Bazel's helper tools is part of the gap). Every other executed spawn
+runs, whatever tool binary it invokes — an action that runs an
+exec-built tool to produce target-configuration outputs (the kernel
+compile, for example) belongs in the chain. Command arguments never
+classify: they name the tool that runs, not what is built. (Compare
+mode's replay allowlist is unchanged.)
 
 Proof the SOL did the same work cannot pass by accident: each chain
 step runs as Bazel runs it — its declared outputs are removed before
@@ -236,8 +238,13 @@ bundle fails loudly instead of globbing. A step that exits non-zero,
 times out or cannot start — or any verify entry that differs
 afterwards — reports `identical: false` with no SOL number, plus the
 step (mnemonic, exit, last stderr lines) and the differing entries
-(path with before/after digests; at most 10, plus the count). An
-unexpected error in one config records its remaining flows with the
+(path with before/after digests; at most 10, plus the count). When a
+step fails before the final bundle is written, the bundle does not
+exist after the chain: that is the same flow verdict (identical false,
+no SOL number, the reason naming the failed step and the missing
+entries), Bazel's outputs are restored as usual, and the run continues
+with the next scenario — only a fault in the tool itself fails the
+config. An unexpected error in one config records its remaining flows with the
 error as their reason, lets the other config run, and still writes and
 uploads `ios-sol.json` (the job may fail afterwards). Bazel info/query
 output is captured stdout-only (Bazel's stderr carries JVM warnings
