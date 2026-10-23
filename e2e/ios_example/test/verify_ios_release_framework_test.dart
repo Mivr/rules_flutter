@@ -10,6 +10,10 @@
 ///   `LC_BUILD_VERSION` platform is iOS (2), not the simulator (7), and whose
 ///   dyld exports (or symbol table) carry the AOT snapshot symbols
 ///   (`kDartVmSnapshotInstructions`, `kDartIsolateSnapshotInstructions`);
+/// * the snapshot itself targets iOS on arm64: its VM features string (whose
+///   first word is `product` in a release build) names `arm64` and `ios`,
+///   not `macos` (the framework rule stamps `LC_BUILD_VERSION` itself, so
+///   the load command alone cannot show what the snapshot was compiled for);
 /// * obfuscation: the class `MyApp` from `lib/main.dart` is absent from the
 ///   release binary but present in the twin's, so the check cannot pass
 ///   vacuously;
@@ -115,6 +119,8 @@ void main() {
   final twinBytes = _readOrAbort(twinApp);
   _checkMachO(report, 'release', releaseApp.path, releaseBytes);
   _checkMachO(report, 'twin', twinApp.path, twinBytes);
+  _checkFeatures(report, 'release', releaseApp.path, releaseBytes);
+  _checkFeatures(report, 'twin', twinApp.path, twinBytes);
   _checkObfuscation(
     report,
     releaseBytes,
@@ -254,6 +260,53 @@ void _checkMachO(_Report report, String role, String path, Uint8List bytes) {
           'none of them $symbol',
     );
   }
+}
+
+/// Checks the snapshot was compiled for iOS on arm64, not for macOS.
+///
+/// The VM embeds its features as a space-separated word string whose first
+/// word is `product` in a release build; the target CPU and OS are words of
+/// it. The framework rule stamps `LC_BUILD_VERSION` itself, so only this
+/// string shows what gen_snapshot actually compiled for.
+void _checkFeatures(_Report report, String role, String path, Uint8List bytes) {
+  final features = _featuresString(bytes);
+  final words = features.split(' ');
+  report.check(
+    'a $role App binary whose snapshot features start with product '
+    '(a release snapshot)',
+    ok: words.isNotEmpty && words.first == 'product',
+    found: features.isEmpty ? 'no features string in $path' : '$features',
+  );
+  report.check(
+    'a $role App binary whose snapshot features name arm64',
+    ok: words.contains('arm64'),
+    found: features.isEmpty ? 'no features string in $path' : '$features',
+  );
+  report.check(
+    'a $role App binary whose snapshot features name ios, not macos',
+    ok: words.contains('ios') && !words.contains('macos'),
+    found: features.isEmpty ? 'no features string in $path' : '$features',
+  );
+}
+
+/// The VM features string in [bytes], or empty when the binary holds none.
+///
+/// The string is a space-separated word list starting at `product` (for
+/// example `product no-asan ... arm64 ios no-compressed-pointers`). It is
+/// stored glued to a hash with no separator, so it is found by its opening
+/// word rather than as a whole printable run, and read to the next
+/// non-printable byte.
+String _featuresString(Uint8List bytes) {
+  final text = latin1.decode(bytes);
+  final at = text.indexOf('product ');
+  if (at < 0) return '';
+  var end = at;
+  while (end < text.length) {
+    final unit = text.codeUnitAt(end);
+    if (unit < 0x20 || unit > 0x7e) break;
+    end++;
+  }
+  return text.substring(at, end);
 }
 
 /// Checks the class is gone from the release binary but kept in the twin.
