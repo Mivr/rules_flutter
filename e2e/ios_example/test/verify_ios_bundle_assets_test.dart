@@ -165,13 +165,6 @@ void _checkAssetManifest(
   Map<String, Object?> entries;
   try {
     entries = _decodeManifest(manifest.readAsBytesSync());
-  } on StateError catch (e) {
-    check(
-      'an AssetManifest.bin that decodes as a string-keyed map',
-      ok: false,
-      found: 'a decode failure: $e',
-    );
-    return;
   } on FormatException catch (e) {
     check(
       'an AssetManifest.bin that decodes as a string-keyed map',
@@ -230,7 +223,8 @@ void _checkFontManifest(
       ok: false,
       found:
           'families '
-          '${[for (final e in decoded) e is Map ? e['family'] : e]}',
+          '${[for (final e in decoded)
+            if (e is Map) e['family'] else e]}',
     );
     return;
   }
@@ -269,7 +263,7 @@ bool _bytesEqual(List<int> a, List<int> b) {
 Map<String, Object?> _decodeManifest(Uint8List bytes) {
   final value = _ManifestReader(bytes).readValue();
   if (value is! Map<String, Object?>) {
-    throw StateError(
+    throw FormatException(
       'expected the manifest to decode to a string-keyed map, found $value',
     );
   }
@@ -278,14 +272,14 @@ Map<String, Object?> _decodeManifest(Uint8List bytes) {
 
 /// Reads the StandardMessageCodec encoding the asset bundle tool writes:
 /// null, booleans, integers, doubles, strings, lists and string-keyed maps.
-/// Any other tag, or bytes running out mid-value, throws a [StateError]
+/// Any other tag, or bytes running out mid-value, throws a [FormatException]
 /// naming the offset, so a manifest the engine would reject fails this test
 /// instead of passing it.
 class _ManifestReader {
+  _ManifestReader(this._bytes);
+
   final Uint8List _bytes;
   int _offset = 0;
-
-  _ManifestReader(this._bytes);
 
   /// Reads one value at the current offset.
   Object? readValue() {
@@ -300,7 +294,7 @@ class _ManifestReader {
       7 => _readString(),
       12 => _readList(),
       13 => _readStringMap(),
-      _ => throw StateError(
+      _ => throw FormatException(
         'unsupported StandardMessageCodec tag $tag at byte ${_offset - 1}',
       ),
     };
@@ -313,7 +307,7 @@ class _ManifestReader {
 
   void _requireBytes(int count) {
     if (_offset + count > _bytes.length) {
-      throw StateError(
+      throw FormatException(
         'truncated manifest: byte $_offset needs $count more '
         'bytes of ${_bytes.length}',
       );
@@ -375,7 +369,9 @@ class _ManifestReader {
     for (var i = 0; i < length; i++) {
       final key = readValue();
       if (key is! String) {
-        throw StateError('expected a string map key at entry $i, found $key');
+        throw FormatException(
+          'expected a string map key at entry $i, found $key',
+        );
       }
       map[key] = readValue();
     }
