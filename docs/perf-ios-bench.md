@@ -175,40 +175,69 @@ workflow with `mode=sol` (Actions > "iOS perf bench" > Run workflow >
 
 Per configuration (`device_release`, `sim_debug`) and scenario (`clean`,
 `app_edit`, `core_edit` — the same edits compare mode applies), `sol`
-mode measures two numbers in the same unit:
+mode measures two numbers in the same unit, whole-tree user+sys CPU
+seconds:
 
 - the Bazel cost: the whole `bazel --batch build` process tree (Bazel's
-  own work plus every action), measured with `/usr/bin/time -l`:
-  instructions retired where the VM exposes them, otherwise user+sys CPU
-  seconds. One unit for the whole run.
+  own work plus every action), measured with wait4 rusage deltas, which
+  include reaped descendants on both macOS and Linux. One unit for the
+  whole run. A macOS instruction counter cannot do this: `/usr/bin/time
+  -l` reads "instructions retired" for its direct child alone (the JVM
+  for a build, the Python driver for a chain), so instructions are never
+  the flow number; `unit` in `ios-sol.json` is always `cpu_seconds`.
 - the SOL cost: the minimal chain of the same tool binaries Bazel ran
   for that scenario, taken from that build's execution log (kernel
   compile, gen_snapshot, assembler/linker, bundling steps, with the same
-  flags and inputs), run by hand in order and measured the same way.
-  Steps whose outputs did not change for the edit are skipped as a
-  person would skip them: the execution log records executed spawns
-  only, so replaying it replays exactly the work the edit required.
+  flags and inputs), run by hand in order. The SOL number is the sum of
+  the chain steps' own process-tree CPU — the driver's own cost
+  (loading the log, hashing, moving files) is never included. Steps
+  whose outputs did not change for the edit are skipped as a person
+  would skip them: the execution log records executed spawns only, so
+  replaying it replays exactly the work the edit required.
 
-Proof the SOL did the same work: its final outputs are hashed before
-and after the chain (the App.framework binary for device_release; the
-app's kernel blob and the App.framework binary for sim_debug, located
-via `cquery --output=files` with a bazel-out glob fallback). Bazel
-info/query output is captured stdout-only (Bazel's stderr carries JVM
-warnings that once corrupted a parsed path), and every parsed line must
-resolve to an existing path under the output base. A scenario
-whose outputs differ is reported with `identical: false` and no SOL
-number. Verify files are backed up before each chain and restored
-after, so a chain can never perturb the next incremental build.
+Chain selection is output-based: a host-tool build is a spawn whose
+declared outputs land in an exec configuration
+(`bazel-out/*-exec-*/`), and only those are left out (building Bazel's
+helper tools is part of the gap). Every other executed spawn runs,
+whatever tool binary it invokes — an action that runs an exec-built
+tool to produce target-configuration outputs (the kernel compile, for
+example) belongs in the chain. Command arguments never classify: they
+name the tool that runs, not what is built. (Compare mode's replay
+allowlist is unchanged.)
+
+Proof the SOL did the same work cannot pass by accident: each chain
+step runs as Bazel runs it — its declared outputs are removed before
+it starts, so merge-style steps cannot see stale inputs — and the
+verify files (the App.framework binary for device_release; the app's
+kernel blob and the App.framework binary for sim_debug, located via
+`cquery --output=files` with a bazel-out glob fallback) are moved
+aside before the chain and hashed after. A step that exits non-zero,
+times out or cannot start — or any verify file that differs
+afterwards — reports `identical: false` with no SOL number, plus the
+step (mnemonic, exit, last stderr lines) and the differing files
+(execroot-relative paths with before/after digests). Bazel's outputs
+are moved back afterwards, so a chain can never perturb the next
+incremental build. Bazel info/query output is captured stdout-only
+(Bazel's stderr carries JVM warnings that once corrupted a parsed
+path), and every parsed line must resolve to an existing path under
+the output base.
 
 Medians over `repeats` go to one small artifact, `ios-sol.json`:
 
 ```json
 {
   "rules_flutter": "<full sha>",
-  "unit": "instructions",
+  "unit": "cpu_seconds",
   "runner": {"system": "Darwin", "machine": "arm64"},
   "flows": {
     "ios-release-clean": {"bazel": 1, "sol": 1, "identical": true,
+                          "reason": "ok",
+                          "chain": {"steps": {"Genrule": 1},
+                                    "skipped": {"host-tool build": 2},
+                                    "failed": [],
+                                    "verify_differ": [],
+                                    "sol_cpu_s": 1,
+                                    "status": "ok"},
                           "spread": {"n": 3, "bazel": [1, 1],
                                      "sol": [1, 1]}}
   }
@@ -216,11 +245,15 @@ Medians over `repeats` go to one small artifact, `ios-sol.json`:
 ```
 
 Flow ids are `ios-release-{clean,app,body}` (device_release; `body` is
-the core_edit) and `ios-debug-{clean,app,body}` (sim_debug). `unit` is
-`instructions` when every repeat reported an instruction counter,
-otherwise `cpu_seconds`. The driver is `tools/perf/sol.py` (`run` /
+the core_edit) and `ios-debug-{clean,app,body}` (sim_debug). Each flow
+carries a small `chain` record — steps run per mnemonic, spawns left
+out per reason, any failed step, and any differing verify files, with
+no command lines — and a one-line `reason`, also printed per flow in
+the job log, so the artifact alone explains what the SOL ran and why a
+flow is not identical. The driver is `tools/perf/sol.py` (`run` /
 `chain` / `summarize`; unit tests in `sol_test.py` run on Linux CI from
-recorded fixtures).
+recorded fixtures, including a `run` -> `chain` -> `summarize`
+end-to-end pass against a fake `bazel`, with no time binary present).
 
 ## Cost rules (binding)
 
