@@ -20,7 +20,9 @@
 # Bazel ran (taken from that build's execution log) by hand, and proves
 # the chain did the same work by comparing byte-identical final outputs.
 # The SOL number is the sum of the chain steps' own process-tree CPU, and
-# `unit` is always `cpu_seconds`. Medians over repeats go to ios-sol.json.
+# `unit` is always `cpu_seconds`. Medians over repeats go to ios-sol.json,
+# which is written and uploaded even when a config fails (its remaining
+# flows carry the error as their reason).
 #
 # Cost: workflow_dispatch only (never automatic), macos-15, 5 h job timeout,
 # one small artifact (retention 3 days), no caches, build outputs never
@@ -161,16 +163,20 @@ jobs:
         # per scenario (clean, app_edit, core_edit, cumulative like compare
         # mode) a measured `bazel --batch build` followed by the hand-run
         # chain from that build's execution log, with a byte-identical
-        # proof on the final outputs. Each chain step runs as Bazel runs
-        # it (declared outputs removed first); the verify files are moved
-        # aside before each chain and moved back after, so a chain can
-        # never perturb the next incremental build, and a step that fails
+        # proof on the final outputs. Every declared output of the steps
+        # that will run is moved aside before each chain and moved back
+        # after (whatever the chain wrote is removed first), so a chain
+        # can never perturb the next incremental build; a step that fails
         # (or output that differs) reports identical=false with no SOL
-        # number plus a one-line reason in the job log. --batch needs no
-        # server, so there is no shutdown step.
+        # number plus a one-line reason in the job log. An unexpected
+        # error in one config records its remaining flows with the error
+        # as their reason and lets the other config run; the step then
+        # exits non-zero, but summarize and upload still run. --batch
+        # needs no server, so there is no shutdown step.
         run: |
           set -euo pipefail
           tools="$GITHUB_WORKSPACE/tools-src/tools/perf"
+          failed=0
           for rep in $(seq 1 "${{ inputs.repeats }}"); do
             rm -rf "$RUNNER_TEMP/sol-out-$rep" "$RUNNER_TEMP/sol-run-$rep"
             python3 "$tools/sol.py" run --tools "$tools" \
@@ -179,8 +185,17 @@ jobs:
               --out-base "$RUNNER_TEMP/sol-out-$rep" \
               --results "$GITHUB_WORKSPACE/sol-results" \
               --rep "$rep" \
-              --config device_release --config sim_debug
+              --config device_release --config sim_debug \
+              || failed=1
           done
+          exit "$failed"
+      - name: Summarize speed-of-light
+        # Runs even when measuring failed, so ios-sol.json (with the
+        # finished flows and the recorded reasons) is always written.
+        if: ${{ !cancelled() && inputs.mode == 'sol' }}
+        run: |
+          set -euo pipefail
+          tools="$GITHUB_WORKSPACE/tools-src/tools/perf"
           sha="$(git -C "$GITHUB_WORKSPACE/rules-head" rev-parse HEAD)"
           python3 "$tools/sol.py" summarize \
             --results "$GITHUB_WORKSPACE/sol-results" \
@@ -195,7 +210,8 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
       - name: Upload ios-sol
-        if: inputs.mode == 'sol'
+        # Runs even when measuring failed: the artifact explains the run.
+        if: ${{ !cancelled() && inputs.mode == 'sol' }}
         uses: actions/upload-artifact@v4
         with:
           name: ios-sol
