@@ -58,6 +58,7 @@ import argparse
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -91,6 +92,20 @@ EXEC_CONFIG_RE = re.compile(r"(?:^|/)bazel-out/[^/\s\"']*-exec-[^/\s\"']*/")
 # Skipped-bucket label for exec-configuration spawns in the report's
 # skipped_by_mnemonic table and the summary ("host tools (not replayed)").
 HOST_TOOLS_SKIPPED_KEY = "host tools (not replayed)"
+
+# Declared-output keys in a Bazel execution-log spawn (JSON names of the
+# log's output fields). The SOL chain classifies host-tool builds and
+# removes pre-run outputs from these alone: command arguments name the
+# tool that runs (often an exec-built helper for target actions), so they
+# must never classify.
+SPAWN_OUTPUT_KEYS = ("listedOutputs",)
+
+# Skipped-bucket reasons for the SOL chain report (counts per reason, no
+# command lines).
+CHAIN_SKIP_HOST_TOOL = "host-tool build"
+CHAIN_SKIP_CACHED = "cache hit"
+CHAIN_SKIP_NO_COMMAND = "no command"
+CHAIN_SKIP_NOT_RUN = "not run (earlier step failed)"
 
 TIME_BIN = "/usr/bin/time"
 
@@ -219,6 +234,114 @@ def is_exec_config(spawn):
                for text in spawn_search_strings(spawn))
 
 
+def spawn_output_strings(spawn):
+    """Declared-output strings of a spawn (empty when unrecorded)."""
+    found = []
+    for key in SPAWN_OUTPUT_KEYS:
+        value = spawn.get(key)
+        if isinstance(value, str):
+            found.append(value)
+        elif isinstance(value, (list, tuple)):
+            for item in value:
+                if isinstance(item, str):
+                    found.append(item)
+    return found
+
+
+def builds_host_tool(spawn):
+    """Whether the spawn's outputs land in an exec configuration.
+
+    SOL-only classifier (compare mode keeps is_exec_config): a target
+    action may run an exec-built helper (its argv[0] names a
+    bazel-out/*-exec-*/ path, e.g. the kernel compile's frontend
+    server), but its outputs land in the target configuration, so it
+    belongs in the chain. Only spawns whose declared outputs land under
+    an -exec- directory build host tools. A spawn with no recorded
+    outputs is never a host-tool build: it stays in the chain, so the
+    proof (not the selection) judges its work.
+    """
+    return any(EXEC_CONFIG_RE.search(text or "")
+               for text in spawn_output_strings(spawn))
+
+
+def select_chain_spawns(spawns):
+    """Splits spawns into (chainable, skipped) for the SOL chain.
+
+    Every executed spawn with a command runs, whatever tool it invokes;
+    only host-tool builds, cache hits, Bazel-side failures and
+    command-less spawns are left out, counted per reason. Unlike
+    select_spawns (compare mode, unchanged), tool paths in argv never
+    classify.
+    """
+    chainable = []
+    skipped = {}
+    for spawn in spawns:
+        if builds_host_tool(spawn):
+            skipped[CHAIN_SKIP_HOST_TOOL] = \
+                skipped.get(CHAIN_SKIP_HOST_TOOL, 0) + 1
+            continue
+        if spawn.get("cacheHit"):
+            skipped[CHAIN_SKIP_CACHED] = \
+                skipped.get(CHAIN_SKIP_CACHED, 0) + 1
+            continue
+        if spawn.get("exitCode", 0) != 0:
+            key = "bazel exit %s" % (spawn.get("exitCode"),)
+            skipped[key] = skipped.get(key, 0) + 1
+            continue
+        if not spawn.get("commandArgs"):
+            mnemonic = spawn.get("mnemonic", "")
+            key = "%s (%s)" % (mnemonic, CHAIN_SKIP_NO_COMMAND)
+            skipped[key] = skipped.get(key, 0) + 1
+            continue
+        chainable.append(spawn)
+    return (chainable, skipped)
+
+
+def spawn_output_paths(spawn, execroot):
+    """Absolute declared-output paths of a spawn under execroot.
+
+    Relative entries resolve against execroot; absolute entries must
+    already sit under it. Anything else is not a replayable output and
+    is left alone: removal never touches files outside the execroot.
+    """
+    base = os.path.abspath(execroot)
+    paths = set()
+    for text in spawn_output_strings(spawn):
+        if not text:
+            continue
+        joined = text if os.path.isabs(text) else os.path.join(base, text)
+        absolute = os.path.normpath(joined)
+        if absolute == base or absolute.startswith(base + os.sep):
+            paths.add(absolute)
+    return sorted(paths)
+
+
+def remove_outputs(paths):
+    """Removes declared outputs before a step runs, as Bazel does.
+
+    Returns the removed count; missing paths are already gone. A removal
+    error raises RuntimeError naming the path: the step is then
+    unstartable rather than running on stale outputs.
+    """
+    removed = 0
+    for path in paths:
+        if os.path.islink(path) or os.path.isfile(path):
+            try:
+                os.remove(path)
+            except OSError as exc:
+                raise RuntimeError("chain cannot remove output %s (%s)"
+                                   % (path, exc))
+            removed += 1
+        elif os.path.isdir(path):
+            try:
+                shutil.rmtree(path)
+            except OSError as exc:
+                raise RuntimeError("chain cannot remove output %s (%s)"
+                                   % (path, exc))
+            removed += 1
+    return removed
+
+
 def apple_env(spawn, cache=None, runner=None):
     """Synthesizes Bazel's Xcode execution env for an Apple spawn.
 
@@ -322,6 +445,148 @@ def run_replay(spawn, execroot, timeout, apple_cache=None, xcode_runner=None):
 
 def is_failure(record):
     return record.get("exit_code") != 0
+
+
+def run_tree(argv, cwd, env, timeout):
+    """Runs argv, measuring its whole process tree without a time binary.
+
+    Returns (exit, user_s, sys_s, real_s, stderr_text). user+sys come
+    from RUSAGE_CHILDREN deltas, which include reaped descendants on
+    both macOS and Linux: the same CPU method everywhere, covering the
+    child plus every process it spawns. A timeout kills the child (as
+    subprocess does) and reports exit "timeout"; an unstartable command
+    reports exit "unstartable" with the error as stderr text.
+    """
+    import resource
+    start = time.monotonic()
+    before = resource.getrusage(resource.RUSAGE_CHILDREN)
+    try:
+        proc = subprocess.run(
+            list(argv),
+            cwd=cwd,
+            env=env,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            timeout=timeout,
+            check=False,
+            text=True,
+        )
+    except subprocess.TimeoutExpired as exc:
+        after = resource.getrusage(resource.RUSAGE_CHILDREN)
+        err = exc.stderr
+        if isinstance(err, bytes):
+            err = err.decode("utf-8", "replace")
+        return ("timeout", after.ru_utime - before.ru_utime,
+                after.ru_stime - before.ru_stime,
+                time.monotonic() - start, err or "")
+    except OSError as exc:
+        after = resource.getrusage(resource.RUSAGE_CHILDREN)
+        return ("unstartable", after.ru_utime - before.ru_utime,
+                after.ru_stime - before.ru_stime,
+                time.monotonic() - start, str(exc))
+    after = resource.getrusage(resource.RUSAGE_CHILDREN)
+    return (proc.returncode, after.ru_utime - before.ru_utime,
+            after.ru_stime - before.ru_stime,
+            time.monotonic() - start, proc.stderr or "")
+
+
+def run_chain_step(spawn, execroot, timeout, apple_cache=None,
+                   xcode_runner=None):
+    """Runs one SOL chain step as Bazel runs it; returns its record.
+
+    Declared outputs are removed first (Bazel deletes outputs before
+    running an action, so merge-style steps cannot see stale inputs),
+    then the logged command runs directly with the logged environment
+    overlaid. The record never raises: non-zero exits, timeouts,
+    unstartable commands and unremovable outputs are recorded with exit
+    and stderr tail for the chain report, which fails the flow.
+    """
+    mnemonic = spawn.get("mnemonic", "")
+    target = spawn.get("targetLabel", "")
+    try:
+        remove_outputs(spawn_output_paths(spawn, execroot))
+    except RuntimeError as exc:
+        return {
+            "mnemonic": mnemonic,
+            "target": target,
+            "instructions": None,
+            "real_s": 0.0,
+            "user_s": 0.0,
+            "sys_s": 0.0,
+            "exit_code": "unstartable",
+            "stderr_tail": tail_lines(str(exc)),
+            "command": spawn.get("commandArgs", []),
+        }
+    env = dict(os.environ)
+    env.update(replay_env(spawn))
+    env.update(apple_env(spawn, cache=apple_cache, runner=xcode_runner))
+    exit_code, user_s, sys_s, real_s, stderr = run_tree(
+        spawn["commandArgs"], execroot, env, timeout)
+    failed = exit_code != 0
+    return {
+        "mnemonic": mnemonic,
+        "target": target,
+        "instructions": None,
+        "real_s": real_s,
+        "user_s": user_s,
+        "sys_s": sys_s,
+        "exit_code": exit_code,
+        "stderr_tail": tail_lines(stderr) if failed else None,
+        "command": spawn.get("commandArgs", []),
+    }
+
+
+def chain_failed_record(record):
+    """The ios-sol.json failure entry for a failed chain step."""
+    return {
+        "mnemonic": record.get("mnemonic", ""),
+        "exit": record.get("exit_code"),
+        "stderr_tail": record.get("stderr_tail"),
+    }
+
+
+def chain_all(spawns, execroot, timeout, runner=None, apple_cache=None,
+              xcode_runner=None):
+    """Runs the SOL chain: output-based selection, remove-and-run in order.
+
+    Stops after the first failed/timed-out/unstartable step (later spawns
+    land in skipped as "not run"): a partial chain's outputs prove
+    nothing. The report's sol_cpu_s is the chain's cost: the sum of the
+    steps' whole-tree user+sys CPU, driver excluded. Per-action records
+    keep command lines (chain.json is never uploaded); the ios-sol.json
+    chain record built from this report must not.
+    """
+    chainable, skipped = select_chain_spawns(spawns)
+    skipped = dict(skipped)
+    cache = apple_cache if apple_cache is not None else {}
+    if runner is None:
+        runner = (lambda spawn: run_chain_step(
+            spawn, execroot, timeout, apple_cache=cache,
+            xcode_runner=xcode_runner))
+    records = []
+    failed = []
+    for spawn in chainable:
+        record = runner(spawn)
+        records.append(record)
+        if is_failure(record):
+            failed.append(chain_failed_record(record))
+            break
+    for spawn in chainable[len(records):]:
+        skipped[CHAIN_SKIP_NOT_RUN] = skipped.get(CHAIN_SKIP_NOT_RUN, 0) + 1
+    cpu = [r["user_s"] + r["sys_s"] for r in records
+           if r.get("user_s") is not None and r.get("sys_s") is not None]
+    real = [r["real_s"] for r in records if r.get("real_s") is not None]
+    return {
+        "n_replayed": len(records),
+        "by_mnemonic": aggregate_replays(records),
+        "skipped": skipped,
+        "failed": failed,
+        "actions": records,
+        "stopped_early": bool(failed),
+        "sol_cpu_s": sum(cpu) if len(cpu) == len(records) else None,
+        "sol_real_s": sum(real) if len(real) == len(records) else None,
+    }
 
 
 def aggregate_replays(records):

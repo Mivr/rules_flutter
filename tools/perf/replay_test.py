@@ -9,16 +9,26 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import replay
 from replay import (
+    CHAIN_SKIP_CACHED,
+    CHAIN_SKIP_HOST_TOOL,
+    CHAIN_SKIP_NOT_RUN,
     DEFAULT_IOS_MNEMONICS,
     HOST_TOOLS_SKIPPED_KEY,
     aggregate_replays,
     apple_env,
+    builds_host_tool,
+    chain_all,
     is_exec_config,
     parse_time_l_output,
+    remove_outputs,
     replay_all,
     replay_argv,
     replay_env,
+    run_chain_step,
+    run_tree,
+    select_chain_spawns,
     select_spawns,
+    spawn_output_paths,
 )
 
 # macOS /usr/bin/time -l stderr shape (abridged).
@@ -461,5 +471,272 @@ class SubprocessArgsTest(unittest.TestCase):
                          ["err %d" % n for n in range(5, 25)])
 
 
+TARGET_OUTPUTS = ["bazel-out/darwin_arm64-dbg/bin/app/app.dill"]
+EXEC_OUTPUTS = ["bazel-out/darwin_arm64-opt-exec-1234ABCD/bin/tool/tool"]
+
+
+def chain_spawn(outputs, argv=None, mnemonic="FlutterKernelCompile"):
+    return {
+        "commandArgs": list(argv) if argv is not None else ["tool", "a"],
+        "environmentVariables": [],
+        "listedOutputs": list(outputs),
+        "mnemonic": mnemonic,
+        "exitCode": 0,
+        "targetLabel": "//app:app",
+    }
+
+
+class ChainSelectTest(unittest.TestCase):
+    def test_exec_tool_argv_with_target_outputs_runs(self):
+        # The kernel compile runs an exec-built frontend server (argv[0]
+        # under -exec-) to produce target outputs: it belongs in the
+        # chain. The old argv-based classifier dropped it.
+        spawn = chain_spawn(
+            TARGET_OUTPUTS,
+            ["bazel-out/darwin_arm64-opt-exec-1234ABCD/bin/frontend_server",
+             "--target=flutter"])
+        self.assertFalse(builds_host_tool(spawn))
+        chainable, skipped = select_chain_spawns([spawn])
+        self.assertEqual(chainable, [spawn])
+        self.assertEqual(skipped, {})
+
+    def test_exec_outputs_are_host_tool_builds(self):
+        spawn = chain_spawn(EXEC_OUTPUTS, ["clang", "-c", "x.cc"],
+                            mnemonic="CppCompile")
+        self.assertTrue(builds_host_tool(spawn))
+        chainable, skipped = select_chain_spawns([spawn, chain_spawn(
+            TARGET_OUTPUTS)])
+        self.assertEqual(len(chainable), 1)
+        self.assertEqual(skipped, {CHAIN_SKIP_HOST_TOOL: 1})
+
+    def test_inputs_never_classify(self):
+        spawn = chain_spawn(TARGET_OUTPUTS)
+        spawn["inputs"] = {
+            "bazel-out/darwin_arm64-opt-exec-1234/bin/foo": {}}
+        self.assertFalse(builds_host_tool(spawn))
+
+    def test_target_label_never_classifies(self):
+        spawn = chain_spawn(TARGET_OUTPUTS)
+        spawn["targetLabel"] = "@@abseil-cpp+//absl/base:base"
+        self.assertFalse(builds_host_tool(spawn))
+
+    def test_unrecorded_outputs_stay_in_chain(self):
+        spawn = dict(AOT_SPAWN)
+        self.assertFalse(builds_host_tool(spawn))
+        chainable, _ = select_chain_spawns([spawn])
+        self.assertEqual(chainable, [spawn])
+
+    def test_cache_failure_and_bare_skipped_per_reason(self):
+        cached = dict(chain_spawn(TARGET_OUTPUTS), cacheHit=True)
+        failed = dict(chain_spawn(TARGET_OUTPUTS), exitCode=3)
+        bare = dict(chain_spawn(TARGET_OUTPUTS), commandArgs=[])
+        chainable, skipped = select_chain_spawns(
+            [cached, failed, bare, chain_spawn(TARGET_OUTPUTS)])
+        self.assertEqual(len(chainable), 1)
+        self.assertEqual(skipped[CHAIN_SKIP_CACHED], 1)
+        self.assertEqual(skipped["bazel exit 3"], 1)
+        self.assertEqual(sum(skipped.values()), 3)
+
+
 if __name__ == "__main__":
     unittest.main()
+
+
+class OutputPathsTest(unittest.TestCase):
+    def setUp(self):
+        import tempfile
+        import shutil
+        self.tmp = tempfile.mkdtemp(prefix="chain-paths-")
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+
+    def test_relative_resolves_against_execroot(self):
+        paths = spawn_output_paths(chain_spawn(["bazel-out/x/o.dill"]),
+                                   self.tmp)
+        self.assertEqual(paths, [os.path.join(self.tmp, "bazel-out/x/o.dill")])
+
+    def test_absolute_under_base_kept(self):
+        absolute = os.path.join(self.tmp, "bazel-out", "o.dill")
+        self.assertEqual(spawn_output_paths(chain_spawn([absolute]),
+                                            self.tmp),
+                         [absolute])
+
+    def test_outside_base_dropped(self):
+        paths = spawn_output_paths(chain_spawn(["/etc/hostname",
+                                                "../escape.o"]),
+                                   self.tmp)
+        self.assertEqual(paths, [])
+
+    def test_remove_outputs_removes_files_dirs_and_links(self):
+        import tempfile
+        target = os.path.join(self.tmp, "out.bin")
+        with open(target, "wb") as fh:
+            fh.write(b"stale")
+        tree = os.path.join(self.tmp, "tree")
+        os.makedirs(os.path.join(tree, "sub"))
+        with open(os.path.join(tree, "sub", "f"), "wb") as fh:
+            fh.write(b"x")
+        link = os.path.join(self.tmp, "link.bin")
+        os.symlink(target, link)
+        removed = remove_outputs([target, tree, link,
+                                  os.path.join(self.tmp, "absent")])
+        self.assertEqual(removed, 3)
+        self.assertFalse(os.path.lexists(target))
+        self.assertFalse(os.path.lexists(tree))
+        self.assertFalse(os.path.lexists(link))
+
+    def test_remove_failure_raises(self):
+        from unittest import mock
+        with mock.patch.object(replay.os, "remove",
+                               side_effect=OSError("denied")):
+            target = os.path.join(self.tmp, "out.bin")
+            with open(target, "wb") as fh:
+                fh.write(b"x")
+            with self.assertRaises(RuntimeError):
+                remove_outputs([target])
+
+
+class RunTreeTest(unittest.TestCase):
+    def setUp(self):
+        import tempfile
+        import shutil
+        self.tmp = tempfile.mkdtemp(prefix="run-tree-")
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+
+    def test_success_reports_whole_tree_cpu(self):
+        import sys
+        exit_code, user_s, sys_s, real_s, stderr = run_tree(
+            [sys.executable, "-c", "pass"], self.tmp, dict(os.environ), 60.0)
+        self.assertEqual(exit_code, 0)
+        self.assertGreaterEqual(user_s, 0.0)
+        self.assertGreaterEqual(sys_s, 0.0)
+        self.assertGreaterEqual(real_s, 0.0)
+
+    def test_failure_keeps_exit_and_stderr(self):
+        import sys
+        exit_code, _, _, _, stderr = run_tree(
+            [sys.executable, "-c",
+             "import sys; sys.stderr.write('boom\\n'); sys.exit(2)"],
+            self.tmp, dict(os.environ), 60.0)
+        self.assertEqual(exit_code, 2)
+        self.assertIn("boom", stderr)
+
+    def test_timeout_kills_and_reports(self):
+        import sys
+        exit_code, user_s, sys_s, _, _ = run_tree(
+            [sys.executable, "-c", "import time; time.sleep(30)"],
+            self.tmp, dict(os.environ), 0.5)
+        self.assertEqual(exit_code, "timeout")
+        self.assertGreaterEqual(user_s, 0.0)
+        self.assertGreaterEqual(sys_s, 0.0)
+
+    def test_unstartable_reports(self):
+        exit_code, _, _, _, stderr = run_tree(
+            [os.path.join(self.tmp, "no-such-tool")], self.tmp,
+            dict(os.environ), 60.0)
+        self.assertEqual(exit_code, "unstartable")
+        self.assertTrue(stderr)
+
+
+class ChainStepTest(unittest.TestCase):
+    def setUp(self):
+        import tempfile
+        import shutil
+        self.tmp = tempfile.mkdtemp(prefix="chain-step-")
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+
+    def append_spawn(self, output):
+        return {
+            "commandArgs": ["sh", "-c", "echo fresh >> \"$CHAIN_OUT\""],
+            "environmentVariables": [{"name": "CHAIN_OUT", "value": output}],
+            "listedOutputs": [output],
+            "mnemonic": "Genrule",
+            "exitCode": 0,
+            "targetLabel": "//app:app",
+        }
+
+    def test_declared_outputs_removed_before_run(self):
+        output = os.path.join(self.tmp, "out.txt")
+        with open(output, "w", encoding="utf-8") as fh:
+            fh.write("stale\n")
+        record = run_chain_step(self.append_spawn(output), self.tmp, 60.0)
+        self.assertEqual(record["exit_code"], 0)
+        self.assertIsNotNone(record["user_s"])
+        self.assertIsNotNone(record["sys_s"])
+        with open(output, encoding="utf-8") as fh:
+            self.assertEqual(fh.read(), "fresh\n")
+
+    def test_failed_step_recorded_not_raised(self):
+        import sys
+        spawn = chain_spawn([os.path.join(self.tmp, "o")],
+                            [sys.executable, "-c", "import sys; sys.exit(4)"])
+        record = run_chain_step(spawn, self.tmp, 60.0)
+        self.assertEqual(record["exit_code"], 4)
+        self.assertTrue(replay.is_failure(record))
+
+
+class ChainAllTest(unittest.TestCase):
+    def ok_runner(self, user=0.5, sys_=0.25):
+        def run(spawn):
+            return {
+                "mnemonic": spawn["mnemonic"],
+                "target": spawn.get("targetLabel", ""),
+                "instructions": None,
+                "real_s": 0.75,
+                "user_s": user,
+                "sys_s": sys_,
+                "exit_code": 0,
+                "stderr_tail": None,
+                "command": [],
+            }
+        return run
+
+    def test_sol_cpu_sums_step_trees(self):
+        report = chain_all(
+            [chain_spawn(TARGET_OUTPUTS),
+             chain_spawn(TARGET_OUTPUTS, mnemonic="FlutterAotMacho")],
+            "/execroot", 60.0, runner=self.ok_runner())
+        self.assertEqual(report["n_replayed"], 2)
+        self.assertFalse(report["stopped_early"])
+        self.assertEqual(report["failed"], [])
+        self.assertAlmostEqual(report["sol_cpu_s"], 1.5)
+        self.assertAlmostEqual(report["sol_real_s"], 1.5)
+        self.assertEqual(report["by_mnemonic"]["FlutterAotMacho"]["count"], 1)
+
+    def test_stops_after_first_failure(self):
+        def run(spawn):
+            if spawn["mnemonic"] == "Bad":
+                return {
+                    "mnemonic": "Bad", "target": "", "instructions": None,
+                    "real_s": 0.1, "user_s": 0.1, "sys_s": 0.0,
+                    "exit_code": 1, "stderr_tail": "clang: error",
+                    "command": [],
+                }
+            return self.ok_runner()(spawn)
+
+        spawns = [chain_spawn(TARGET_OUTPUTS),
+                  chain_spawn(TARGET_OUTPUTS, mnemonic="Bad"),
+                  chain_spawn(TARGET_OUTPUTS, mnemonic="Later")]
+        report = chain_all(spawns, "/execroot", 60.0, runner=run)
+        self.assertEqual(report["n_replayed"], 2)
+        self.assertTrue(report["stopped_early"])
+        self.assertEqual(report["failed"],
+                         [{"mnemonic": "Bad", "exit": 1,
+                           "stderr_tail": "clang: error"}])
+        self.assertEqual(report["skipped"], {CHAIN_SKIP_NOT_RUN: 1})
+
+    def test_real_commands_run_on_linux_without_time_bin(self):
+        import sys
+        import tempfile
+        import shutil
+        tmp = tempfile.mkdtemp(prefix="chain-real-")
+        self.addCleanup(shutil.rmtree, tmp, True)
+        target = os.path.join(tmp, "made.txt")
+        spawn = chain_spawn([target],
+                            [sys.executable, "-c",
+                             "open(%r, 'w').write('made')" % target])
+        report = chain_all([spawn], tmp, 60.0)
+        self.assertEqual(report["n_replayed"], 1)
+        self.assertEqual(report["failed"], [])
+        self.assertGreaterEqual(report["sol_cpu_s"], 0.0)
+        with open(target, encoding="utf-8") as fh:
+            self.assertEqual(fh.read(), "made")
