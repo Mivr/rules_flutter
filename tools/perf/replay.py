@@ -55,6 +55,7 @@ why a replay class failed.
 """
 
 import argparse
+import heapq
 import json
 import os
 import re
@@ -106,6 +107,11 @@ CHAIN_SKIP_HOST_TOOL = "host-tool build"
 CHAIN_SKIP_CACHED = "cache hit"
 CHAIN_SKIP_NO_COMMAND = "no command"
 CHAIN_SKIP_NOT_RUN = "not run (earlier step failed)"
+
+# Marker for a chain step refused because an input it needs is still
+# moved aside (see blocked_input): recorded in the report's failed table
+# and ordering_failed detail, never run.
+CHAIN_ORDERING_FAILED = "ordering-failed"
 
 TIME_BIN = "/usr/bin/time"
 
@@ -332,9 +338,19 @@ def spawn_output_paths(spawn, execroot):
     already sit under it. Anything else is not a replayable output and
     is left alone: removal never touches files outside the execroot.
     """
+    return _resolve_under_base(spawn_output_strings(spawn), execroot)
+
+
+def _resolve_under_base(strings, execroot):
+    """Absolute normpaths of entries that sit under execroot.
+
+    Relative entries resolve against execroot; absolute entries must
+    already sit under it. Anything else is dropped: chain file
+    operations never touch paths outside the execroot.
+    """
     base = os.path.abspath(execroot)
     paths = set()
-    for text in spawn_output_strings(spawn):
+    for text in strings:
         if not text:
             continue
         joined = text if os.path.isabs(text) else os.path.join(base, text)
@@ -342,6 +358,132 @@ def spawn_output_paths(spawn, execroot):
         if absolute == base or absolute.startswith(base + os.sep):
             paths.add(absolute)
     return sorted(paths)
+
+
+def spawn_input_strings(spawn):
+    """Input paths of a spawn, exactly as the execution log lists them.
+
+    The log records inputs as a map from execroot-relative path to
+    metadata; a list of path strings or {path, ...} entries is accepted
+    too. Only path strings are collected, never digests or flags. A
+    missing or unparsable inputs field yields no edges: the step simply
+    keeps its log position in the chain order.
+    """
+    found = []
+    value = spawn.get("inputs")
+    if isinstance(value, str):
+        found.append(value)
+    elif isinstance(value, dict):
+        for key, item in value.items():
+            if isinstance(key, str) and key:
+                found.append(key)
+            if isinstance(item, dict):
+                nested = item.get("path")
+                if isinstance(nested, str) and nested:
+                    found.append(nested)
+            elif isinstance(item, (list, tuple)):
+                for sub in item:
+                    if isinstance(sub, str) and sub:
+                        found.append(sub)
+                    elif (isinstance(sub, dict)
+                            and isinstance(sub.get("path"), str)
+                            and sub.get("path")):
+                        found.append(sub["path"])
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            if isinstance(item, str) and item:
+                found.append(item)
+            elif (isinstance(item, dict)
+                    and isinstance(item.get("path"), str)
+                    and item.get("path")):
+                found.append(item["path"])
+    return list(dict.fromkeys(found))
+
+
+def spawn_input_paths(spawn, execroot):
+    """Absolute input paths of a spawn under execroot.
+
+    Same resolution as declared outputs: relative entries resolve
+    against execroot, and anything outside it cannot be another step's
+    output, so it takes no part in chain ordering.
+    """
+    return _resolve_under_base(spawn_input_strings(spawn), execroot)
+
+
+def _with_resolved(paths):
+    """Each path plus its symlink-resolved form, as normpaths.
+
+    Links inside the execroot (a lipobin symlink onto the linked
+    binary, say) resolve to the step output they alias; realpath is
+    purely lexical for dangling links, so moved-aside targets still
+    resolve while the chain runs.
+    """
+    variants = set()
+    for path in paths:
+        variants.add(os.path.normpath(path))
+        variants.add(os.path.normpath(os.path.realpath(path)))
+    return variants
+
+
+def order_chain_spawns(chainable, execroot):
+    """Orders chain steps so producers run before their consumers.
+
+    A step whose input (as the log lists it, with symlinks in the
+    execroot followed) is, or resolves to, another chain step's
+    declared output runs after that step — covering edges the
+    execution log never records, such as a non-spawn symlink or copy
+    between the link step and its consumers. Inputs inside a declared
+    directory output count as depending on it. Steps with no such
+    edges keep their relative order, and ties keep the log order.
+    """
+    produced = [_with_resolved(spawn_output_paths(spawn, execroot))
+                for spawn in chainable]
+    needs = [_with_resolved(spawn_input_paths(spawn, execroot))
+             for spawn in chainable]
+    wait_for = []
+    for index in range(len(chainable)):
+        makers = set()
+        for other, variants in enumerate(produced):
+            if other != index and needs[index] & variants:
+                makers.add(other)
+        wait_for.append(makers)
+    ready = [index for index, makers in enumerate(wait_for) if not makers]
+    heapq.heapify(ready)
+    pushed = set(ready)
+    order = []
+    while ready:
+        node = heapq.heappop(ready)
+        order.append(node)
+        for other, makers in enumerate(wait_for):
+            if node in makers:
+                makers.discard(node)
+                if not makers and other not in pushed:
+                    pushed.add(other)
+                    heapq.heappush(ready, other)
+    for index in range(len(chainable)):
+        if index not in pushed:
+            order.append(index)
+    return [chainable[index] for index in order]
+
+
+def blocked_input(spawn, execroot, moved_aside, recreated):
+    """A moved-aside input no earlier step re-created, or None.
+
+    Every chain step's declared outputs are moved aside before the
+    chain runs: a step may only start once each such input is either
+    untouched or re-created by an earlier step. The step's own outputs
+    never block it (they are removed before it runs regardless).
+    Returns the blocking input execroot-relative for the report.
+    """
+    own = _with_resolved(spawn_output_paths(spawn, execroot))
+    for variant in _with_resolved(spawn_input_paths(spawn, execroot)):
+        if (variant in moved_aside and variant not in recreated
+                and variant not in own):
+            try:
+                return os.path.relpath(variant, os.path.abspath(execroot))
+            except ValueError:
+                return variant
+    return None
 
 
 def remove_outputs(paths):
@@ -576,8 +718,13 @@ def chain_failed_record(record):
 
 def chain_all(spawns, execroot, timeout, runner=None, apple_cache=None,
               xcode_runner=None):
-    """Runs the SOL chain: output-based selection, remove-and-run in order.
+    """Runs the SOL chain: output-based selection, ordered remove-and-run.
 
+    Steps run in dependency order (see order_chain_spawns), not log
+    order. A step whose input is still a moved-aside output no earlier
+    step re-created is an ordering failure: it never runs, the chain
+    stops, and ordering_failed names the step and the input. Later
+    spawns land in skipped as "not run" as after any first failure.
     Stops after the first failed/timed-out/unstartable step (later spawns
     land in skipped as "not run"): a partial chain's outputs prove
     nothing. The report's sol_cpu_s is the chain's cost: the sum of the
@@ -586,21 +733,42 @@ def chain_all(spawns, execroot, timeout, runner=None, apple_cache=None,
     chain record built from this report must not.
     """
     chainable, skipped = select_chain_spawns(spawns)
+    ordered = order_chain_spawns(chainable, execroot)
     skipped = dict(skipped)
     cache = apple_cache if apple_cache is not None else {}
     if runner is None:
         runner = (lambda spawn: run_chain_step(
             spawn, execroot, timeout, apple_cache=cache,
             xcode_runner=xcode_runner))
+    moved_aside = set()
+    for spawn in ordered:
+        moved_aside.update(
+            _with_resolved(spawn_output_paths(spawn, execroot)))
+    recreated = set()
     records = []
     failed = []
-    for spawn in chainable:
+    ordering_failed = None
+    for spawn in ordered:
+        missing = blocked_input(spawn, execroot, moved_aside, recreated)
+        if missing is not None:
+            ordering_failed = {"mnemonic": spawn.get("mnemonic", ""),
+                               "input": missing}
+            failed.append({
+                "mnemonic": spawn.get("mnemonic", ""),
+                "exit": CHAIN_ORDERING_FAILED,
+                "stderr_tail": ("ordering failure: input %s is a "
+                                "moved-aside output no earlier step "
+                                "re-created" % missing),
+            })
+            break
         record = runner(spawn)
         records.append(record)
         if is_failure(record):
             failed.append(chain_failed_record(record))
             break
-    for spawn in chainable[len(records):]:
+        recreated.update(
+            _with_resolved(spawn_output_paths(spawn, execroot)))
+    for spawn in ordered[len(records):]:
         skipped[CHAIN_SKIP_NOT_RUN] = skipped.get(CHAIN_SKIP_NOT_RUN, 0) + 1
     cpu = [r["user_s"] + r["sys_s"] for r in records
            if r.get("user_s") is not None and r.get("sys_s") is not None]
@@ -610,6 +778,7 @@ def chain_all(spawns, execroot, timeout, runner=None, apple_cache=None,
         "by_mnemonic": aggregate_replays(records),
         "skipped": skipped,
         "failed": failed,
+        "ordering_failed": ordering_failed,
         "actions": records,
         "stopped_early": bool(failed),
         "sol_cpu_s": sum(cpu) if len(cpu) == len(records) else None,

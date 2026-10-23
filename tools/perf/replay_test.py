@@ -9,6 +9,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import replay
 from replay import (
+    CHAIN_ORDERING_FAILED,
     CHAIN_SKIP_CACHED,
     CHAIN_SKIP_HOST_TOOL,
     CHAIN_SKIP_NOT_RUN,
@@ -16,9 +17,11 @@ from replay import (
     HOST_TOOLS_SKIPPED_KEY,
     aggregate_replays,
     apple_env,
+    blocked_input,
     builds_host_tool,
     chain_all,
     is_exec_config,
+    order_chain_spawns,
     parse_time_l_output,
     remove_outputs,
     replay_all,
@@ -28,6 +31,8 @@ from replay import (
     run_tree,
     select_chain_spawns,
     select_spawns,
+    spawn_input_paths,
+    spawn_input_strings,
     spawn_output_paths,
 )
 
@@ -799,3 +804,162 @@ class RecordedOutputsTest(unittest.TestCase):
         chainable, skipped = select_chain_spawns([spawn])
         self.assertEqual(chainable, [])
         self.assertEqual(skipped, {CHAIN_SKIP_HOST_TOOL: 1})
+
+
+class SpawnInputsTest(unittest.TestCase):
+    def test_map_keys_are_paths(self):
+        spawn = dict(AOT_SPAWN, inputs={
+            "bazel-out/x/a.dill": {"path": "bazel-out/x/a.dill"},
+            "bazel-out/x/b.h": {}})
+        self.assertEqual(sorted(spawn_input_strings(spawn)),
+                         ["bazel-out/x/a.dill", "bazel-out/x/b.h"])
+
+    def test_list_and_string_forms(self):
+        spawn = dict(AOT_SPAWN, inputs=["a.o", {"path": "b.o"}])
+        self.assertEqual(sorted(spawn_input_strings(spawn)), ["a.o", "b.o"])
+        spawn = dict(AOT_SPAWN, inputs="only.o")
+        self.assertEqual(spawn_input_strings(spawn), ["only.o"])
+
+    def test_missing_inputs_is_empty(self):
+        self.assertEqual(spawn_input_strings(AOT_SPAWN), [])
+        self.assertEqual(spawn_input_strings(dict(AOT_SPAWN, inputs=None)),
+                         [])
+
+    def test_digests_never_collected(self):
+        spawn = dict(AOT_SPAWN, inputs={
+            "bazel-out/x/a.dill": {"digest": {"hash": "abc"}}})
+        found = spawn_input_strings(spawn)
+        self.assertIn("bazel-out/x/a.dill", found)
+        self.assertNotIn("abc", found)
+
+    def test_input_paths_resolve_and_filter(self):
+        import tempfile
+        import shutil
+        tmp = tempfile.mkdtemp(prefix="chain-inputs-")
+        self.addCleanup(shutil.rmtree, tmp, True)
+        spawn = dict(AOT_SPAWN, inputs={
+            "bazel-out/x/a.o": {}, "/etc/hostname": {}})
+        self.assertEqual(spawn_input_paths(spawn, tmp),
+                         [os.path.join(tmp, "bazel-out/x/a.o")])
+
+
+class ChainOrderTest(unittest.TestCase):
+    """Dependency order for edges the execution log never records."""
+
+    def setUp(self):
+        import tempfile
+        import shutil
+        self.tmp = tempfile.mkdtemp(prefix="chain-order-")
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        out = os.path.join(self.tmp, "bazel-out", "x")
+        os.makedirs(out)
+        self.src = os.path.join(out, "src.txt")
+        with open(self.src, "w", encoding="utf-8") as fh:
+            fh.write("linked-bytes")
+        self.target = os.path.join(out, "linked.bin")
+        with open(self.target, "w", encoding="utf-8") as fh:
+            fh.write("linked-bytes")
+        # A non-spawn file (a symlink the log never links to the link
+        # step, like the ios-debug-clean lipobin): no chain step
+        # declares it, yet the use step reads through it.
+        self.alias = os.path.join(out, "app_lipobin")
+        os.symlink(self.target, self.alias)
+        self.final = os.path.join(out, "final.bin")
+
+    def rel(self, path):
+        return os.path.relpath(path, self.tmp)
+
+    def link_spawn(self):
+        return {
+            "commandArgs": [
+                sys.executable, "-c",
+                "open(%r, 'w').write(open(%r).read())"
+                % (self.target, self.src)],
+            "environmentVariables": [],
+            "inputs": {self.rel(self.src): {}},
+            "listedOutputs": [self.rel(self.target)],
+            "mnemonic": "CppLink",
+            "exitCode": 0,
+            "targetLabel": "//app:app",
+        }
+
+    def use_spawn(self):
+        return {
+            "commandArgs": [
+                sys.executable, "-c",
+                "open(%r, 'w').write(open(%r).read())"
+                % (self.final, self.alias)],
+            "environmentVariables": [],
+            "inputs": {self.rel(self.alias): {}},
+            "listedOutputs": [self.rel(self.final)],
+            "mnemonic": "SwiftStdlibCopy",
+            "exitCode": 0,
+            "targetLabel": "//app:app",
+        }
+
+    def test_consumer_after_producer_despite_log_order(self):
+        # The link step's output is moved aside before the chain (as
+        # sol.py does), leaving the alias dangling. In log order the
+        # use step would read through the dangling link and fail; in
+        # dependency order the link step re-creates its output first.
+        os.remove(self.target)
+        report = chain_all([self.use_spawn(), self.link_spawn()],
+                           self.tmp, 60.0)
+        self.assertEqual(report["ordering_failed"], None)
+        self.assertEqual(report["failed"], [])
+        self.assertEqual(report["n_replayed"], 2)
+        self.assertEqual([a["mnemonic"] for a in report["actions"]],
+                         ["CppLink", "SwiftStdlibCopy"])
+        with open(self.final, encoding="utf-8") as fh:
+            self.assertEqual(fh.read(), "linked-bytes")
+
+    def test_ties_keep_log_order(self):
+        first = chain_spawn(["bazel-out/x/a.o"], mnemonic="First")
+        second = chain_spawn(["bazel-out/x/b.o"], mnemonic="Second")
+        order = order_chain_spawns([first, second], self.tmp)
+        self.assertEqual([s["mnemonic"] for s in order],
+                         ["First", "Second"])
+
+    def test_cycle_is_ordering_failure(self):
+        first = chain_spawn(["bazel-out/x/a.o"], mnemonic="A")
+        first["inputs"] = {"bazel-out/x/b.o": {}}
+        second = chain_spawn(["bazel-out/x/b.o"], mnemonic="B")
+        second["inputs"] = {"bazel-out/x/a.o": {}}
+        report = chain_all([first, second], self.tmp, 60.0,
+                           runner=lambda spawn: {
+                               "mnemonic": spawn["mnemonic"], "target": "",
+                               "instructions": None, "real_s": 0.1,
+                               "user_s": 0.1, "sys_s": 0.0, "exit_code": 0,
+                               "stderr_tail": None, "command": []})
+        self.assertEqual(report["n_replayed"], 0)
+        self.assertEqual(report["ordering_failed"]["mnemonic"], "A")
+        self.assertTrue(
+            report["ordering_failed"]["input"].endswith("b.o"))
+        self.assertEqual(report["failed"],
+                         [{"mnemonic": "A", "exit": CHAIN_ORDERING_FAILED,
+                           "stderr_tail": report["failed"][0]
+                           ["stderr_tail"]}])
+        self.assertIn("b.o", report["failed"][0]["stderr_tail"])
+        self.assertEqual(report["skipped"], {CHAIN_SKIP_NOT_RUN: 2})
+
+    def test_own_outputs_never_block(self):
+        spawn = chain_spawn(["bazel-out/x/a.o"], mnemonic="Merge")
+        spawn["inputs"] = {"bazel-out/x/a.o": {}}
+        report = chain_all([spawn], self.tmp, 60.0,
+                           runner=lambda s: {
+                               "mnemonic": s["mnemonic"], "target": "",
+                               "instructions": None, "real_s": 0.1,
+                               "user_s": 0.1, "sys_s": 0.0, "exit_code": 0,
+                               "stderr_tail": None, "command": []})
+        self.assertIsNone(report["ordering_failed"])
+        self.assertEqual(report["n_replayed"], 1)
+
+    def test_blocked_input_names_missing(self):
+        spawn = chain_spawn(["bazel-out/x/a.o"], mnemonic="Use")
+        spawn["inputs"] = {"bazel-out/x/other.o": {}}
+        maker = chain_spawn(["bazel-out/x/other.o"], mnemonic="Make")
+        moved = {os.path.join(self.tmp, "bazel-out/x/other.o")}
+        self.assertTrue(blocked_input(
+            spawn, self.tmp, moved, set()).endswith("other.o"))
+        self.assertIsNone(blocked_input(spawn, self.tmp, moved, moved))
+        self.assertIsNone(blocked_input(maker, self.tmp, set(), set()))
