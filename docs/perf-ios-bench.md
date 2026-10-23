@@ -166,6 +166,59 @@ That fits the 5 h timeout with margin; a 100k dispatch should take
 roughly a fifth of the full size. The first successful dispatch
 calibrates these numbers; if the job times out, lower `target_loc`.
 
+## Speed-of-light (SOL) mode
+
+The performance dashboard compares each developer flow's cost with its best
+case: the same SDK tools run by hand for the same edit. Dispatch the same
+workflow with `mode=sol` (Actions > "iOS perf bench" > Run workflow >
+`mode: sol`); only `head_ref` is checked out, generated and built.
+
+Per configuration (`device_release`, `sim_debug`) and scenario (`clean`,
+`app_edit`, `core_edit` — the same edits compare mode applies), `sol`
+mode measures two numbers in the same unit:
+
+- the Bazel cost: the whole `bazel --batch build` process tree (Bazel's
+  own work plus every action), measured with `/usr/bin/time -l`:
+  instructions retired where the VM exposes them, otherwise user+sys CPU
+  seconds. One unit for the whole run.
+- the SOL cost: the minimal chain of the same tool binaries Bazel ran
+  for that scenario, taken from that build's execution log (kernel
+  compile, gen_snapshot, assembler/linker, bundling steps, with the same
+  flags and inputs), run by hand in order and measured the same way.
+  Steps whose outputs did not change for the edit are skipped as a
+  person would skip them: the execution log records executed spawns
+  only, so replaying it replays exactly the work the edit required.
+
+Proof the SOL did the same work: its final outputs are hashed before
+and after the chain (the App.framework binary for device_release; the
+app's kernel blob and the App.framework binary for sim_debug, located
+via `cquery --output=files` with a bazel-out glob fallback). A scenario
+whose outputs differ is reported with `identical: false` and no SOL
+number. Verify files are backed up before each chain and restored
+after, so a chain can never perturb the next incremental build.
+
+Medians over `repeats` go to one small artifact, `ios-sol.json`:
+
+```json
+{
+  "rules_flutter": "<full sha>",
+  "unit": "instructions",
+  "runner": {"system": "Darwin", "machine": "arm64"},
+  "flows": {
+    "ios-release-clean": {"bazel": 1, "sol": 1, "identical": true,
+                          "spread": {"n": 3, "bazel": [1, 1],
+                                     "sol": [1, 1]}}
+  }
+}
+```
+
+Flow ids are `ios-release-{clean,app,body}` (device_release; `body` is
+the core_edit) and `ios-debug-{clean,app,body}` (sim_debug). `unit` is
+`instructions` when every repeat reported an instruction counter,
+otherwise `cpu_seconds`. The driver is `tools/perf/sol.py` (`run` /
+`chain` / `summarize`; unit tests in `sol_test.py` run on Linux CI from
+recorded fixtures).
+
 ## Cost rules (binding)
 
 `workflow_dispatch` only; `macos-15`; job timeout 300 minutes; artifact
