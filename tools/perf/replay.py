@@ -93,12 +93,12 @@ EXEC_CONFIG_RE = re.compile(r"(?:^|/)bazel-out/[^/\s\"']*-exec-[^/\s\"']*/")
 # skipped_by_mnemonic table and the summary ("host tools (not replayed)").
 HOST_TOOLS_SKIPPED_KEY = "host tools (not replayed)"
 
-# Declared-output keys in a Bazel execution-log spawn (JSON names of the
-# log's output fields). The SOL chain classifies host-tool builds and
-# removes pre-run outputs from these alone: command arguments name the
-# tool that runs (often an exec-built helper for target actions), so they
-# must never classify.
-SPAWN_OUTPUT_KEYS = ("listedOutputs",)
+# Declared-output keys in a Bazel execution-log spawn. listedOutputs are
+# the declared paths (strings); actualOutputs records what Bazel actually
+# produced, as {path, digest} objects. Command arguments name the tool
+# that runs (often an exec-built helper for target actions), so they must
+# never classify.
+SPAWN_OUTPUT_KEYS = ("listedOutputs", "actualOutputs")
 
 # Skipped-bucket reasons for the SOL chain report (counts per reason, no
 # command lines).
@@ -235,7 +235,11 @@ def is_exec_config(spawn):
 
 
 def spawn_output_strings(spawn):
-    """Declared-output strings of a spawn (empty when unrecorded)."""
+    """Declared-output strings of a spawn (empty when unrecorded).
+
+    Covers listedOutputs strings and the path of each actualOutputs
+    entry; anything else (digests, flags) is not a path.
+    """
     found = []
     for key in SPAWN_OUTPUT_KEYS:
         value = spawn.get(key)
@@ -245,7 +249,31 @@ def spawn_output_strings(spawn):
             for item in value:
                 if isinstance(item, str):
                     found.append(item)
+                elif (isinstance(item, dict)
+                        and isinstance(item.get("path"), str)):
+                    found.append(item["path"])
     return found
+
+
+def spawn_recorded_digests(spawn):
+    """{output path: hash} the execution log recorded for a spawn.
+
+    From actualOutputs entries ({path, digest: {hash, ...}}); entries
+    without a usable digest are skipped, so a log that records none
+    simply yields no comparisons.
+    """
+    digests = {}
+    value = spawn.get("actualOutputs")
+    if not isinstance(value, (list, tuple)):
+        return digests
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        path = item.get("path")
+        digest = item.get("digest") or {}
+        if isinstance(path, str) and isinstance(digest.get("hash"), str):
+            digests[path] = digest["hash"]
+    return digests
 
 
 def builds_host_tool(spawn):

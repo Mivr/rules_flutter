@@ -740,3 +740,62 @@ class ChainAllTest(unittest.TestCase):
         self.assertGreaterEqual(report["sol_cpu_s"], 0.0)
         with open(target, encoding="utf-8") as fh:
             self.assertEqual(fh.read(), "made")
+
+
+class RecordedOutputsTest(unittest.TestCase):
+    def spawn(self):
+        return {
+            "commandArgs": ["tool"],
+            "environmentVariables": [],
+            "listedOutputs": ["bazel-out/x/o.dill"],
+            "actualOutputs": [
+                {"path": "bazel-out/x/o.dill",
+                 "digest": {"hash": "abc", "sizeBytes": "3"},
+                 "isTool": False, "symlinkTargetPath": ""},
+                {"path": "bazel-out/x/extra.bin",
+                 "digest": {"hash": "def", "sizeBytes": "1"},
+                 "isTool": False, "symlinkTargetPath": ""},
+                {"path": "bazel-out/x/nodigest.bin", "isTool": False},
+            ],
+            "mnemonic": "Genrule",
+            "exitCode": 0,
+            "targetLabel": "//app:app",
+        }
+
+    def test_output_strings_include_actual_paths(self):
+        import replay as replay_mod
+        found = replay_mod.spawn_output_strings(self.spawn())
+        self.assertIn("bazel-out/x/o.dill", found)
+        self.assertIn("bazel-out/x/extra.bin", found)
+        self.assertIn("bazel-out/x/nodigest.bin", found)
+        self.assertNotIn("abc", found)
+
+    def test_recorded_digests(self):
+        import replay as replay_mod
+        self.assertEqual(
+            replay_mod.spawn_recorded_digests(self.spawn()),
+            {"bazel-out/x/o.dill": "abc",
+             "bazel-out/x/extra.bin": "def"})
+
+    def test_recorded_digests_absent(self):
+        import replay as replay_mod
+        self.assertEqual(
+            replay_mod.spawn_recorded_digests(AOT_SPAWN), {})
+
+    def test_exec_actual_outputs_are_host_tool_builds(self):
+        import replay as replay_mod
+        spawn = {
+            "commandArgs": ["tool"],
+            "environmentVariables": [],
+            "listedOutputs": [],
+            "actualOutputs": [
+                {"path": EXEC_OUTPUTS[0],
+                 "digest": {"hash": "9" * 64}, "isTool": True}],
+            "mnemonic": "CppCompile",
+            "exitCode": 0,
+            "targetLabel": "@@abseil-cpp+//x:y",
+        }
+        self.assertTrue(replay_mod.builds_host_tool(spawn))
+        chainable, skipped = select_chain_spawns([spawn])
+        self.assertEqual(chainable, [])
+        self.assertEqual(skipped, {CHAIN_SKIP_HOST_TOOL: 1})
