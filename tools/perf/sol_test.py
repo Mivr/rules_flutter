@@ -19,6 +19,7 @@ from sol import (
     chain_replayed,
     check_under_base,
     collect_runner_info,
+    covered_by,
     cpu_seconds,
     describe_chain,
     device_verify_files,
@@ -30,11 +31,13 @@ from sol import (
     load_sol_records,
     measure_process_tree,
     measure_with_time,
-    move_aside,
+    move_aside_chain,
+    output_drift,
+    path_depth,
     pick_unit,
     read_chain_report,
     rep_sort_key,
-    restore_moved,
+    restore_tree,
     run_chain,
     select_sol_spawns,
     sha256_file,
@@ -175,7 +178,7 @@ class HashTest(unittest.TestCase):
         self.assertIsNone(cpu_seconds({}))
 
 
-class MoveAsideTest(unittest.TestCase):
+class MoveAsideChainTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp(prefix="sol-aside-")
 
@@ -184,38 +187,78 @@ class MoveAsideTest(unittest.TestCase):
 
     def write(self, name, data):
         path = os.path.join(self.tmp, name)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, "wb") as fh:
             fh.write(data)
         return path
 
-    def test_move_aside_and_back_preserves_files(self):
-        first = self.write("App", b"original")
-        second = self.write("kernel_blob.bin", b"kernel")
+    def test_files_moved_and_back(self):
+        first = self.write("out/App", b"original")
+        second = self.write("out/kernel_blob.bin", b"kernel")
         backup_dir = os.path.join(self.tmp, "backup")
-        mapping = move_aside([first, second], backup_dir)
+        mapping = move_aside_chain([first, second], backup_dir)
         self.assertFalse(os.path.lexists(first))
         self.assertFalse(os.path.lexists(second))
         # The chain writes fresh files in their place.
-        self.write("App", b"chain-wrote-this")
-        restore_moved(mapping)
+        self.write("out/App", b"chain-wrote-this")
+        restore_tree(mapping)
         with open(first, "rb") as fh:
             self.assertEqual(fh.read(), b"original")
         with open(second, "rb") as fh:
             self.assertEqual(fh.read(), b"kernel")
         self.assertFalse(os.path.exists(backup_dir + "/0"))
 
-    def test_missing_file_raises_and_restores_partial(self):
-        first = self.write("App", b"original")
+    def test_directory_output_travels_whole(self):
+        bundle = self.write("out/App.framework/App", b"original")
+        tree = os.path.join(self.tmp, "out", "App.framework")
+        mapping = move_aside_chain(
+            [tree, os.path.join(tree, "App")],
+            os.path.join(self.tmp, "backup"))
+        # The directory moved whole; the inner path was not moved twice.
+        self.assertEqual(list(mapping), [tree])
+        self.assertFalse(os.path.lexists(tree))
+        # The step failed before recreating its directory (the round-3
+        # crash): restore still brings Bazel's tree back.
+        restore_tree(mapping)
+        with open(bundle, "rb") as fh:
+            self.assertEqual(fh.read(), b"original")
+
+    def test_restore_recreates_parent_dirs(self):
+        target = self.write("out/dir/App", b"original")
+        mapping = move_aside_chain([target],
+                                   os.path.join(self.tmp, "backup"))
+        # The chain removed the whole directory and failed: moving the
+        # file back must recreate its parents, not crash.
+        shutil.rmtree(os.path.join(self.tmp, "out"))
+        self.assertFalse(os.path.exists(os.path.dirname(target)))
+        restore_tree(mapping)
+        with open(target, "rb") as fh:
+            self.assertEqual(fh.read(), b"original")
+
+    def test_missing_output_raises_and_restores_partial(self):
+        first = self.write("a/App", b"original")
         with self.assertRaises(RuntimeError):
-            move_aside([first, os.path.join(self.tmp, "absent")],
-                       os.path.join(self.tmp, "backup"))
+            move_aside_chain([os.path.join(self.tmp, "a", "App"),
+                              os.path.join(self.tmp, "absent")],
+                             os.path.join(self.tmp, "backup"))
         with open(first, "rb") as fh:
             self.assertEqual(fh.read(), b"original")
 
     def test_restore_with_missing_backup_raises(self):
         with self.assertRaises(RuntimeError):
-            restore_moved({os.path.join(self.tmp, "App"):
-                           os.path.join(self.tmp, "gone")})
+            restore_tree({os.path.join(self.tmp, "App"):
+                          os.path.join(self.tmp, "gone")})
+
+    def test_covered_by(self):
+        self.assertTrue(covered_by("/a/b", ["/a"]))
+        self.assertTrue(covered_by("/a", ["/a"]))
+        self.assertFalse(covered_by("/a", ["/a/b"]))
+        self.assertFalse(covered_by("/ab", ["/a"]))
+
+    def test_path_depth_parents_first(self):
+        paths = ["/a/b/c", "/a", "/a/b"]
+        self.assertEqual(sorted(paths, key=path_depth),
+                         ["/a", "/a/b", "/a/b/c"])
 
 
 class VerifyFilesTest(unittest.TestCase):
@@ -393,7 +436,10 @@ class ChainRecordTest(unittest.TestCase):
     def report(self):
         return {
             "n_replayed": 2,
-            "by_mnemonic": {"Genrule": {"count": 2}},
+            "by_mnemonic": {"Genrule": {"count": 2, "failures": 0,
+                                        "user_s_total": 1.0,
+                                        "sys_s_total": 0.5,
+                                        "cpu_s_missing": 0}},
             "skipped": {"host-tool build": 3},
             "failed": [],
             "sol_cpu_s": 1.5,
@@ -402,13 +448,22 @@ class ChainRecordTest(unittest.TestCase):
 
     def test_describe_chain_shape(self):
         chain = describe_chain(self.report(), [])
-        self.assertEqual(chain["steps"], {"Genrule": 2})
+        self.assertEqual(chain["steps"],
+                         {"Genrule": {"count": 2, "cpu_s": 1.5}})
         self.assertEqual(chain["skipped"], {"host-tool build": 3})
         self.assertEqual(chain["failed"], [])
         self.assertEqual(chain["verify_differ"], [])
+        self.assertEqual(chain["output_drift"], {"n": 0, "paths": []})
         self.assertEqual(chain["sol_cpu_s"], 1.5)
         self.assertEqual(chain["status"], "ok")
         self.assertNotIn("command", json.dumps(chain))
+
+    def test_describe_chain_missing_cpu(self):
+        report = self.report()
+        report["by_mnemonic"] = {"Genrule": {"count": 1}}
+        chain = describe_chain(report, [])
+        self.assertEqual(chain["steps"],
+                         {"Genrule": {"count": 1, "cpu_s": None}})
 
     def test_describe_chain_no_report(self):
         chain = describe_chain(None, [{"path": "a", "before": "b",
@@ -624,8 +679,10 @@ class NoisyStderrTest(unittest.TestCase):
                           self.tmp)
 
 
-CHAIN_OK = {"steps": {"Genrule": 1}, "skipped": {}, "failed": [],
-            "verify_differ": [], "sol_cpu_s": 0.9, "status": "ok"}
+CHAIN_OK = {"steps": {"Genrule": {"count": 1, "cpu_s": 0.9}},
+            "skipped": {}, "failed": [], "verify_differ": [],
+            "output_drift": {"n": 0, "paths": []},
+            "sol_cpu_s": 0.9, "status": "ok"}
 
 
 def sol_record(flow, bazel_cpu, sol_cpu, identical, reason="ok", chain=None):
@@ -729,6 +786,7 @@ class RunnerInfoTest(unittest.TestCase):
 
 FAKE_BAZEL = """\
 #!/usr/bin/env python3
+import hashlib
 import json
 import os
 import shutil
@@ -748,34 +806,73 @@ for arg in sys.argv[1:]:
         mode = "cquery"
     elif arg == "build":
         mode = "build"
+
+
+def actual(rel, dst):
+    with open(dst, "rb") as fh:
+        digest = hashlib.sha256(fh.read()).hexdigest()
+    return [{"path": rel, "digest": {"hash": digest}}]
+
+
 execroot = os.path.join(out_base, "execroot")
+case = os.environ.get("SOL_CASE", "")
+fail_config = os.environ.get("SOL_FAIL_CONFIG", "")
 rel = "bazel-out/x/App.framework/App"
 if mode == "info":
     print(execroot)
 elif mode == "cquery":
-    print(rel)
-elif mode == "build":
-    dst = os.path.join(execroot, rel)
-    os.makedirs(os.path.dirname(dst), exist_ok=True)
-    src = os.environ["SOL_SRC"]
-    if os.environ.get("SOL_FAIL") == "1":
-        with open(dst, "w", encoding="utf-8") as fh:
-            fh.write("stale-bytes")
-        cmd = ["sh", "-c", "exit 3"]
+    if case == "dirfail":
+        print("bazel-out/x/App.framework/App")
     else:
-        shutil.copyfile(src, dst)
-        cmd = ["sh", "-c", 'cp "$SOL_SRC" "$SOL_DST"']
-    spawn = {
-        "commandArgs": cmd,
-        "environmentVariables": [
-            {"name": "SOL_SRC", "value": src},
-            {"name": "SOL_DST", "value": dst},
-        ],
-        "listedOutputs": [rel],
-        "mnemonic": "Genrule",
-        "exitCode": 0,
-        "targetLabel": "//app:app",
-    }
+        print(rel)
+elif mode == "build":
+    if fail_config and fail_config in out_base:
+        sys.stderr.write("fake bazel: simulated build failure\\n")
+        sys.exit(1)
+    if case == "dirfail":
+        # The verify file lives inside a directory the step declares:
+        # the step fails before recreating it (the round-3 restore
+        # crash shape).
+        fw = os.path.join(execroot, "bazel-out", "x", "App.framework")
+        os.makedirs(fw, exist_ok=True)
+        dst = os.path.join(fw, "App")
+        with open(dst, "w", encoding="utf-8") as fh:
+            fh.write("framework-bytes")
+        spawn = {
+            "commandArgs": ["sh", "-c", "exit 3"],
+            "environmentVariables": [],
+            "listedOutputs": ["bazel-out/x/App.framework"],
+            "actualOutputs": [],
+            "mnemonic": "Genrule",
+            "exitCode": 0,
+            "targetLabel": "//app:app",
+        }
+    else:
+        dst = os.path.join(execroot, rel)
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
+        src = os.environ["SOL_SRC"]
+        if os.environ.get("SOL_FAIL") == "1":
+            with open(dst, "w", encoding="utf-8") as fh:
+                fh.write("stale-bytes")
+            cmd = ["sh", "-c", "exit 3"]
+        elif case == "drift":
+            shutil.copyfile(src, dst)
+            cmd = ["sh", "-c", 'echo drift > "$SOL_DST"']
+        else:
+            shutil.copyfile(src, dst)
+            cmd = ["sh", "-c", 'cp "$SOL_SRC" "$SOL_DST"']
+        spawn = {
+            "commandArgs": cmd,
+            "environmentVariables": [
+                {"name": "SOL_SRC", "value": src},
+                {"name": "SOL_DST", "value": dst},
+            ],
+            "listedOutputs": [rel],
+            "actualOutputs": actual(rel, dst),
+            "mnemonic": "Genrule",
+            "exitCode": 0,
+            "targetLabel": "//app:app",
+        }
     with open(log, "w", encoding="utf-8") as fh:
         fh.write(json.dumps(spawn) + "\\n")
 else:
@@ -866,9 +963,14 @@ class SolEndToEndTest(unittest.TestCase):
             self.assertEqual(entry["reason"], "ok", flow)
             self.assertGreaterEqual(entry["bazel"], 0.0, flow)
             self.assertGreaterEqual(entry["sol"], 0.0, flow)
-            self.assertEqual(entry["chain"]["steps"], {"Genrule": 1}, flow)
+            self.assertEqual(entry["chain"]["steps"]["Genrule"]["count"],
+                             1, flow)
+            self.assertGreaterEqual(
+                entry["chain"]["steps"]["Genrule"]["cpu_s"], 0.0, flow)
             self.assertEqual(entry["chain"]["failed"], [], flow)
             self.assertEqual(entry["chain"]["status"], "ok", flow)
+            self.assertEqual(entry["chain"]["output_drift"],
+                             {"n": 0, "paths": []}, flow)
         # Bazel's outputs are back in place after the move-aside proof.
         dst = os.path.join(self.out_base, "device_release", "execroot",
                            "bazel-out", "x", "App.framework", "App")
@@ -899,6 +1001,122 @@ class SolEndToEndTest(unittest.TestCase):
                              "bazel-out/x/App.framework/App")
             self.assertIsNone(differ[0]["after"])
 
+    def test_directory_output_failure_restores_and_continues(self):
+        out = os.path.join(self.tmp, "ios-sol.json")
+        env = dict(self.env, SOL_CASE="dirfail")
+        with mock.patch.dict(os.environ, env):
+            self.assertEqual(
+                sol.main(self.run_argv(["device_release"])), 0)
+            self.assertEqual(sol.main(self.summarize_argv(out)), 0)
+        with open(out, encoding="utf-8") as fh:
+            summary = json.load(fh)
+        for flow in ["ios-release-clean", "ios-release-app",
+                     "ios-release-body"]:
+            entry = summary["flows"][flow]
+            self.assertFalse(entry["identical"], flow)
+            self.assertIsNone(entry["sol"], flow)
+            self.assertIn("Genrule", entry["reason"], flow)
+            self.assertIn("exit 3", entry["reason"], flow)
+        # Bazel's directory is back with its own bytes for the next build.
+        dst = os.path.join(self.out_base, "device_release", "execroot",
+                           "bazel-out", "x", "App.framework", "App")
+        with open(dst, encoding="utf-8") as fh:
+            self.assertEqual(fh.read(), "framework-bytes")
+
+    def test_drifted_bytes_restore_and_report(self):
+        out = os.path.join(self.tmp, "ios-sol.json")
+        env = dict(self.env, SOL_CASE="drift")
+        with mock.patch.dict(os.environ, env):
+            self.assertEqual(
+                sol.main(self.run_argv(["device_release"])), 0)
+            self.assertEqual(sol.main(self.summarize_argv(out)), 0)
+        with open(out, encoding="utf-8") as fh:
+            summary = json.load(fh)
+        entry = summary["flows"]["ios-release-clean"]
+        self.assertFalse(entry["identical"])
+        self.assertIsNone(entry["sol"])
+        self.assertIn("verify differ", entry["reason"])
+        self.assertEqual(entry["chain"]["output_drift"]["n"], 1)
+        self.assertEqual(entry["chain"]["output_drift"]["paths"],
+                         ["bazel-out/x/App.framework/App"])
+        # Bazel's bytes are back even though the chain wrote different
+        # ones, so the next scenario still measures a clean increment.
+        dst = os.path.join(self.out_base, "device_release", "execroot",
+                           "bazel-out", "x", "App.framework", "App")
+        with open(dst, encoding="utf-8") as fh:
+            self.assertTrue(fh.read().startswith("v1\n"))
+
+    def test_config_error_keeps_other_config(self):
+        out = os.path.join(self.tmp, "ios-sol.json")
+        env = dict(self.env, SOL_FAIL_CONFIG="sim_debug")
+        with mock.patch.dict(os.environ, env):
+            self.assertEqual(
+                sol.main(self.run_argv(["device_release", "sim_debug"])),
+                1)
+            self.assertEqual(sol.main(self.summarize_argv(out)), 0)
+        with open(out, encoding="utf-8") as fh:
+            summary = json.load(fh)
+        self.assertTrue(summary["flows"]["ios-release-clean"]["identical"])
+        for flow in ["ios-debug-clean", "ios-debug-app", "ios-debug-body"]:
+            entry = summary["flows"][flow]
+            self.assertFalse(entry["identical"], flow)
+            self.assertIsNone(entry["sol"], flow)
+            self.assertIn("sim_debug", entry["reason"], flow)
+            self.assertEqual(entry["chain"]["status"], "error", flow)
+
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class OutputDriftTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="sol-drift-")
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+
+    def write(self, rel, data):
+        path = os.path.join(self.tmp, rel)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "wb") as fh:
+            fh.write(data)
+        return path
+
+    def spawn(self, rel, digest):
+        spawn = {"commandArgs": ["tool"], "environmentVariables": [],
+                 "listedOutputs": [rel], "mnemonic": "Genrule",
+                 "exitCode": 0, "targetLabel": "//app:app"}
+        if digest is not None:
+            spawn["actualOutputs"] = [
+                {"path": rel, "digest": {"hash": digest}}]
+        return spawn
+
+    def test_matching_digest_no_drift(self):
+        rel = "bazel-out/x/o.bin"
+        self.write(rel, b"bytes")
+        digest = sha256_file(os.path.join(self.tmp, rel))
+        self.assertEqual(output_drift([self.spawn(rel, digest)], self.tmp),
+                         {"n": 0, "paths": []})
+
+    def test_differing_digest_counted(self):
+        rel = "bazel-out/x/o.bin"
+        self.write(rel, b"chain-wrote-this")
+        spawn = self.spawn(rel, "0" * 64)
+        self.assertEqual(output_drift([spawn], self.tmp),
+                         {"n": 1, "paths": ["bazel-out/x/o.bin"]})
+
+    def test_missing_and_unrecorded_skipped(self):
+        spawns = [self.spawn("bazel-out/x/absent.bin", "0" * 64),
+                  self.spawn("bazel-out/x/plain.bin", None)]
+        self.write("bazel-out/x/plain.bin", b"x")
+        self.assertEqual(output_drift(spawns, self.tmp),
+                         {"n": 0, "paths": []})
+
+    def test_paths_capped_at_ten(self):
+        spawns = []
+        for n in range(12):
+            rel = "bazel-out/x/o%02d.bin" % n
+            self.write(rel, b"drifted")
+            spawns.append(self.spawn(rel, "0" * 64))
+        drift = output_drift(spawns, self.tmp)
+        self.assertEqual(drift["n"], 12)
+        self.assertEqual(len(drift["paths"]), 10)

@@ -55,6 +55,8 @@ from replay import (  # noqa: E402
     TIME_BIN,
     chain_all,
     select_chain_spawns,
+    spawn_output_paths,
+    spawn_recorded_digests,
     tail_lines,
 )
 from run_rep import (  # noqa: E402
@@ -128,33 +130,54 @@ def hashes_match(before, after):
             and all(v is not None for v in before.values()))
 
 
-def move_aside(paths, backup_dir):
-    """Moves verify files aside with rename; returns {original: backup}.
+def path_depth(path):
+    """Sort key: parents before children (fewer separators first)."""
+    return (path.count(os.sep), path)
 
-    Rename-not-copy: after the chain the originals move back untouched,
-    so the next incremental build sees Bazel's own outputs (mtimes and
-    all). A missing file fails loudly: the chain must recreate exactly
-    the files Bazel wrote, so hashing "before" against nothing left
-    behind can never report identical=true.
+
+def covered_by(path, roots):
+    """Whether path equals or sits under one of the moved roots."""
+    return any(path == root or path.startswith(root + os.sep)
+               for root in roots)
+
+
+def move_aside_chain(step_outputs, backup_dir):
+    """Moves every chain-step output aside; returns {original: backup}.
+
+    Parents move before children, so a directory output moves whole. A
+    verify file inside a moved directory travels with it; a verify file
+    no running step declares is never passed here at all: it stays
+    Bazel's own and its unchanged bytes count as proof. A missing path
+    fails loudly (after moving back what was moved): the chain must
+    recreate exactly what Bazel wrote.
     """
     shutil.rmtree(backup_dir, ignore_errors=True)
     os.makedirs(backup_dir, exist_ok=True)
     mapping = {}
     try:
-        for index, path in enumerate(sorted(paths)):
+        for path in sorted(set(step_outputs), key=path_depth):
+            if covered_by(path, mapping):
+                continue
             dst = os.path.join(backup_dir, "%d%s" % (
-                index, os.path.splitext(path)[1]))
+                len(mapping), os.path.splitext(path)[1]))
             os.rename(path, dst)
             mapping[path] = dst
     except OSError as exc:
-        restore_moved(mapping)
+        restore_tree(mapping)
         raise RuntimeError("sol move-aside of %s failed (%s)" % (path, exc))
     return mapping
 
 
-def restore_moved(mapping):
-    """Removes chain-written files and moves Bazel's originals back."""
-    for path in sorted(mapping):
+def restore_tree(mapping):
+    """Removes chain-written files and moves Bazel's originals back.
+
+    Parents move back before children, and every parent directory is
+    recreated: a step that failed before recreating its output directory
+    (e.g. a tree artifact holding a verify file) restores exactly what
+    Bazel left. A missing backup fails loudly instead of leaving the
+    next build over a hole.
+    """
+    for path in sorted(mapping, key=path_depth):
         backup = mapping[path]
         if not os.path.exists(backup):
             raise RuntimeError("sol backup for %s is gone" % path)
@@ -163,6 +186,9 @@ def restore_moved(mapping):
                 os.remove(path)
             elif os.path.isdir(path):
                 shutil.rmtree(path)
+            parent = os.path.dirname(path)
+            if parent:
+                os.makedirs(parent, exist_ok=True)
             os.rename(backup, path)
         except OSError as exc:
             raise RuntimeError("sol restore of %s failed (%s)" % (path, exc))
@@ -427,22 +453,60 @@ def verify_differences(before, after, execroot):
     return differ
 
 
-def describe_chain(report, differ):
+def output_drift(chainable, execroot):
+    """Chain-step outputs differing from the log's digests, info only.
+
+    Compares files the chain wrote against the digests the execution
+    log recorded in actualOutputs. Missing files (steps never run),
+    directories and unrecorded outputs are skipped; the count covers
+    every differing file while paths keep the first 10, execroot
+    relative. Never fails a flow: reproducibility detail, not proof.
+    """
+    base = os.path.abspath(execroot)
+    differing = []
+    for spawn in chainable:
+        recorded = spawn_recorded_digests(spawn)
+        if not recorded:
+            continue
+        resolved = {}
+        for raw, digest in recorded.items():
+            resolved[raw] = digest
+            joined = (raw if os.path.isabs(raw)
+                      else os.path.join(base, raw))
+            resolved[os.path.normpath(joined)] = digest
+        for path in spawn_output_paths(spawn, execroot):
+            if path not in resolved or not os.path.isfile(path):
+                continue
+            if sha256_file(path) != resolved[path]:
+                differing.append(os.path.relpath(path, base))
+    differing = sorted(set(differing))
+    return {"n": len(differing), "paths": differing[:10]}
+
+
+def describe_chain(report, differ, drift=None):
     """Small per-flow chain record for ios-sol.json (no command lines)."""
+    if drift is None:
+        drift = {"n": 0, "paths": []}
     if report is None:
         return {"steps": {}, "skipped": {}, "failed": [],
-                "verify_differ": differ, "sol_cpu_s": None,
-                "status": "no report"}
+                "verify_differ": differ, "output_drift": drift,
+                "sol_cpu_s": None, "status": "no report"}
     steps = {}
     for mnemonic, entry in (report.get("by_mnemonic") or {}).items():
-        steps[mnemonic] = entry.get("count", 0)
+        cpu = None
+        if (not entry.get("cpu_s_missing")
+                and entry.get("user_s_total") is not None
+                and entry.get("sys_s_total") is not None):
+            cpu = entry["user_s_total"] + entry["sys_s_total"]
+        steps[mnemonic] = {"count": entry.get("count", 0), "cpu_s": cpu}
     failed = report.get("failed") or []
     return {"steps": steps, "skipped": dict(report.get("skipped") or {}),
             "failed": [{"mnemonic": entry.get("mnemonic", ""),
                         "exit": entry.get("exit"),
                         "stderr_tail": entry.get("stderr_tail")}
                        for entry in failed],
-            "verify_differ": differ, "sol_cpu_s": report.get("sol_cpu_s"),
+            "verify_differ": differ, "output_drift": drift,
+            "sol_cpu_s": report.get("sol_cpu_s"),
             "status": "failed" if failed else "ok"}
 
 
@@ -497,16 +561,21 @@ def run_sol_scenario(args, config, scenario):
     os.makedirs(record_dir, exist_ok=True)
     report_path = os.path.join(record_dir, _CHAIN_REPORT)
     before = snapshot_hashes(verify)
-    aside = move_aside(verify, os.path.join(args.work,
-                                            "sol-backup-" + scenario))
+    chainable, _ = select_sol_spawns(load_spawns(log_path))
+    step_outputs = []
+    for spawn in chainable:
+        step_outputs.extend(spawn_output_paths(spawn, execroot))
+    aside = move_aside_chain(step_outputs, os.path.join(
+        args.work, "sol-backup-" + scenario))
     try:
         exit_code = run_chain_proc(args, log_path, execroot, report_path)
         report = read_chain_report(report_path)
+        drift = output_drift(chainable, execroot)
         after = snapshot_hashes(verify)
     finally:
-        restore_moved(aside)
+        restore_tree(aside)
     differ = verify_differences(before, after, execroot)
-    chain = describe_chain(report, differ)
+    chain = describe_chain(report, differ, drift)
     failed = bool(chain["failed"]) or chain["status"] != "ok"
     identical = hashes_match(before, after) and not failed and not differ
     if identical:
@@ -533,18 +602,66 @@ def run_sol_scenario(args, config, scenario):
     return record
 
 
+def error_record(config, scenario, reason):
+    """Flow record for a scenario an unexpected error kept from running."""
+    return {"flow": flow_id(config, scenario), "config": config,
+            "scenario": scenario,
+            "bazel": {"cpu_s": None, "real_s": None},
+            "sol": None,
+            "identical": False,
+            "reason": reason,
+            "n_sol_actions": 0,
+            "verify": {"before": {}, "after": {}},
+            "chain": {"steps": {}, "skipped": {}, "failed": [],
+                      "verify_differ": [],
+                      "output_drift": {"n": 0, "paths": []},
+                      "sol_cpu_s": None, "status": "error"}}
+
+
+def write_error_records(args, config, scenarios, reason):
+    """Records remaining flows as failed-with-reason, loudly but alive."""
+    records = {}
+    short = reason if len(reason) <= 300 else reason[:297] + "..."
+    for scenario in scenarios:
+        record = error_record(config, scenario, short)
+        record_dir = os.path.join(args.results, "sol", config, scenario,
+                                  "rep%d" % args.rep)
+        os.makedirs(record_dir, exist_ok=True)
+        with open(os.path.join(record_dir, _RECORD), "w", encoding="utf-8",
+                  newline="\n") as fh:
+            fh.write(json.dumps(record, indent=2, sort_keys=True) + "\n")
+        records[scenario] = record
+    return records
+
+
 def run_sol_rep(args, rep, configs):
-    """One repeat: fresh workspace per config, cumulative edits per config."""
+    """One repeat: fresh workspace per config, cumulative edits per config.
+
+    An unexpected error in one config records that config's remaining
+    flows with the error as their reason and lets the other config run:
+    one failure never loses the rest of the run. Returns (records,
+    had_errors).
+    """
     args.rep = rep
     records = {}
+    had_errors = False
     for config in configs:
         reset_work(args.pristine, args.work)
         shutil.rmtree(out_base_of(args, config), ignore_errors=True)
         flows = {}
-        for scenario, _ in SCENARIOS:
-            flows[scenario] = run_sol_scenario(args, config, scenario)
+        try:
+            for scenario, _ in SCENARIOS:
+                flows[scenario] = run_sol_scenario(args, config, scenario)
+        except Exception as exc:
+            had_errors = True
+            remaining = [scenario for scenario, _ in SCENARIOS
+                         if scenario not in flows]
+            flows.update(write_error_records(
+                args, config, remaining,
+                "config %s failed: %s" % (config, exc)))
+            print("config=%s failed: %s" % (config, exc))
         records[config] = flows
-    return records
+    return (records, had_errors)
 
 
 def rep_sort_key(name):
@@ -659,13 +776,13 @@ def main_run(cmd):
     unknown = [c for c in configs if c not in CONFIGS]
     if unknown:
         raise ValueError("unknown config(s): %s" % ", ".join(unknown))
-    records = run_sol_rep(cmd, cmd.rep, configs)
+    records, had_errors = run_sol_rep(cmd, cmd.rep, configs)
     for config, flows in records.items():
         for scenario, record in flows.items():
             print("flow=%s identical=%s n_sol_actions=%d reason=%s"
                   % (record["flow"], record["identical"],
                      record["n_sol_actions"], record["reason"]))
-    return 0
+    return 1 if had_errors else 0
 
 
 def main_chain(cmd):
