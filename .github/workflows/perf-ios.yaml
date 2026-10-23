@@ -13,6 +13,13 @@
 # retired. Each scenario repeats and the summary reports medians + spread
 # per config.
 #
+# Speed-of-light (SOL) mode (mode=sol) checks head_ref only: for each config
+# and scenario it times the whole `bazel --batch build` process tree with
+# /usr/bin/time -l, then runs the minimal chain of the same tool binaries
+# Bazel ran (taken from that build's execution log) by hand under the same
+# measurement, and proves the chain did the same work by comparing
+# byte-identical final outputs. Medians over repeats go to ios-sol.json.
+#
 # Cost: workflow_dispatch only (never automatic), macos-15, 5 h job timeout,
 # one small artifact (retention 3 days), no caches, build outputs never
 # uploaded. Must stay that way: this workflow runs on freemacOS minutes.
@@ -35,11 +42,16 @@ name: iOS perf bench
       repeats:
         description: repeats per scenario (medians are over these)
         default: "3"
+      mode:
+        description: "compare (base vs head) or sol (head speed-of-light)"
+        default: compare
+        type: choice
+        options: [compare, sol]
 permissions:
   contents: read
 jobs:
   bench:
-    name: iOS bench (base vs head)
+    name: iOS bench
     runs-on: macos-15
     timeout-minutes: 300
     steps:
@@ -48,6 +60,7 @@ jobs:
         with:
           path: tools-src
       - name: Check out rules_flutter at base_ref
+        if: inputs.mode == 'compare'
         uses: actions/checkout@v7
         with:
           repository: ${{ github.repository }}
@@ -64,7 +77,9 @@ jobs:
       - name: Generate pristine monorepos
         run: |
           set -euo pipefail
-          for ref in base head; do
+          refs="head"
+          if [ "${{ inputs.mode }}" = "compare" ]; then refs="base head"; fi
+          for ref in $refs; do
             python3 "$GITHUB_WORKSPACE/tools-src/tools/perf/gen_monorepo.py" generate \
               --target-loc "${{ inputs.target_loc }}" \
               --seed "${{ inputs.seed }}" \
@@ -72,6 +87,7 @@ jobs:
               --out "$RUNNER_TEMP/ws-$ref-pristine"
           done
       - name: Build, edit, replay
+        if: inputs.mode == 'compare'
         # One repeat at a time: run_rep.py resets the workspace from the
         # pristine copy before each config, then per config builds all three
         # scenarios first (clean, app_edit, core_edit), makes bazel-out
@@ -96,6 +112,7 @@ jobs:
             done
           done
       - name: Summarize repeats
+        if: inputs.mode == 'compare'
         run: |
           set -euo pipefail
           tools="$GITHUB_WORKSPACE/tools-src/tools/perf"
@@ -128,10 +145,54 @@ jobs:
             --meta "$meta"
           cat "$GITHUB_WORKSPACE/summary.md" >> "$GITHUB_STEP_SUMMARY"
       - name: Upload summary
+        if: inputs.mode == 'compare'
         uses: actions/upload-artifact@v4
         with:
           name: perf-ios-summary
           path: |
             summary.json
             summary.md
+          retention-days: 3
+      - name: Measure speed-of-light (head only)
+        if: inputs.mode == 'sol'
+        # Per repeat and config: fresh workspace copy and output base, then
+        # per scenario (clean, app_edit, core_edit, cumulative like compare
+        # mode) a measured `bazel --batch build` followed by the measured
+        # hand-run chain from that build's execution log, with a
+        # byte-identical proof on the final outputs. sol.py backs the verify
+        # files up before each chain and restores them after, so a chain can
+        # never perturb the next incremental build. --batch needs no server,
+        # so there is no shutdown step.
+        run: |
+          set -euo pipefail
+          tools="$GITHUB_WORKSPACE/tools-src/tools/perf"
+          for rep in $(seq 1 "${{ inputs.repeats }}"); do
+            rm -rf "$RUNNER_TEMP/sol-out-$rep" "$RUNNER_TEMP/sol-run-$rep"
+            python3 "$tools/sol.py" run --tools "$tools" \
+              --pristine "$RUNNER_TEMP/ws-head-pristine" \
+              --work "$RUNNER_TEMP/sol-run-$rep" \
+              --out-base "$RUNNER_TEMP/sol-out-$rep" \
+              --results "$GITHUB_WORKSPACE/sol-results" \
+              --rep "$rep" \
+              --config device_release --config sim_debug
+          done
+          sha="$(git -C "$GITHUB_WORKSPACE/rules-head" rev-parse HEAD)"
+          python3 "$tools/sol.py" summarize \
+            --results "$GITHUB_WORKSPACE/sol-results" \
+            --sha "$sha" \
+            --repeats "${{ inputs.repeats }}" \
+            --target-loc "${{ inputs.target_loc }}" \
+            --seed "${{ inputs.seed }}" \
+            --out "$GITHUB_WORKSPACE/ios-sol.json"
+          {
+            echo '```json'
+            cat "$GITHUB_WORKSPACE/ios-sol.json"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload ios-sol
+        if: inputs.mode == 'sol'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-sol
+          path: ios-sol.json
           retention-days: 3
