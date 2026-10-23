@@ -1,259 +1,166 @@
-# Full-matrix workflow for rules_flutter ("pre-release").
-#
-# WHAT RUNS WHERE: the complete macOS e2e coverage that push CI (ci.yaml) no
-# longer runs — every workspace's full `bazel test //...` on macOS — plus the
-# Android example (too heavy for push CI) on Linux. Linux and Windows coverage
-# otherwise lives in push CI. Triggered by release tags, nightly, or manually;
-# the release workflow waits for this workflow AND ci.yaml to pass on the
-# tagged commit (see the gate job in release.yaml) before publishing.
-#
-# WHAT IS CACHED: nightly schedule runs restore no disk cache (only the plugin
-# job re-saves its own key, on pushes and schedules). Release-tag pushes
-# (`v*`) run fully uncached — no disk-cache restore, no setup-bazel cache
-# save, no actions/cache save of any kind — so the release gate proves every
-# test actually executed on the tagged commit; only the content-addressed
-# repository cache (and the bazelisk cache) still restore, since every fetch
-# through them is sha256-pinned and they never replay test results. Manual
-# dispatches restore the push-CI shard keys below unless `uncached` is set.
-# Saves are success-gated (no `always()`): a failed run must not persist its
-# half-populated cache.
-# Disk caches are the push-CI shards' keys below, restored only (except the
-# plugin job, which owns its key and re-saves it on pushes and schedules, but
-# never on tags). See ci.yaml for why saves delete the key first.
-permissions:
-  actions: write
-  contents: read
-name: Full
+name: Probe
+# Throwaway behaviour probes (iOS coverage stream). Never merged; see the manager's ios_cov_probes.py.
 on:
-  push:
-    tags: ["v*"]
   workflow_dispatch:
     inputs:
       uncached:
-        description: Run every job without restoring or saving any Bazel cache
+        description: Unused; kept so the dispatch command matches full.yaml's
         required: false
         default: false
         type: boolean
-  schedule:
-    # Nightly at 06:00 UTC.
-    - cron: "0 6 * * *"
-concurrency:
-  # Runs on main never share a group: each gets its own run-id suffix, so the
-  # nightly run, a manual dispatch and a tag push never cancel or queue behind
-  # each other. Full never cancels a run in progress: every Full run may be
-  # gating a release or a merge.
-  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}${{ github.ref == 'refs/heads/main' && format('::{0}', github.run_id) || '' }}
-env:
-  BAZEL_REPOSITORY_CACHE_KEY_FILES: |
-    - MODULE.bazel
-    - MODULE.bazel.lock
-    - e2e/*/MODULE.bazel
-    - flutter/private/versions.bzl
+permissions:
+  contents: read
 jobs:
-  e2e-macos:
-    name: E2E full (${{ matrix.workspace }}, macos-latest)
+  probes:
+    name: Behaviour probes (macos-latest)
     runs-on: macos-latest
-    # Cold tag and nightly runs rebuild every workspace from scratch; fork
-    # policy caps every job at 300 minutes on the free runners, and a cold
-    # leg takes under an hour.
-    timeout-minutes: 300
-    strategy:
-      fail-fast: false
-      # At most 2 of the 5 macOS slots shared with rules_dart, so a push run's
-      # macOS jobs (2) and rules_dart's (1) still get slots while this runs.
-      max-parallel: 2
-      matrix:
-        include:
-          # shard names the push-CI disk keys of the same content; only the
-          # plugin job saves (its own key).
-          - workspace: smoke
-            shard: macos-b
-            cache-save: false
-          - workspace: dual_hub
-            shard: none
-            cache-save: false
-          - workspace: hello_world
-            shard: macos-a
-            cache-save: false
-          - workspace: ffi_example
-            shard: none
-            cache-save: false
-          # The iOS proof lane: every target here needs macOS
-          # (`target_compatible_with = ["@platforms//os:macos"]`), so this
-          # workspace runs nowhere else.
-          - workspace: ios_example
-            shard: none
-            cache-save: false
-          - workspace: plugin_example
-            shard: macos-plugin
-            cache-save: true
-          - workspace: ffi_plugin_example
-            shard: none
-            cache-save: false
-          - workspace: codegen
-            shard: none
-            cache-save: false
-          # The version-floor fixture: full //... incl. the Android leg (the
-          # runner's unzip/python3 satisfy the AAR extractors) and both
-          # Apple legs, all against the minimum rules_apple.
-          - workspace: min_versions
-            shard: none
-            cache-save: false
-    env:
-      DISK_CACHE_DIR: ~/.cache/bazel-disk
+    timeout-minutes: 240
     steps:
       - uses: actions/checkout@v7
-      - name: Set disk cache key
-        run: echo "DISK_CACHE_KEY=ff-disk-${{ runner.os }}-${{ matrix.shard }}-${{ hashFiles('MODULE.bazel', 'MODULE.bazel.lock', 'e2e/*/MODULE.bazel', 'flutter/private/versions.bzl') }}" >> "$GITHUB_ENV"
-      # The repository cache is shared per OS with push CI (same key files).
       - uses: bazel-contrib/setup-bazel@c5acdfb288317d0b5c0bbd7a396a3dc868bb0f86 # 0.19.0
         with:
-          repository-cache: ${{ env.BAZEL_REPOSITORY_CACHE_KEY_FILES }}
-          cache-save: ${{ matrix['cache-save'] && (github.event_name == 'push' || github.event_name == 'schedule') && github.ref_type != 'tag' && !inputs.uncached }}
-      # Workspaces with shard `none` have no push-CI macOS content and rebuild
-      # from the repository cache; the rest restore their push shard's key.
-      - name: Restore disk cache
-        if: matrix.shard != 'none' && github.event_name != 'schedule' && github.ref_type != 'tag' && !inputs.uncached
-        continue-on-error: true
-        uses: actions/cache/restore@v4
-        with:
-          path: ${{ env.DISK_CACHE_DIR }}
-          key: ${{ env.DISK_CACHE_KEY }}
-          restore-keys: ff-disk-${{ runner.os }}-${{ matrix.shard }}-
-      - name: Point Bazel at the disk cache
-        if: matrix.shard != 'none' && github.event_name != 'schedule' && github.ref_type != 'tag' && !inputs.uncached
+          cache-save: false
+      - name: Probes
         run: |
-          dir="${{ env.DISK_CACHE_DIR }}"
-          case "$dir" in "~"*) dir="$HOME${dir#\~}";; esac
-          mkdir -p "$dir"
-          echo "build --disk_cache=$dir" >> ~/.bazelrc
-      # --test_output=errors so a failure's assertion reaches this log. Without
-      # it the output stays in a test.log on the runner and is discarded with
-      # the machine.
-      - name: bazel test //... (e2e/${{ matrix.workspace }})
-        working-directory: e2e/${{ matrix.workspace }}
-        run: bazel test //... --test_output=errors
-      # The simulator runtime behind `manual`: `//...` never picks up
-      # `:verify_ios_simulator_test`, so the ffi_example leg runs it by name.
-      # No `continue-on-error`: a failing simulator run fails the job.
-      - name: iOS simulator runtime (e2e/ffi_example)
-        if: matrix.workspace == 'ffi_example'
-        working-directory: e2e/ffi_example
-        run: bazel test //:verify_ios_simulator_test --test_output=errors
-      - name: Report cache sizes
-        if: always()
-        run: du -sh ~/.cache/bazel-disk ~/.cache/bazel-repo 2>/dev/null || true
-      - name: Delete stale disk cache key
-        if: matrix['cache-save'] && (github.event_name == 'push' || github.event_name == 'schedule') && github.ref_type != 'tag' && !inputs.uncached
-        continue-on-error: true
-        env:
-          GH_TOKEN: ${{ github.token }}
-          REF: ${{ github.ref }}
-          REPO: ${{ github.repository }}
-        run: |
-          ids=$(gh api "repos/$REPO/actions/caches?per_page=100" --jq '.actions_caches[] | select(.key == env.DISK_CACHE_KEY and .ref == env.REF) | .id' || true)
-          for id in $ids; do gh api -X DELETE "repos/$REPO/actions/caches/$id" >/dev/null || true; done
-      - name: Save disk cache
-        if: matrix['cache-save'] && (github.event_name == 'push' || github.event_name == 'schedule') && github.ref_type != 'tag' && !inputs.uncached
-        continue-on-error: true
-        uses: actions/cache/save@v4
-        with:
-          path: ${{ env.DISK_CACHE_DIR }}
-          key: ${{ env.DISK_CACHE_KEY }}
-  # The Android example builds on Linux but stays out of push CI: its APK +
-  # Kotlin actions would make a push job the longest one. It runs here,
-  # nightly (and on tags), as `bazel test //...` — the emulator-attached
-  # `verify_android_app_test` is `manual`-tagged and excluded, so no KVM.
-  e2e-linux-nightly:
-    name: E2E nightly (android_example, ubuntu-latest)
-    runs-on: ubuntu-latest
-    # Cold tag and nightly runs rebuild the APK actions from scratch; fork
-    # policy caps every job at 300 minutes on the free runners, and a cold
-    # leg takes under an hour.
-    timeout-minutes: 300
-    env:
-      WORKSPACES: android_example
-      DISK_CACHE_DIR: ~/.cache/bazel-disk
-      DISK_CACHE_SHARD: full-linux-android
-    steps:
-      - uses: actions/checkout@v7
-      - name: Set disk cache key
-        run: echo "DISK_CACHE_KEY=ff-disk-${{ runner.os }}-${{ env.DISK_CACHE_SHARD }}-${{ hashFiles('MODULE.bazel', 'MODULE.bazel.lock', 'e2e/*/MODULE.bazel', 'flutter/private/versions.bzl') }}" >> "$GITHUB_ENV"
-      - uses: bazel-contrib/setup-bazel@c5acdfb288317d0b5c0bbd7a396a3dc868bb0f86 # 0.19.0
-        with:
-          repository-cache: ${{ env.BAZEL_REPOSITORY_CACHE_KEY_FILES }}
-          cache-save: ${{ (github.event_name == 'push' || github.event_name == 'schedule') && github.ref_type != 'tag' && !inputs.uncached }}
-      - name: Restore disk cache
-        if: github.event_name != 'schedule' && github.ref_type != 'tag' && !inputs.uncached
-        continue-on-error: true
-        uses: actions/cache/restore@v4
-        with:
-          path: ${{ env.DISK_CACHE_DIR }}
-          key: ${{ env.DISK_CACHE_KEY }}
-          restore-keys: ff-disk-${{ runner.os }}-${{ env.DISK_CACHE_SHARD }}-
-      - name: Point Bazel at the disk cache
-        if: github.event_name != 'schedule' && github.ref_type != 'tag' && !inputs.uncached
-        run: |
-          dir="${{ env.DISK_CACHE_DIR }}"
-          case "$dir" in "~"*) dir="$HOME${dir#\~}";; esac
-          mkdir -p "$dir"
-          echo "build --disk_cache=$dir" >> ~/.bazelrc
-      # The runner's preinstalled Android SDK + NDK, forwarded into
-      # repository rules with --repo_env (repository rules never see the
-      # client environment otherwise). The NDK is derived at runtime: the
-      # image ships several NDK versions side by side and only a versioned
-      # directory works — its `ndk/` parent fails inside rules_android_ndk
-      # with a `readdir()` error (see e2e/android_example/MODULE.bazel).
-      - name: Point Bazel at the runner's Android SDK and NDK
-        run: |
-          test -n "$ANDROID_HOME" || { echo "ANDROID_HOME is not set"; exit 1; }
-          ndk="$ANDROID_HOME/ndk/$(ls "$ANDROID_HOME/ndk" | sort -V | tail -1)"
-          test -d "$ndk" || { echo "no NDK under $ANDROID_HOME/ndk"; exit 1; }
-          echo "build --repo_env=ANDROID_HOME=$ANDROID_HOME" >> ~/.bazelrc
-          echo "build --repo_env=ANDROID_NDK_HOME=$ndk" >> ~/.bazelrc
-      - name: bazel test //... (shard workspaces)
-        run: |
-          failed=""
-          for ws in $WORKSPACES; do
-            echo "::group::e2e/$ws"
-            if (cd "e2e/$ws" && bazel test //... --test_output=errors); then
-              echo "PASS e2e/$ws"
+          set -u
+          fails=0
+          probe() {
+            name="$1"; dir="$2"; target="$3"; want="$4"
+            log="$RUNNER_TEMP/probe-$name.log"
+            set +e
+            (cd "$dir" && bazel test "$target" --test_output=errors) > "$log" 2>&1
+            rc=$?
+            set -e
+            cat "$log"
+            if [ "$want" = pass ]; then
+              if [ "$rc" -eq 0 ]; then v=PASS; else v="ERROR-rc$rc"; fi
             else
-              echo "FAIL e2e/$ws"
-              failed="$failed $ws"
+              case "$rc" in 3) v=DISCRIMINATES ;; 0) v=BLIND ;; *) v="ERROR-rc$rc" ;; esac
             fi
-            echo "::endgroup::"
-          done
-          if [ -n "$failed" ]; then
-            echo "failing workspaces:$failed"
-            exit 1
+            echo "PROBE-RESULT $name $v"
+            case "$v" in PASS|DISCRIMINATES) ;; *) fails=$((fails + 1)) ;; esac
+          }
+          probe control-release-framework e2e/ios_example //:verify_ios_release_framework_test pass
+          echo '::group::mutate release-not-obfuscated'
+          if (cd e2e/ios_example && python3 - <<'PY'
+          import re
+          t = open("BUILD.bazel").read()
+          m = re.search(r'flutter_application\(\n    name = "app_flutter_release",\n.*?\n\)\n', t, re.S)
+          assert m, "no app_flutter_release call"
+          blk = m.group(0)
+          def put(attr, value):
+              global blk
+              new, n = re.subn(r"\n    " + attr + r" = [^\n]*,", "\n    " + attr + " = " + value + ",", blk, count=1)
+              assert n == 1, "no " + attr + " on app_flutter_release"
+              blk = new
+          put("obfuscate", "False")
+          open("BUILD.bazel", "w").write(t[:m.start()] + blk + t[m.end():])
+          PY
+          ); then
+            echo '::endgroup::'
+            probe release-not-obfuscated e2e/ios_example //:verify_ios_release_framework_test fail
+          else
+            echo '::endgroup::'
+            echo 'PROBE-RESULT release-not-obfuscated ERROR-mutation-not-applied'; fails=$((fails + 1))
           fi
-      - name: Report cache sizes
-        if: always()
-        run: du -sh ~/.cache/bazel-disk ~/.cache/bazel-repo 2>/dev/null || true
-      - name: Delete stale disk cache key
-        if: (github.event_name == 'push' || github.event_name == 'schedule') && github.ref_type != 'tag' && !inputs.uncached
-        continue-on-error: true
-        env:
-          GH_TOKEN: ${{ github.token }}
-          REF: ${{ github.ref }}
-          REPO: ${{ github.repository }}
-        run: |
-          ids=$(gh api "repos/$REPO/actions/caches?per_page=100" --jq '.actions_caches[] | select(.key == env.DISK_CACHE_KEY and .ref == env.REF) | .id' || true)
-          for id in $ids; do gh api -X DELETE "repos/$REPO/actions/caches/$id" >/dev/null || true; done
-      - name: Save disk cache
-        if: (github.event_name == 'push' || github.event_name == 'schedule') && github.ref_type != 'tag' && !inputs.uncached
-        continue-on-error: true
-        uses: actions/cache/save@v4
-        with:
-          path: ${{ env.DISK_CACHE_DIR }}
-          key: ${{ env.DISK_CACHE_KEY }}
-  conclusion:
-    name: Conclusion
-    needs: [e2e-macos, e2e-linux-nightly]
-    if: always()
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - name: Fail if any job failed
-        run: echo '${{ toJSON(needs) }}' | jq -e 'with_entries(select(.value.result != "success" and .value.result != "skipped")) | length == 0'
+          git checkout -- e2e/ios_example
+          echo '::group::mutate no-split-debug-info'
+          if (cd e2e/ios_example && python3 - <<'PY'
+          import re
+          t = open("BUILD.bazel").read()
+          m = re.search(r'flutter_application\(\n    name = "app_flutter_release",\n.*?\n\)\n', t, re.S)
+          assert m, "no app_flutter_release call"
+          blk = m.group(0)
+          def put(attr, value):
+              global blk
+              new, n = re.subn(r"\n    " + attr + r" = [^\n]*,", "\n    " + attr + " = " + value + ",", blk, count=1)
+              assert n == 1, "no " + attr + " on app_flutter_release"
+              blk = new
+          put("split_debug_info", "False")
+          open("BUILD.bazel", "w").write(t[:m.start()] + blk + t[m.end():])
+          PY
+          ); then
+            echo '::endgroup::'
+            probe no-split-debug-info e2e/ios_example //:verify_ios_release_framework_test fail
+          else
+            echo '::endgroup::'
+            echo 'PROBE-RESULT no-split-debug-info ERROR-mutation-not-applied'; fails=$((fails + 1))
+          fi
+          git checkout -- e2e/ios_example
+          echo '::group::mutate icons-not-tree-shaken'
+          if (cd e2e/ios_example && python3 - <<'PY'
+          import re
+          t = open("BUILD.bazel").read()
+          m = re.search(r'flutter_application\(\n    name = "app_flutter_release",\n.*?\n\)\n', t, re.S)
+          assert m, "no app_flutter_release call"
+          blk = m.group(0)
+          def put(attr, value):
+              global blk
+              new, n = re.subn(r"\n    " + attr + r" = [^\n]*,", "\n    " + attr + " = " + value + ",", blk, count=1)
+              assert n == 1, "no " + attr + " on app_flutter_release"
+              blk = new
+          put("tree_shake_icons", "False")
+          open("BUILD.bazel", "w").write(t[:m.start()] + blk + t[m.end():])
+          PY
+          ); then
+            echo '::endgroup::'
+            probe icons-not-tree-shaken e2e/ios_example //:verify_ios_release_framework_test fail
+          else
+            echo '::endgroup::'
+            echo 'PROBE-RESULT icons-not-tree-shaken ERROR-mutation-not-applied'; fails=$((fails + 1))
+          fi
+          git checkout -- e2e/ios_example
+          echo '::group::mutate host-platform-snapshot'
+          if (cd e2e/ios_example && python3 - <<'PY'
+          import glob, re
+          hits = 0
+          for path in glob.glob("*.bzl"):
+              t = open(path).read()
+              new, n1 = re.subn(r'\n[ \t]*"//command_line_option:platforms":[ \t]*\[[^\]]*\],?[ \t]*(?=\n)', "", t)
+              new, n2 = re.subn(r'\n[ \t]*"//command_line_option:platforms",[ \t]*(?=\n)', "", new)
+              if n1 or n2:
+                  assert n1 >= 1 and n2 >= 1, (path, n1, n2)
+                  open(path, "w").write(new)
+                  hits += 1
+          assert hits >= 1, "no transition sets //command_line_option:platforms"
+          PY
+          ); then
+            echo '::endgroup::'
+            probe host-platform-snapshot e2e/ios_example //:verify_ios_release_framework_test fail
+          else
+            echo '::endgroup::'
+            echo 'PROBE-RESULT host-platform-snapshot ERROR-mutation-not-applied'; fails=$((fails + 1))
+          fi
+          git checkout -- e2e/ios_example
+          echo '::group::mutate twin-obfuscated'
+          if (cd e2e/ios_example && python3 - <<'PY'
+          import re
+          t = open("BUILD.bazel").read()
+          keep = ("app_flutter", "app_flutter_second", "app_flutter_release", "app_lib")
+          out, hits = [], 0
+          for m in re.finditer(r'(?s)flutter_application\(\n    name = "([^"]+)",\n.*?\n\)\n', t):
+              if m.group(1) in keep:
+                  continue
+              blk = m.group(0)
+              if "obfuscate = True" in blk:
+                  continue
+              new = re.sub(r"\n    obfuscate = False,", "\n    obfuscate = True,", blk, count=1)
+              if new == blk:
+                  new = blk.replace('",\n', '",\n    obfuscate = True,\n', 1)
+              out.append((m.start(), m.end(), new))
+              hits += 1
+          assert hits >= 1, "no un-obfuscated twin application"
+          for s, e, new in reversed(out):
+              t = t[:s] + new + t[e:]
+          open("BUILD.bazel", "w").write(t)
+          PY
+          ); then
+            echo '::endgroup::'
+            probe twin-obfuscated e2e/ios_example //:verify_ios_release_framework_test fail
+          else
+            echo '::endgroup::'
+            echo 'PROBE-RESULT twin-obfuscated ERROR-mutation-not-applied'; fails=$((fails + 1))
+          fi
+          git checkout -- e2e/ios_example
+          echo "PROBE-SUMMARY failures=$fails"
+          [ "$fails" -eq 0 ]
