@@ -163,16 +163,22 @@ jobs:
         # per scenario (clean, app_edit, core_edit, cumulative like compare
         # mode) a measured `bazel --batch build` followed by the hand-run
         # chain from that build's execution log, with a byte-identical
-        # proof on the final outputs. Every declared output of the steps
+        # proof over the final bundle's declared payload (the App.framework
+        # binary for device_release; every file in the sim app bundle for
+        # sim_debug, compared by entry path and content, never a glob over
+        # bazel-out). Steps run in dependency order even for edges the log
+        # never records, and a step that would start on a still-moved-aside
+        # input is an ordering failure. Every declared output of the steps
         # that will run is moved aside before each chain and moved back
-        # after (whatever the chain wrote is removed first), so a chain
-        # can never perturb the next incremental build; a step that fails
-        # (or output that differs) reports identical=false with no SOL
-        # number plus a one-line reason in the job log. An unexpected
-        # error in one config records its remaining flows with the error
-        # as their reason and lets the other config run; the step then
-        # exits non-zero, but summarize and upload still run. --batch
-        # needs no server, so there is no shutdown step.
+        # after (whatever the chain wrote is removed first, and undeclared
+        # files the chain created are swept), so a chain can never perturb
+        # the next incremental build; a step that fails (or output that
+        # differs) reports identical=false with no SOL number plus a
+        # one-line reason in the job log. An unexpected error in one config
+        # records its remaining flows with the error as their reason and
+        # lets the other config run; the step then exits non-zero, but
+        # summarize and upload still run. --batch needs no server, so there
+        # is no shutdown step.
         run: |
           set -euo pipefail
           tools="$GITHUB_WORKSPACE/tools-src/tools/perf"

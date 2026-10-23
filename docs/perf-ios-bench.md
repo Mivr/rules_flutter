@@ -207,29 +207,42 @@ allowlist is unchanged.)
 
 Proof the SOL did the same work cannot pass by accident: each chain
 step runs as Bazel runs it — its declared outputs are removed before
-it starts, so merge-style steps cannot see stale inputs — and before
-the chain every declared output of every step that will run is moved
-aside. After the chain, whatever the chain wrote at those paths is
-removed and Bazel's originals move back, recreating any parent
-directory the chain removed. This holds whether the chain succeeded,
-stopped at a failed step, or wrote different bytes, so the next
-incremental build always finds exactly the files Bazel left. The
-scenario's verify files (the App.framework binary for device_release;
-the app's kernel blob and the App.framework binary for sim_debug,
-located via `cquery --output=files` with a bazel-out glob fallback)
-are hashed before and after: files inside a moved output directory
-travel with it, while a verify file no running step declares stays
-Bazel's own and counts as unchanged for that edit. A step that exits
-non-zero, times out or cannot start — or any verify file that differs
+it starts, so merge-style steps cannot see stale inputs — and steps
+run in dependency order even for edges the execution log never
+records: a step whose input (as the log lists it, with symlinks in the
+execroot followed) is, or resolves to, another step's declared output
+runs after that step, with ties keeping the log order. A step that
+would start while one of its inputs is still a moved-aside output no
+earlier step re-created is an ordering failure: it never runs, and the
+flow reports `identical: false` with a reason naming the step and the
+input. Before the chain every declared output of every step that will
+run is moved aside. After the chain, whatever the chain wrote at those
+paths is removed and Bazel's originals move back, recreating any parent
+directory the chain removed; files and directories the chain created
+under `bazel-out` that no step declares (an undeclared sibling of a
+declared archive, say) are removed as well. This holds whether the
+chain succeeded, stopped at a failed step, or wrote different bytes, so
+the next incremental build always finds exactly the files Bazel left.
+The scenario's verify set comes from declared outputs only, never a
+glob over `bazel-out` (whose leftovers are not this build's outputs):
+device_release hashes the App.framework binary among the framework
+target's listed outputs (`cquery --output=files`); sim_debug hashes
+every file in the final app bundle's payload — every entry of each
+listed `.ipa` archive, and every file under each listed `.app`
+directory (the kernel blob and the App.framework binary are among
+those files) — compared by entry path and content, so archive metadata
+such as zip timestamps is not part of the proof. A listing with no
+bundle fails loudly instead of globbing. A step that exits non-zero,
+times out or cannot start — or any verify entry that differs
 afterwards — reports `identical: false` with no SOL number, plus the
-step (mnemonic, exit, last stderr lines) and the differing files
-(execroot-relative paths with before/after digests). An unexpected
-error in one config records its remaining flows with the error as
-their reason, lets the other config run, and still writes and uploads
-`ios-sol.json` (the job may fail afterwards). Bazel info/query output
-is captured stdout-only (Bazel's stderr carries JVM warnings that once
-corrupted a parsed path), and every parsed line must resolve to an
-existing path under the output base.
+step (mnemonic, exit, last stderr lines) and the differing entries
+(path with before/after digests; at most 10, plus the count). An
+unexpected error in one config records its remaining flows with the
+error as their reason, lets the other config run, and still writes and
+uploads `ios-sol.json` (the job may fail afterwards). Bazel info/query
+output is captured stdout-only (Bazel's stderr carries JVM warnings
+that once corrupted a parsed path), and every parsed line must resolve
+to an existing path under the output base.
 
 Medians over `repeats` go to one small artifact, `ios-sol.json`:
 
@@ -245,8 +258,11 @@ Medians over `repeats` go to one small artifact, `ios-sol.json`:
                                                           "cpu_s": 1}},
                                     "skipped": {"host-tool build": 2},
                                     "failed": [],
-                                    "verify_differ": [],
+                                    "ordering_failed": null,
+                                    "verify_differ": {"n": 0, "differ": []},
                                     "output_drift": {"n": 0, "paths": []},
+                                    "side_effects_removed": {"n": 0,
+                                                             "paths": []},
                                     "sol_cpu_s": 1,
                                     "status": "ok"},
                           "spread": {"n": 3, "bazel": [1, 1],
@@ -258,13 +274,15 @@ Medians over `repeats` go to one small artifact, `ios-sol.json`:
 Flow ids are `ios-release-{clean,app,body}` (device_release; `body` is
 the core_edit) and `ios-debug-{clean,app,body}` (sim_debug). Each flow
 carries a small `chain` record — steps run per mnemonic with their CPU
-seconds, spawns left out per reason, any failed step, any differing
-verify files, and (information only) the number of chain-step outputs
-whose digest differs from the digest the execution log recorded in
-`actualOutputs` (with up to 10 such paths) — with no command lines —
-and a one-line `reason`, also printed per flow in the job log, so the
-artifact alone explains what the SOL ran and why a flow is not
-identical. The driver is `tools/perf/sol.py` (`run` / `chain` /
+seconds, spawns left out per reason, any failed step, any ordering
+failure (step plus the still-moved-aside input), any differing verify
+entries (path with both digests; at most 10, plus the count), the
+chain-created files removed afterwards, and (information only) the
+number of chain-step outputs whose digest differs from the digest the
+execution log recorded in `actualOutputs` (with up to 10 such paths) —
+with no command lines — and a one-line `reason`, also printed per flow
+in the job log, so the artifact alone explains what the SOL ran and why
+a flow is not identical. The driver is `tools/perf/sol.py` (`run` / `chain` /
 `summarize`; unit tests in `sol_test.py` run on Linux CI from recorded
 fixtures, including a `run` -> `chain` -> `summarize` end-to-end pass
 against a fake `bazel`, with no time binary present).
