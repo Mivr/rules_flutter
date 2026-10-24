@@ -43,45 +43,10 @@
 /// rather than about the bundle on disk.
 library;
 
-import 'dart:io';
-
-import 'native_libs_fingerprint.dart';
+import 'file_snapshot.dart';
 import 'native_libs_verdict.dart';
 
 export 'native_libs_verdict.dart';
-
-/// One file as the running process has it: the two facts a `stat` answers, and
-/// the content token behind them.
-class _Image {
-  /// `size:mtime`, which is what bazel moves when it re-runs an action and leaves
-  /// alone when it serves one from cache.
-  final String stamp;
-
-  /// The content token from [nativeLibsFingerprintOfFiles] — the authority, and
-  /// read only when [stamp] cannot prove the bytes unchanged (see [_racyWindow]).
-  final String content;
-
-  /// Wall-clock microseconds since epoch, taken just before [content] was read:
-  /// at the baseline, [markLive], [markPatched], or a verdict that re-read it.
-  /// A matching stamp proves the bytes unchanged only when the file's mtime
-  /// predates this by more than [_racyWindow].
-  final int readAtMicros;
-
-  const _Image(this.stamp, this.content, this.readAtMicros);
-}
-
-/// How much older than the last content read a file's mtime must be before a
-/// matching stamp proves its bytes unchanged.
-///
-/// Linux stamps a file's mtime from a coarse clock, which ticks every 1-10 ms:
-/// a same-size rewrite within the tick the baseline was read in leaves
-/// `size:mtime` exactly as it was, so the watch would answer "current" over
-/// changed bytes — the same race git calls "racy git". Two seconds covers the
-/// coarsest tick on any filesystem this tool runs on (FAT/exFAT's 2 s), so a
-/// file whose mtime is not older than its last read by more than this window
-/// has its content read even when its stamp matches. Files written before the
-/// window stay on the stat-only path: a verdict never reads them.
-const _racyWindow = Duration(seconds: 2);
 
 class NativeLibsWatch {
   /// Per library, the first-party sources it is built from.
@@ -114,7 +79,7 @@ class NativeLibsWatch {
   /// it has mapped, and the contracts they were generated from. Advanced only by
   /// [markLive], so a difference keeps being reported for as long as the process
   /// keeps running the old code.
-  Map<String, _Image> _live;
+  Map<String, FileSnapshot> _live;
 
   NativeLibsWatch._(this.contracts, this.sources, this._live);
 
@@ -158,7 +123,7 @@ class NativeLibsWatch {
   /// library is tens of megabytes — measured at 126ms to hash 20MB, against 33µs
   /// for a `stat`. A file bazel did not rewrite has the same size and mtime it had
   /// and is read only when its stamp cannot prove the bytes unchanged: a file
-  /// last written before [_racyWindow] is never read — that is the Dart-only
+  /// last written before [racyWindow] is never read — that is the Dart-only
   /// edit, and it stays free. Only a file the build actually re-ran an action
   /// for, or one written too recently for its stamp to prove anything, is read,
   /// and then its *contents* decide — a rebuild that produced identical bytes is
@@ -250,83 +215,12 @@ class NativeLibsWatch {
   ];
 
   /// The watched files among [paths] whose bytes differ from the ones the running
-  /// process launched with.
-  ///
-  /// A file whose stamp moved is always read. A file whose stamp matched is read
-  /// too unless its mtime predates its last content read by more than
-  /// [_racyWindow] — anything younger may have been rewritten in the same tick
-  /// the baseline was read in, which leaves the stamp exactly as it was. A file
-  /// whose bytes did not move after all has its stamp and read time recorded,
-  /// which is what keeps it out of the hashing stage for the rest of the run
-  /// once its mtime ages past the window; a file that really moved is left
-  /// un-advanced on purpose, so the next command reaches the same verdict. Only
-  /// a new process changes that, through [markLive].
-  Future<List<String>> _moved(Iterable<String> paths) async {
-    final restamped = <String, String>{};
-    for (final path in paths) {
-      final stat = await _statFile(path);
-      final stamp = _stampFor(stat);
-      final live = _live[path];
-      if (live == null || stamp != live.stamp) {
-        restamped[path] = stamp;
-      } else if (!_provesUnchanged(
-        stat.modified.microsecondsSinceEpoch,
-        live.readAtMicros,
-      )) {
-        restamped[path] = stamp;
-      }
-    }
-    if (restamped.isEmpty) return const [];
+  /// process launched with — see [findMovedFiles], which owns the stamp,
+  /// content and racy-window rule both this watch and the native hot patcher
+  /// decide by.
+  Future<List<String>> _moved(Iterable<String> paths) =>
+      findMovedFiles(paths: paths, live: _live);
 
-    // The moment each file's content is read, taken before the read: a file
-    // whose mtime is not older than this by more than the window may have been
-    // written in the same tick, after the read.
-    final readStart = DateTime.now().microsecondsSinceEpoch;
-    final content = await nativeLibsFingerprintOfFiles(restamped.keys);
-    final moved = <String>[];
-    for (final entry in restamped.entries) {
-      final path = entry.key;
-      if (content[path] != _live[path]?.content) {
-        moved.add(path);
-      } else {
-        _live[path] = _Image(entry.value, content[path]!, readStart);
-      }
-    }
-    return moved..sort();
-  }
-
-  static Future<Map<String, _Image>> _read(Iterable<String> paths) async {
-    // The moment each file's content is read, taken before the read, for the
-    // same reason as in [_moved]. [markLive] and [markPatched] re-baseline
-    // through here, so they get the same rule.
-    final readStart = DateTime.now().microsecondsSinceEpoch;
-    final content = await nativeLibsFingerprintOfFiles(paths);
-    return {
-      for (final path in paths)
-        path: _Image(
-          _stampFor(await _statFile(path)),
-          content[path]!,
-          readStart,
-        ),
-    };
-  }
-
-  /// Whether a matching stamp proves a file unchanged: only when its mtime
-  /// predates its last content read by more than [_racyWindow].
-  static bool _provesUnchanged(int mtimeMicros, int readAtMicros) =>
-      readAtMicros - mtimeMicros > _racyWindow.inMicroseconds;
-
-  static Future<FileStat> _statFile(String path) => File(path).stat();
-
-  /// A file's size and mtime as one token. A path that is not there answers a
-  /// stamp of its own rather than throwing: the throw belongs to the content read,
-  /// which says which file the build declared and did not write.
-  ///
-  /// A matching stamp proves the bytes unchanged only when the file's mtime is
-  /// older than the moment its content was last read by more than [_racyWindow]
-  /// (see [_provesUnchanged]): a same-size rewrite within that tick leaves the
-  /// stamp exactly as it was.
-
-  static String _stampFor(FileStat stat) =>
-      '${stat.size}:${stat.modified.microsecondsSinceEpoch}';
+  static Future<Map<String, FileSnapshot>> _read(Iterable<String> paths) =>
+      readFileSnapshots(paths);
 }
