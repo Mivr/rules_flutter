@@ -337,12 +337,15 @@ class NativeHotPatcher {
   Future<List<_Patchable>> _movedLibraries(Set<String> movedLibraries) async {
     final moved = <_Patchable>[];
     for (final library in _libraries) {
+      // A source that appears or disappears is a move by itself: its content
+      // is never read, and the build below runs and reports its outcome.
       final movedSources = await findMovedFiles(
         paths: [
           for (final source in library.tool.manifest.sources)
             p.join(workspace, source),
         ],
         live: library.sourceSnapshots,
+        readMissing: false,
       );
       if (movedSources.isNotEmpty ||
           movedLibraries.contains(library.libraryFileName)) {

@@ -97,8 +97,12 @@ void main() {
   late List<FakeApp> apps;
 
   /// A manifest for `libmul.dylib` built into [config], with that build's
-  /// identity [fill].
-  String declare(String config, int fill) {
+  /// identity [fill] and declared sources [sources].
+  String declare(
+    String config,
+    int fill, [
+    List<String> sources = const ['native/mul.c'],
+  ]) {
     final bin = Directory('$execRoot/bazel-out/$config/bin')
       ..createSync(recursive: true);
     File('${bin.path}/libmul.dylib').writeAsBytesSync(machO(fill));
@@ -107,7 +111,7 @@ void main() {
         jsonEncode({
           'version': 1,
           'library': 'bazel-out/$config/bin/libmul.dylib',
-          'sources': ['native/mul.c'],
+          'sources': sources,
           'command': ['tool', config],
         }),
       );
@@ -324,6 +328,37 @@ void main() {
       rewriteSameSizeAndRestoreMtime();
       expect(await patcher.patchIfMoved(), isA<NativePatchNotNeeded>());
       expect(builds, 0);
+    });
+
+    test('with a source deleted between reloads reports the build', () async {
+      // A source that disappears is a move by itself: nothing throws on the
+      // missing file, the build runs, and its outcome is reported as ever.
+      buildFails = true;
+      File('$workspace/native/mul.c').deleteSync();
+      expect(
+        await patcher.patchIfMoved(),
+        isA<NativePatchBuildFailed>().having(
+          (o) => o.message,
+          'message',
+          contains('expected ;'),
+        ),
+      );
+      expect(builds, 1);
+    });
+
+    test('a source that appears after arming is patched', () async {
+      // The manifest declares a source that does not exist yet: arming
+      // records it missing rather than throwing, and its arrival is a move.
+      builtFiles = [
+        declare('st', 0xaa, ['native/mul.c', 'native/gen.c']),
+      ];
+      await patcher.rebaseline();
+      builds = 0;
+      File(
+        '$workspace/native/gen.c',
+      ).writeAsStringSync('int gen() { return 1; }');
+      expect(await patcher.patchIfMoved(), isA<NativePatched>());
+      expect(builds, 1);
     });
 
     test('every delivery gets a name its loader has never opened', () async {

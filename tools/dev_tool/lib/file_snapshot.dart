@@ -116,21 +116,31 @@ Future<Map<String, FileSnapshot>> readFileSnapshots(
 /// un-advanced on purpose, so the next command reaches the same verdict.
 /// Only a new baseline changes that.
 ///
-/// A path that is not there counts as moved against a snapshot that has it,
-/// and the content read then throws — the same loud answer as a snapshot
-/// that never had it, since neither describes bytes the app could be
-/// running.
+/// A path that is not there counts as moved against a snapshot that has it.
+/// What happens next depends on [readMissing]: when true, it joins the
+/// content read, which throws — the same loud answer as a snapshot that
+/// never had it, since neither describes bytes the app could be running
+/// (this is the watch's rule). When false, it counts as moved without
+/// reading anything, and the caller runs whatever decides the outcome — a
+/// build, in the hot patcher's case — and reports that instead (this is the
+/// patcher's rule: a deleted source is a move by itself, never a throw).
 Future<List<String>> findMovedFiles({
   required Iterable<String> paths,
   required Map<String, FileSnapshot> live,
+  bool readMissing = true,
 }) async {
   final restamped = <String, String>{};
+  final moved = <String>[];
   for (final path in paths) {
     final stat = await File(path).stat();
     final known = live[path];
     if (stat.type == FileSystemEntityType.notFound) {
       if (known == null || !known.isMissing) {
-        restamped[path] = missingStamp;
+        if (readMissing) {
+          restamped[path] = missingStamp;
+        } else {
+          moved.add(path);
+        }
       }
       continue;
     }
@@ -145,14 +155,13 @@ Future<List<String>> findMovedFiles({
       restamped[path] = stamp;
     }
   }
-  if (restamped.isEmpty) return const [];
+  if (restamped.isEmpty) return moved..sort();
 
   // The moment each file's content is read, taken before the read: a file
   // whose mtime is not older than this by more than the window may have been
   // written in the same tick, after the read.
   final readStart = DateTime.now().microsecondsSinceEpoch;
   final content = await nativeLibsFingerprintOfFiles(restamped.keys);
-  final moved = <String>[];
   for (final entry in restamped.entries) {
     final path = entry.key;
     if (content[path] != live[path]?.content) {
