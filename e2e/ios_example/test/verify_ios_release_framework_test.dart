@@ -7,9 +7,12 @@
 /// simulator bundle `:app_simulator`, and checks:
 ///
 /// * `App.framework/App` parses as a 64-bit Mach-O for arm64 whose
-///   `LC_BUILD_VERSION` platform is iOS (2), not the simulator (7), and whose
-///   dyld exports (or symbol table) carry the AOT snapshot symbols
-///   (`kDartVmSnapshotInstructions`, `kDartIsolateSnapshotInstructions`);
+///   `LC_BUILD_VERSION` platform is iOS (2), not the simulator (7), whose
+///   dyld exports are exactly the two symbols the engine loads from an Apple
+///   `app-aot-macho-dylib` snapshot (`_kDartSnapshotText`,
+///   `_kDartSnapshotData`), and whose symbol table is stripped the way
+///   `flutter build` strips it (`strip -x`): `LC_DYSYMTAB` keeps no local
+///   symbols and no `LC_SYMTAB` entry is a stab entry;
 /// * the snapshot itself targets iOS on arm64: its VM features string (whose
 ///   first word is `product` in a release build) names `arm64` and `ios`,
 ///   not `macos` (the framework rule stamps `LC_BUILD_VERSION` itself, so
@@ -39,13 +42,9 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
-/// AOT snapshot symbols the release binary must export, without their
-/// leading underscore (the export trie keeps it, the byte search does not
-/// care, so both spellings are accepted below).
-const _vmInstructions = 'kDartVmSnapshotInstructions';
-
-/// The isolate snapshot symbol, as above.
-const _isolateInstructions = 'kDartIsolateSnapshotInstructions';
+/// The two symbols an Apple `app-aot-macho-dylib` snapshot exports, with the
+/// leading underscore the export trie keeps.
+const _snapshotExports = {'_kDartSnapshotText', '_kDartSnapshotData'};
 
 /// Class in `lib/main.dart` that obfuscation must rename away.
 const _obfuscatedClass = 'MyApp';
@@ -70,6 +69,9 @@ const _lcBuildVersion = 0x32;
 
 /// `LC_SYMTAB` load command number.
 const _lcSymtab = 0x2;
+
+/// `LC_DYSYMTAB` load command number.
+const _lcDysymtab = 0xb;
 
 /// `LC_DYLD_INFO_ONLY` load command number.
 const _lcDyldInfoOnly = 0x80000022;
@@ -226,7 +228,8 @@ class _Report {
   }
 }
 
-/// Checks [bytes] is a 64-bit arm64 Mach-O for iOS exporting the snapshot.
+/// Checks [bytes] is a 64-bit arm64 Mach-O for iOS exporting the snapshot
+/// with a stripped symbol table.
 void _checkMachO(_Report report, String role, String path, Uint8List bytes) {
   _MachO macho;
   try {
@@ -252,16 +255,31 @@ void _checkMachO(_Report report, String role, String path, Uint8List bytes) {
       found: macho.platform == null
           ? 'no LC_BUILD_VERSION in $path'
           : 'platform ${macho.platform} in $path',
-    );
-  for (final symbol in [_vmInstructions, _isolateInstructions]) {
-    report.check(
-      'a $role App binary exporting the AOT snapshot symbol $symbol',
-      ok: macho.exportNames.any((n) => n == symbol || n == '_$symbol'),
+    )
+    ..check(
+      'a $role App binary whose dyld exports are exactly $_snapshotExports, '
+      'not the debug stub',
+      ok:
+          macho.trieNames.length == _snapshotExports.length &&
+          macho.trieNames.containsAll(_snapshotExports),
       found:
-          '${macho.exportNames.length} exported names in $path, '
-          'none of them $symbol',
+          '${macho.trieNames.length} trie exports in $path: '
+          '${macho.trieNames.join(', ')}',
+    )
+    ..check(
+      'a $role App binary with no local symbols left '
+      '(nlocalsym 0, stripped like `flutter build`)',
+      ok: macho.localSymbolCount == 0,
+      found: macho.localSymbolCount == null
+          ? 'no LC_DYSYMTAB in $path'
+          : 'nlocalsym ${macho.localSymbolCount} in $path',
+    )
+    ..check(
+      'a $role App binary with no stab entries left in its symbol table '
+      '(stripped like `flutter build`)',
+      ok: macho.stabSymbolCount == 0,
+      found: '${macho.stabSymbolCount} stab entries in $path',
     );
-  }
 }
 
 /// Checks the snapshot was compiled for iOS on arm64, not for macOS.
@@ -465,7 +483,9 @@ class _MachO {
   const _MachO({
     required this.cpuType,
     required this.platform,
-    required this.exportNames,
+    required this.trieNames,
+    required this.localSymbolCount,
+    required this.stabSymbolCount,
   });
 
   /// The header `cputype` (arm64 expected).
@@ -474,8 +494,14 @@ class _MachO {
   /// The `LC_BUILD_VERSION` platform, or null when the command is absent.
   final int? platform;
 
-  /// Exported symbol names from the export trie and the symbol table.
-  final Set<String> exportNames;
+  /// Exported symbol names from the dyld export tries.
+  final Set<String> trieNames;
+
+  /// `LC_DYSYMTAB` `nlocalsym`, or null when the command is absent.
+  final int? localSymbolCount;
+
+  /// `LC_SYMTAB` entries whose `n_type` has a stab bit (`& 0xe0 != 0`).
+  final int stabSymbolCount;
 }
 
 /// Parses the Mach-O header and load commands of [bytes].
@@ -497,7 +523,9 @@ _MachO _parseMachO(Uint8List bytes) {
   final ncmds = head.u32();
   head.skip(12);
   int? platform;
-  final names = <String>{};
+  final trieNames = <String>{};
+  int? localSymbolCount;
+  var stabSymbolCount = 0;
   for (var i = 0; i < ncmds; i++) {
     final commandAt = head.offset;
     final command = head.u32();
@@ -512,15 +540,23 @@ _MachO _parseMachO(Uint8List bytes) {
       case _lcBuildVersion:
         platform ??= _buildVersionPlatform(bytes, commandAt);
       case _lcSymtab:
-        names.addAll(_symtabNames(bytes, commandAt));
+        stabSymbolCount += _symtabStabCount(bytes, commandAt);
+      case _lcDysymtab:
+        localSymbolCount = _dysymtabLocalCount(bytes, commandAt);
       case _lcDyldInfoOnly:
-        names.addAll(_infoTrieNames(bytes, commandAt));
+        trieNames.addAll(_infoTrieNames(bytes, commandAt));
       case _lcDyldExportsTrie:
-        names.addAll(_exportsTrieNames(bytes, commandAt));
+        trieNames.addAll(_exportsTrieNames(bytes, commandAt));
     }
     head.offset = commandAt + cmdsize;
   }
-  return _MachO(cpuType: cpuType, platform: platform, exportNames: names);
+  return _MachO(
+    cpuType: cpuType,
+    platform: platform,
+    trieNames: trieNames,
+    localSymbolCount: localSymbolCount,
+    stabSymbolCount: stabSymbolCount,
+  );
 }
 
 /// The platform field of the `LC_BUILD_VERSION` at [commandAt].
@@ -529,25 +565,34 @@ int _buildVersionPlatform(Uint8List bytes, int commandAt) {
   return reader.u32();
 }
 
-/// Symbol names from the `LC_SYMTAB` string table at [commandAt].
-Set<String> _symtabNames(Uint8List bytes, int commandAt) {
+/// How many `LC_SYMTAB` entries at [commandAt] are debugging (stab) entries.
+///
+/// An `nlist_64` entry is 16 bytes with `n_type` at offset 4; a stab entry
+/// has a bit in the `N_STAB` mask 0xe0 set.
+int _symtabStabCount(Uint8List bytes, int commandAt) {
   final reader = _Reader(bytes)..offset = commandAt + 8;
   final symoff = reader.u32();
   final nsyms = reader.u32();
-  final stroff = reader.u32();
-  final strsize = reader.u32();
-  if (symoff + nsyms * 16 > bytes.length || stroff + strsize > bytes.length) {
+  reader.skip(8);
+  if (symoff + nsyms * 16 > bytes.length) {
     throw FormatException(
       'LC_SYMTAB at $commandAt points past the file '
-      '(symbols $symoff+$nsyms, strings $stroff+$strsize)',
+      '(symbols $symoff+$nsyms)',
     );
   }
-  final names = <String>{};
+  var stabs = 0;
   for (var i = 0; i < nsyms; i++) {
-    final strx = _u32At(bytes, symoff + i * 16);
-    names.add(_tableString(bytes, stroff, strsize, strx));
+    if (bytes[symoff + i * 16 + 4] & 0xe0 != 0) stabs++;
   }
-  return names;
+  return stabs;
+}
+
+/// The `LC_DYSYMTAB` `nlocalsym` at [commandAt] (`ilocalsym` is skipped).
+int _dysymtabLocalCount(Uint8List bytes, int commandAt) {
+  final reader = _Reader(bytes)
+    ..offset = commandAt + 8
+    ..skip(4);
+  return reader.u32();
 }
 
 /// Export names from the `LC_DYLD_INFO_ONLY` export trie at [commandAt].
@@ -566,32 +611,6 @@ Set<String> _exportsTrieNames(Uint8List bytes, int commandAt) {
   final dataoff = reader.u32();
   final datasize = reader.u32();
   return _Trie(bytes, dataoff, datasize).names();
-}
-
-/// Reads one little-endian u32 at [offset], failing past the end.
-int _u32At(Uint8List bytes, int offset) {
-  if (offset < 0 || offset + 4 > bytes.length) {
-    throw FormatException('u32 at $offset runs past ${bytes.length} bytes');
-  }
-  return ByteData.sublistView(
-    bytes,
-    offset,
-    offset + 4,
-  ).getUint32(0, Endian.little);
-}
-
-/// Reads the NUL-terminated string at [tableAt] + [index].
-String _tableString(Uint8List bytes, int tableAt, int tableSize, int index) {
-  if (index < 0 || tableAt + index >= tableAt + tableSize) {
-    throw FormatException(
-      'string index $index runs past the $tableSize-byte table at $tableAt',
-    );
-  }
-  var end = tableAt + index;
-  while (end < tableAt + tableSize && bytes[end] != 0) {
-    end++;
-  }
-  return utf8.decode(bytes.sublist(tableAt + index, end), allowMalformed: true);
 }
 
 /// A dyld export trie: child offsets count from the trie's own start.
