@@ -1,7 +1,11 @@
 """Parse pub package pubspec.yaml `flutter:` block metadata.
 
-YAML parsing itself delegates to `@yaml.bzl//:yaml.bzl`. This module projects
-the parsed value down to the shapes rules_flutter consumes:
+YAML parsing itself delegates to the public `parse_pubspec_document` in
+`@rules_dart//dart/pub:yaml_parser.bzl`, which reads zero-indented block
+sequences at any depth and a leading byte-order mark, and fails naming
+the package, the label and the line on anything it cannot read. This
+module projects the parsed value down to the shapes rules_flutter
+consumes:
 
 - `parse_flutter_plugin_block` — `flutter.plugin` for plugin-spoke emission.
 - `parse_flutter_assets_block` — `flutter.{fonts,assets,shaders,uses-material-design}`
@@ -32,7 +36,7 @@ Schema reference (Flutter's pubspec):
             ...
 """
 
-load("@yaml.bzl//:yaml.bzl", "yaml")
+load("@rules_dart//dart/pub:yaml_parser.bzl", "parse_pubspec_document")
 
 def parse_pubspec(content):
     """Parse pubspec.yaml content into a Starlark dict.
@@ -41,17 +45,11 @@ def parse_pubspec(content):
         content: Full pubspec.yaml content as a string.
 
     Returns:
-        Native dict (possibly empty) of the parsed pubspec, or empty dict on
-        non-mapping root / parser errors. Errors are not surfaced — callers
-        that need strict behavior should validate fields themselves.
+        Native dict of the parsed pubspec. Unreadable input fails with a
+        message naming the package, the label and the line; an empty
+        document returns `{}`.
     """
-    if not content.strip():
-        return {}
-    doc = yaml.parse(content)
-    if yaml.has_errors(doc):
-        return {}
-    data = yaml.get_value(doc)
-    return data if type(data) == "dict" else {}
+    return parse_pubspec_document(content)
 
 def parse_flutter_block(content):
     """Return the `flutter:` sub-dict, or empty dict when absent."""

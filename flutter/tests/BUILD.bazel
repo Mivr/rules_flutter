@@ -47,6 +47,7 @@ load(":plist_merge_test.bzl", "plist_merge_test_suite")
 load(":plugin_registrant_test.bzl", "plugin_registrant_test_suite")
 load(":profile_mode_test.bzl", "profile_mode_test_suite")
 load(":pub_lock_sdks_test.bzl", "pub_lock_sdks_test_suite")
+load(":pubspec_errors_test.bzl", "pubspec_errors_test_suite")
 load(":shader_compile_test.bzl", "shader_compile_test_suite")
 load(":shader_keys_test.bzl", "shader_keys_test_suite")
 load(":starlark_literal_test.bzl", "starlark_literal_test_suite")
@@ -175,6 +176,8 @@ flutter_pub_scan_test_suite(name = "flutter_pub_scan_test")
 flutter_pub_overlays_test_suite(name = "flutter_pub_overlays_test")
 
 flutter_pubspec_test_suite(name = "flutter_pubspec_test")
+
+pubspec_errors_test_suite(name = "pubspec_errors_test")
 
 flutter_sdk_package_test_suite(name = "flutter_sdk_package_test")
 
