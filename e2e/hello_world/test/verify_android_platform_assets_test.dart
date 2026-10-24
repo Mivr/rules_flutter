@@ -2,14 +2,15 @@
 ///
 /// `@deps//:platform_assets` (a `path:` fixture package resolved through
 /// `flutter.pub`) declares `assets/any.txt` (unconditional),
-/// `assets/android_only.txt` (`platforms: [android]`), `assets/web_only.txt`
-/// (`platforms: [web]`), `assets/paid_only.txt` (`flavors: [paid]`) and
+/// `assets/android_only.txt` (`platforms: [android]`), `assets/ios_only.txt`
+/// (`platforms: [ios]`), `assets/web_only.txt` (`platforms: [web]`),
+/// `assets/paid_only.txt` (`flavors: [paid]`) and
 /// `assets/union_android.txt` (one entry for `[android]`, one for `[linux]`,
 /// so it ships on the union: Android and Linux). The test lists the APK's
 /// zip entries and asserts
 /// `assets/flutter_assets/packages/platform_assets/assets/` holds `any.txt`,
-/// `android_only.txt` and `union_android.txt` but neither `web_only.txt` nor
-/// `paid_only.txt`, and that `AssetManifest.bin` agrees.
+/// `android_only.txt` and `union_android.txt` but neither `web_only.txt`,
+/// `ios_only.txt` nor `paid_only.txt`, and that `AssetManifest.bin` agrees.
 ///
 /// The archive is parsed by hand (central directory walk, raw inflate via
 /// `dart:io`'s `ZLibCodec` when the manifest entry is deflated): no `unzip`
@@ -149,6 +150,11 @@ void main() {
     'assets/flutter_assets/$prefix/web_only.txt must stay web-only',
   );
   check(
+    'ios_only.txt is not in the Android APK',
+    !names.contains('ios_only.txt'),
+    'assets/flutter_assets/$prefix/ios_only.txt must stay iOS-only',
+  );
+  check(
     'paid_only.txt is not in the Android APK',
     !names.contains('paid_only.txt'),
     'assets/flutter_assets/$prefix/paid_only.txt needs a flavor that '
@@ -192,6 +198,11 @@ void main() {
     check(
       'AssetManifest omits web_only.txt',
       !manifestText.contains('packages/platform_assets/assets/web_only.txt'),
+      'manifest lists an asset the bundle must not carry',
+    );
+    check(
+      'AssetManifest omits ios_only.txt',
+      !manifestText.contains('packages/platform_assets/assets/ios_only.txt'),
       'manifest lists an asset the bundle must not carry',
     );
     check(
