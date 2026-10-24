@@ -107,7 +107,16 @@ apple_bundle_version(
     name = "hello_world_ios_app_version",
     build_version = "42",
     short_version_string = "2.3.4",
-    target_compatible_with = ["@platforms//os:macos"],
+    # Built two ways: as a top-level target on a macOS host, and as a
+    # dependency of `:hello_world_ios` in the iOS configuration (where the
+    # OS constraint is ios, not macos). Incompatible anywhere else, so
+    # Linux and Windows wildcard builds skip it instead of resolving
+    # Apple's mac tools.
+    target_compatible_with = select({
+        "@platforms//os:ios": [],
+        "@platforms//os:macos": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
 )
 
 # `:hello_world_ios` as `verify_ios_bundle_contents_test` reads it: a
