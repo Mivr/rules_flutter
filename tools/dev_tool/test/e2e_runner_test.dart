@@ -22,12 +22,15 @@ import '../tool/e2e.dart';
 ///
 /// [tests] is name → outcome, where the outcome is one of `pass`, `fail` or
 /// `skip`. [verdict] is what `dart test` itself declared; null means the
-/// runner died before saying — no `done` event at all.
+/// runner died before saying — no `done` event at all. [errors] attaches an
+/// `error` event (name → what the failure said) to a failing test, the way a
+/// real failure arrives.
 Outcome runOf(
   Map<String, String> tests, {
   bool? verdict = true,
   int exitCode = 0,
   Iterable<String> requireRan = const [],
+  Map<String, String> errors = const {},
 }) {
   final outcome = Outcome(requireRan: requireRan);
   var id = 0;
@@ -39,6 +42,17 @@ Outcome runOf(
         'test': {'id': id, 'name': name},
       }),
     );
+    final error = errors[name];
+    if (error != null) {
+      outcome.consume(
+        json.encode({
+          'type': 'error',
+          'testID': id,
+          'error': error,
+          'stackTrace': '',
+        }),
+      );
+    }
     outcome.consume(
       json.encode({
         'type': 'testDone',
@@ -480,6 +494,59 @@ void main() {
       // The requirement comes first, and it carries the failure with it.
       expect(outcome.diagnosis, contains('--require-ran=iOS'));
       expect(outcome.diagnosis, contains('iOS Simulator e2e renders'));
+    });
+
+    test(
+      'failures outside the requirement still print with their errors',
+      () {
+        // Round 1 on macOS: with `--require-ran=iOS` unmet, two macOS
+        // failures printed only a name — the early requirement return hid
+        // what they said. Every failing outcome names every failed test.
+        final outcome = runOf(
+          {
+            'macOS e2e renders': 'fail',
+            'asset reload e2e reaches the app': 'fail',
+            'iOS Simulator e2e renders': 'skip',
+          },
+          verdict: false,
+          requireRan: ['iOS'],
+          errors: {
+            'macOS e2e renders': 'Expected: <2>\n  Actual: <1>',
+            'asset reload e2e reaches the app':
+                'Timed out waiting for app.start',
+          },
+        );
+
+        expect(outcome.ok, isFalse);
+        expect(outcome.diagnosis, contains('2 test(s) failed'));
+        expect(outcome.diagnosis, contains('macOS e2e renders'));
+        expect(outcome.diagnosis, contains('Expected: <2>'));
+        expect(outcome.diagnosis, contains('asset reload e2e reaches the app'));
+        expect(outcome.diagnosis, contains('Timed out waiting for app.start'));
+        expect(outcome.diagnosis, contains('--require-ran=iOS'));
+      },
+    );
+
+    test('a truncated run still names the failures it saw', () {
+      final outcome = runOf(
+        {
+          'macOS e2e renders': 'fail',
+          'iOS Simulator e2e renders': 'pass',
+        },
+        verdict: null,
+        exitCode: 255,
+        requireRan: ['iOS'],
+        errors: {
+          'macOS e2e renders': 'Expected: <2>\n  Actual: <1>',
+        },
+      );
+
+      expect(outcome.ok, isFalse);
+      expect(outcome.diagnosis, contains('never reported a verdict'));
+      expect(outcome.diagnosis, contains('macOS e2e renders'));
+      expect(outcome.diagnosis, contains('Expected: <2>'));
+      // The requirement was met (an iOS test passed), so it adds no lines.
+      expect(outcome.diagnosis, isNot(contains('--require-ran=iOS')));
     });
 
     test('matching is case-sensitive', () {

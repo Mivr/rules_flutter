@@ -17,9 +17,10 @@
 /// Each `--require-ran=<substring>` names tests that must have run for the run
 /// to count as a pass: at least one test whose full name contains the
 /// substring (case-sensitive) passed, and no test whose name contains it
-/// skipped or failed. A bare `--require-ran` or an empty value is a usage
-/// error and exits non-zero before anything runs. Without the flag behaviour
-/// is unchanged.
+/// skipped or failed. A failing run still names every failed test with its
+/// error; an unmet requirement adds its own lines and never hides those. A
+/// bare `--require-ran` or an empty value is a usage error and exits non-zero
+/// before anything runs. Without the flag behaviour is unchanged.
 ///
 /// ## Why this exists rather than a bare `dart test`
 ///
@@ -388,30 +389,40 @@ class Outcome {
   /// Separate from [report] so the verdict can be asserted on: a branch ending
   /// in `exit(1)` would kill the process asserting it.
   ///
-  /// The branch order is load-bearing. The two "did anything happen" questions
-  /// are asked against [executed] rather than [passed], because a run whose
-  /// only test failed has `passed.isEmpty` — and asking those questions of
-  /// [passed] answers "nothing was selected to run … Check the paths, --tags
-  /// and -n you passed", with the failure it has just printed sitting directly
-  /// above. `1 failed + 2 skipped` reaches the same defect by the other branch,
-  /// reporting "all 2 of them skipped".
+  /// Composed of independent sections rather than early returns: a failing run
+  /// names every failed test with its error whatever else happened, and an
+  /// unmet `--require-ran` adds its own lines instead of hiding those. The
+  /// "did anything happen" questions inside [_verdictSection] are asked
+  /// against [executed] rather than [passed], because a run whose only test
+  /// failed has `passed.isEmpty` — and asking those questions of [passed]
+  /// answers "nothing was selected to run … Check the paths, --tags and -n
+  /// you passed", with the failure it has just printed sitting directly
+  /// above. `1 failed + 2 skipped` reaches the same defect by the other
+  /// branch, reporting "all 2 of them skipped".
   String? get diagnosis {
     if (ok) return null;
+    final sections = [
+      _verdictSection,
+      if (failed.isNotEmpty) _failuresSection,
+      if (_unmetRequirements.isNotEmpty)
+        'required tests did not run as asked:\n'
+            '${_unmetRequirements.map(_requirementDiagnosis).join('\n')}',
+    ].whereType<String>().join('\n');
+    return sections;
+  }
 
+  /// The verdict section: why the run as a whole is not a pass. Null when the
+  /// failures section carries the run instead — a run with failures names
+  /// them, and says nothing else about the verdict.
+  String? get _verdictSection {
     if (runnerVerdict == null) {
       return 'the test runner never reported a verdict; it exited '
           '$runnerExitCode partway through. Read its output above — the '
           '$executed test(s) that did run are a prefix of an unknown '
           'whole, and none of this is a pass.';
     }
-    // Before the run-nothing branches: an unmet `--require-ran` names its
-    // substring whatever else happened, so a requirement is never silently
-    // absorbed into "nothing ran" or "all skipped".
-    final unmet = _unmetRequirements;
-    if (unmet.isNotEmpty) {
-      return 'required tests did not run as asked:\n'
-          '${unmet.map(_requirementDiagnosis).join('\n')}';
-    }
+    if (failed.isNotEmpty) return null;
+    if (_unmetRequirements.isNotEmpty) return null;
     if (executed == 0 && skipped.isEmpty) {
       return 'nothing was selected to run (dart test exited '
           '$runnerExitCode). Check the paths, --tags and -n you passed.';
@@ -424,16 +435,17 @@ class Outcome {
           'Screen Recording or Accessibility permission, and off macOS it is '
           'that most of this suite is macOS-only.';
     }
-    if (failed.isEmpty) {
-      // The runner declared failure without any test carrying it. A test that
-      // throws *after* its own `testDone` — a stray async error, a late
-      // teardown — arrives exactly this way: an error event and a failing
-      // `done`, with nothing to attribute it to.
-      return 'the run failed without a failing test — something threw outside '
-          'a test\'s own lifetime:\n${_indented(_errors.keys)}';
-    }
-    return '${failed.length} test(s) failed:\n${_indented(failed)}';
+    // The runner declared failure without any test carrying it. A test that
+    // throws *after* its own `testDone` — a stray async error, a late
+    // teardown — arrives exactly this way: an error event and a failing
+    // `done`, with nothing to attribute it to.
+    return 'the run failed without a failing test — something threw outside '
+        'a test\'s own lifetime:\n${_indented(_errors.keys)}';
   }
+
+  /// Every failed test with what it said.
+  String get _failuresSection =>
+      '${failed.length} test(s) failed:\n${_indented(failed)}';
 
   /// Why one `--require-ran` substring is unmet: the matching tests that
   /// skipped (with their reasons) and failed (with what they said), or that
