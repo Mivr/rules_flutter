@@ -8,11 +8,13 @@
 ///
 /// * `App.framework/App` parses as a 64-bit Mach-O for arm64 whose
 ///   `LC_BUILD_VERSION` platform is iOS (2), not the simulator (7), whose
-///   dyld exports are exactly the two symbols the engine loads from an Apple
+///   exported symbols are exactly the two the engine loads from an Apple
 ///   `app-aot-macho-dylib` snapshot (`_kDartSnapshotText`,
-///   `_kDartSnapshotData`), and whose symbol table is stripped the way
-///   `flutter build` strips it (`strip -x`): `LC_DYSYMTAB` keeps no local
-///   symbols and no `LC_SYMTAB` entry is a stab entry;
+///   `_kDartSnapshotData`) — the `LC_SYMTAB` entries in `LC_DYSYMTAB`'s
+///   external-defined range, plus any export trie the binary carries
+///   (gen_snapshot's dylib has none) — and whose symbol table is stripped
+///   the way `flutter build` strips it (`strip -x`): `LC_DYSYMTAB` keeps no
+///   local symbols and no `LC_SYMTAB` entry is a stab entry;
 /// * the snapshot itself targets iOS on arm64: its VM features string (whose
 ///   first word is `product` in a release build) names `arm64` and `ios`,
 ///   not `macos` (the framework rule stamps `LC_BUILD_VERSION` itself, so
@@ -43,7 +45,7 @@ import 'dart:io';
 import 'dart:typed_data';
 
 /// The two symbols an Apple `app-aot-macho-dylib` snapshot exports, with the
-/// leading underscore the export trie keeps.
+/// leading underscore the symbol table keeps.
 const _snapshotExports = {'_kDartSnapshotText', '_kDartSnapshotData'};
 
 /// Class in `lib/main.dart` that obfuscation must rename away.
@@ -257,14 +259,14 @@ void _checkMachO(_Report report, String role, String path, Uint8List bytes) {
           : 'platform ${macho.platform} in $path',
     )
     ..check(
-      'a $role App binary whose dyld exports are exactly $_snapshotExports, '
-      'not the debug stub',
+      'a $role App binary whose exported symbols are exactly '
+      '$_snapshotExports, not the debug stub',
       ok:
-          macho.trieNames.length == _snapshotExports.length &&
-          macho.trieNames.containsAll(_snapshotExports),
+          macho.exportNames.length == _snapshotExports.length &&
+          macho.exportNames.containsAll(_snapshotExports),
       found:
-          '${macho.trieNames.length} trie exports in $path: '
-          '${macho.trieNames.join(', ')}',
+          '${macho.exportNames.length} exported symbols in $path: '
+          '${macho.exportNames.join(', ')}',
     )
     ..check(
       'a $role App binary with no local symbols left '
@@ -483,7 +485,7 @@ class _MachO {
   const _MachO({
     required this.cpuType,
     required this.platform,
-    required this.trieNames,
+    required this.exportNames,
     required this.localSymbolCount,
     required this.stabSymbolCount,
   });
@@ -494,8 +496,9 @@ class _MachO {
   /// The `LC_BUILD_VERSION` platform, or null when the command is absent.
   final int? platform;
 
-  /// Exported symbol names from the dyld export tries.
-  final Set<String> trieNames;
+  /// Exported symbol names: the `LC_SYMTAB` entries in `LC_DYSYMTAB`'s
+  /// external-defined range, plus any dyld export trie entries.
+  final Set<String> exportNames;
 
   /// `LC_DYSYMTAB` `nlocalsym`, or null when the command is absent.
   final int? localSymbolCount;
@@ -523,9 +526,11 @@ _MachO _parseMachO(Uint8List bytes) {
   final ncmds = head.u32();
   head.skip(12);
   int? platform;
-  final trieNames = <String>{};
+  final exportNames = <String>{};
   int? localSymbolCount;
   var stabSymbolCount = 0;
+  int? symtabAt;
+  int? dysymtabAt;
   for (var i = 0; i < ncmds; i++) {
     final commandAt = head.offset;
     final command = head.u32();
@@ -540,20 +545,27 @@ _MachO _parseMachO(Uint8List bytes) {
       case _lcBuildVersion:
         platform ??= _buildVersionPlatform(bytes, commandAt);
       case _lcSymtab:
+        symtabAt ??= commandAt;
         stabSymbolCount += _symtabStabCount(bytes, commandAt);
       case _lcDysymtab:
+        dysymtabAt ??= commandAt;
         localSymbolCount = _dysymtabLocalCount(bytes, commandAt);
       case _lcDyldInfoOnly:
-        trieNames.addAll(_infoTrieNames(bytes, commandAt));
+        exportNames.addAll(_infoTrieNames(bytes, commandAt));
       case _lcDyldExportsTrie:
-        trieNames.addAll(_exportsTrieNames(bytes, commandAt));
+        exportNames.addAll(_exportsTrieNames(bytes, commandAt));
     }
     head.offset = commandAt + cmdsize;
+  }
+  if (symtabAt != null && dysymtabAt != null) {
+    exportNames.addAll(
+      _externalDefinedNames(bytes, symtabAt, dysymtabAt),
+    );
   }
   return _MachO(
     cpuType: cpuType,
     platform: platform,
-    trieNames: trieNames,
+    exportNames: exportNames,
     localSymbolCount: localSymbolCount,
     stabSymbolCount: stabSymbolCount,
   );
@@ -593,6 +605,71 @@ int _dysymtabLocalCount(Uint8List bytes, int commandAt) {
     ..offset = commandAt + 8
     ..skip(4);
   return reader.u32();
+}
+
+/// Names of the external defined symbols: the `LC_SYMTAB` entries in the
+/// `LC_DYSYMTAB` `iextdefsym .. iextdefsym + nextdefsym` range.
+///
+/// A range past the table is a [FormatException], never a pass.
+Set<String> _externalDefinedNames(
+  Uint8List bytes,
+  int symtabAt,
+  int dysymtabAt,
+) {
+  final symtab = _Reader(bytes)..offset = symtabAt + 8;
+  final symoff = symtab.u32();
+  final nsyms = symtab.u32();
+  final stroff = symtab.u32();
+  final strsize = symtab.u32();
+  final dysymtab = _Reader(bytes)
+    ..offset = dysymtabAt + 8
+    ..skip(8);
+  final extdef = dysymtab.u32();
+  final ndef = dysymtab.u32();
+  if (symoff + nsyms * 16 > bytes.length || stroff + strsize > bytes.length) {
+    throw FormatException(
+      'LC_SYMTAB at $symtabAt points past the file '
+      '(symbols $symoff+$nsyms, strings $stroff+$strsize)',
+    );
+  }
+  if (extdef + ndef > nsyms) {
+    throw FormatException(
+      'LC_DYSYMTAB external range $extdef+$ndef runs past the $nsyms-entry '
+      'LC_SYMTAB at $symtabAt',
+    );
+  }
+  final names = <String>{};
+  for (var i = extdef; i < extdef + ndef; i++) {
+    final strx = _u32At(bytes, symoff + i * 16);
+    names.add(_tableString(bytes, stroff, strsize, strx));
+  }
+  return names;
+}
+
+/// Reads one little-endian u32 at [offset], failing past the end.
+int _u32At(Uint8List bytes, int offset) {
+  if (offset < 0 || offset + 4 > bytes.length) {
+    throw FormatException('u32 at $offset runs past ${bytes.length} bytes');
+  }
+  return ByteData.sublistView(
+    bytes,
+    offset,
+    offset + 4,
+  ).getUint32(0, Endian.little);
+}
+
+/// Reads the NUL-terminated string at [tableAt] + [index].
+String _tableString(Uint8List bytes, int tableAt, int tableSize, int index) {
+  if (index < 0 || tableAt + index >= tableAt + tableSize) {
+    throw FormatException(
+      'string index $index runs past the $tableSize-byte table at $tableAt',
+    );
+  }
+  var end = tableAt + index;
+  while (end < tableAt + tableSize && bytes[end] != 0) {
+    end++;
+  }
+  return utf8.decode(bytes.sublist(tableAt + index, end), allowMalformed: true);
 }
 
 /// Export names from the `LC_DYLD_INFO_ONLY` export trie at [commandAt].
