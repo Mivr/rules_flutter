@@ -241,6 +241,8 @@ def _fake_android_app_impl(ctx):
         FlutterApplicationInfo(
             kernel_dill = None,
             aot_output = None,
+            # No AOT binary, so nothing was stripped.
+            aot_strip = False,
             flutter_assets = None,
             native_libs = [],
             plugins = [plugin],
@@ -340,6 +342,9 @@ def _fake_android_bundle_app_impl(ctx):
         FlutterApplicationInfo(
             kernel_dill = kernel,
             aot_output = aot,
+            # The fixture writes its binary as empty text, never a stripped
+            # gen_snapshot output.
+            aot_strip = False,
             flutter_assets = assets,
             icu_data = icu,
             is_debug = ctx.attr.with_kernel,

@@ -2110,6 +2110,7 @@ def _flutter_android_integration_app_impl(ctx):
         DefaultInfo(files = depset(default_files)),
         FlutterApplicationInfo(
             aot_output = aot_output,
+            aot_strip = strip if aot_output != None else False,
             kernel_dill = kernel_dill if is_debug else None,
             flutter_assets = flutter_assets,
             icu_data = flutter_sdk_info.icu_data,

@@ -318,11 +318,38 @@ FlutterDataAssetInfo = provider(
     },
 )
 
-FlutterApplicationInfo = provider(
-    doc = "Outputs of the Flutter application compilation pipeline.",
+def _flutter_application_info_init(**fields):
+    """Validates a `FlutterApplicationInfo` under construction.
+
+    `aot_strip` is required: without it the Apple framework rules cannot tell
+    whether the snapshot was compiled stripped, and fail deep inside their
+    patch action instead of here at the provider.
+
+    Args:
+      **fields: The provider field values under construction.
+
+    Returns:
+      The validated field values.
+    """
+    if type(fields.get("aot_strip", None)) != "bool":
+        fail(
+            "FlutterApplicationInfo: aot_strip is required: pass True only " +
+            "when gen_snapshot ran with --strip, else False (False when " +
+            "there is no AOT output)",
+        )
+    return fields
+
+# `provider()` with `init` returns the validating constructor plus a raw
+# constructor that bypasses `init`. Only the validating constructor is
+# exported: every construction must prove `aot_strip`.
+FlutterApplicationInfo, _new_flutter_application_info = provider(
+    doc = """Outputs of the Flutter application compilation pipeline.
+
+`aot_strip` is required on every instance: pass True only when gen_snapshot
+ran with `--strip`, else False (False when there is no AOT output).""",
     fields = {
         "aot_output": "File or None: The AOT compiled native code (.so, .dylib, or .S). None in debug mode.",
-        "aot_strip": "bool: Whether gen_snapshot stripped this AOT output (`--strip`: `-c opt`, forced by `obfuscate` unless `--no-strip` in `extra_gen_snapshot_options` wins). The Apple framework rules drop the snapshot's local and stab symbols from the shipped App binary exactly then, the way `flutter build` runs `strip -x` on the dylib.",
+        "aot_strip": "Required bool: whether gen_snapshot stripped this AOT output (`--strip`: `-c opt`, forced by `obfuscate` unless `--no-strip` in `extra_gen_snapshot_options` wins). Pass False when there is no AOT output. The Apple framework rules drop the snapshot's local and stab symbols from the shipped App binary exactly then, the way `flutter build` runs `strip -x` on the dylib.",
         "kernel_dill": "File or None: The kernel .dill file for JIT mode. None in release mode.",
         "flutter_assets": "File: The flutter_assets/ tree artifact.",
         "icu_data": "File: The icudtl.dat file.",
@@ -339,6 +366,7 @@ FlutterApplicationInfo = provider(
         "linux_plugin_libraries": "depset[struct]: Aggregated Linux plugin source bundles, same shape as `FlutterInfo.linux_plugin_libraries`. The Linux runner folds these into its compile.",
         "windows_plugin_libraries": "depset[struct]: Aggregated Windows plugin source bundles, same shape as `FlutterInfo.windows_plugin_libraries`. The Windows runner folds these into its compile.",
     },
+    init = _flutter_application_info_init,
 )
 
 FlutterCompiledShadersInfo = provider(

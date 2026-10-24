@@ -183,6 +183,9 @@ def _fake_application_impl(ctx):
 
     return [FlutterApplicationInfo(
         aot_output = aot_output,
+        # The fixture synthesizes its binary (a Mach-O stub or plain text),
+        # never a stripped gen_snapshot output.
+        aot_strip = False,
         kernel_dill = kernel_dill,
         is_debug = ctx.attr.debug,
         flutter_assets = flutter_assets,

@@ -231,6 +231,8 @@ def _aotless_application_impl(ctx):
     ctx.actions.write(dummy, "aotless")
     return [FlutterApplicationInfo(
         aot_output = None,
+        # No AOT binary, so nothing was stripped.
+        aot_strip = False,
         kernel_dill = None,
         flutter_assets = assets,
         icu_data = dummy,

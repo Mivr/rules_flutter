@@ -15,6 +15,7 @@ properties every public path must keep:
 """
 
 load("@bazel_skylib//lib:unittest.bzl", "analysistest", "asserts")
+load("//flutter:providers.bzl", "FlutterApplicationInfo")
 load("//flutter/private:common.bzl", "HOST_COMPATIBLE")
 load("//flutter/private:flutter_aot_target.bzl", "flutter_aot_target")
 load("//flutter/private:flutter_application.bzl", "flutter_application")
@@ -124,6 +125,28 @@ _application_obfuscate_strips_test = analysistest.make(
     config_settings = _FASTBUILD,
 )
 
+def _missing_aot_strip_app_impl(ctx):
+    """Application fixture omitting `aot_strip`, which the provider requires."""
+    return [FlutterApplicationInfo(
+        aot_output = None,
+        kernel_dill = None,
+    )]
+
+_missing_aot_strip_app = rule(
+    implementation = _missing_aot_strip_app_impl,
+)
+
+def _missing_aot_strip_test_impl(ctx):
+    """Omitting `aot_strip` fails analysis with the provider's message."""
+    env = analysistest.begin(ctx)
+    asserts.expect_failure(env, "FlutterApplicationInfo: aot_strip is required")
+    return analysistest.end(env)
+
+_missing_aot_strip_test = analysistest.make(
+    _missing_aot_strip_test_impl,
+    expect_failure = True,
+)
+
 def aot_flags_test_suite(name):
     """Defines analysis tests for the shared gen_snapshot flags.
 
@@ -171,6 +194,10 @@ def aot_flags_test_suite(name):
         obfuscate = True,
         tags = ["manual"],
     )
+    _missing_aot_strip_app(
+        name = "_flags_missing_aot_strip_app",
+        tags = ["manual"],
+    )
 
     _obfuscate_strips_test(
         name = name + "_obfuscate_strips",
@@ -197,6 +224,11 @@ def aot_flags_test_suite(name):
         target_under_test = ":_flags_application_obf",
         target_compatible_with = HOST_COMPATIBLE,
     )
+    _missing_aot_strip_test(
+        name = name + "_missing_aot_strip",
+        target_under_test = ":_flags_missing_aot_strip_app",
+        target_compatible_with = HOST_COMPATIBLE,
+    )
 
     native.test_suite(
         name = name,
@@ -206,5 +238,6 @@ def aot_flags_test_suite(name):
             ":" + name + "_split_debug",
             ":" + name + "_obfuscate_split_debug",
             ":" + name + "_application_obfuscate_strips",
+            ":" + name + "_missing_aot_strip",
         ],
     )
