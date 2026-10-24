@@ -2,10 +2,12 @@
 #
 # WHAT RUNS WHERE: the complete macOS e2e coverage that push CI (ci.yaml) no
 # longer runs — every workspace's full `bazel test //...` on macOS — plus the
-# Android example (too heavy for push CI) on Linux. Linux and Windows coverage
-# otherwise lives in push CI. Triggered by release tags, nightly, or manually;
-# the release workflow waits for this workflow AND ci.yaml to pass on the
-# tagged commit (see the gate job in release.yaml) before publishing.
+# Android example (too heavy for push CI) on Linux, plus the dev tool's own
+# iOS simulator e2e cases (`dev-tool-ios`) on a booted simulator on macOS.
+# Linux and Windows coverage otherwise lives in push CI. Triggered by release
+# tags, nightly, or manually; the release workflow waits for this workflow AND
+# ci.yaml to pass on the tagged commit (see the gate job in release.yaml)
+# before publishing.
 #
 # WHAT IS CACHED: nightly schedule runs restore no disk cache (only the plugin
 # job re-saves its own key, on pushes and schedules). Release-tag pushes
@@ -248,9 +250,65 @@ jobs:
         with:
           path: ${{ env.DISK_CACHE_DIR }}
           key: ${{ env.DISK_CACHE_KEY }}
+  # The dev tool's iOS simulator e2e cases: the simulator runtime the manager
+  # measured on macos-latest ships every device Shutdown, and the dev tool —
+  # like `flutter run` — only uses one already booted, so every iOS case fails
+  # fast without one. The job boots a simulator first, then runs the three e2e
+  # files holding iOS cases through the suite's own runner with
+  # `--require-ran=iOS`, which fails the job when no iOS test actually
+  # executed rather than letting an all-skipped run exit 0.
+  #
+  # Why each step is there:
+  # - setup-bazel at the same pinned SHA as the other jobs, repository cache
+  #   like them, `cache-save: false`: the cache it restores is
+  #   content-addressed (every fetch through it is sha256-pinned), while a
+  #   disk cache would replay test results. No `actions/cache`, no disk
+  #   cache, no `setup-dart` — the Dart under test comes from Bazel below.
+  # - Dropping setup-bazel's `startup --output_base=` line (macOS `sed -i ''`):
+  #   the suite runs Bazel in several workspaces (the dev tool's own build,
+  #   then the workspaces the launched apps build), and a shared output base
+  #   restarts the server under the running dev tool. ci.yaml's web-smoke job
+  #   drops the same line for the same reason.
+  # - Building `//tools/dev_tool:flutter_bazel` materializes the Bazel-fetched
+  #   Flutter SDK in the output base, so the glob takes the pinned Dart (the
+  #   one the dev tool itself runs on) onto PATH for every step after. The
+  #   export serves this step's own `dart --version` print; `$GITHUB_PATH`
+  #   serves the steps after.
+  # - `boot_ios_simulator.dart` boots the newest available iOS runtime's
+  #   iPhone and waits for `bootstatus`, exiting non-zero when there is
+  #   nothing to boot on rather than skipping.
+  # - The suite runs from the repo root (the runner locates `tools/dev_tool`
+  #   from its own path) with no wrapper, so its exit status is the job's.
+  dev-tool-ios:
+    name: Dev tool iOS (macos-latest)
+    runs-on: macos-latest
+    # Cold tag and nightly runs fetch the Flutter SDK and build the dev tool
+    # plus the iOS apps from scratch; fork policy caps every job at 300
+    # minutes on the free runners, and the measured simulator leg took under
+    # half an hour.
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v7
+      - uses: bazel-contrib/setup-bazel@c5acdfb288317d0b5c0bbd7a396a3dc868bb0f86 # 0.19.0
+        with:
+          repository-cache: ${{ env.BAZEL_REPOSITORY_CACHE_KEY_FILES }}
+          cache-save: false
+      - name: Keep one output base per workspace
+        run: sed -i '' '/^startup --output_base=/d' ~/.bazelrc
+      - name: Build the dev tool and put the pinned Dart on PATH
+        run: |
+          bazel build //tools/dev_tool:flutter_bazel
+          dart_bin="$(ls -d "$(bazel info output_base)"/external/*flutter+flutter_*/dart-sdk/bin | head -1)"
+          echo "$dart_bin" >> "$GITHUB_PATH"
+          export PATH="$dart_bin:$PATH"
+          dart --version
+      - name: Boot an iOS simulator
+        run: dart run tools/dev_tool/tool/boot_ios_simulator.dart
+      - name: Dev tool iOS simulator e2e
+        run: dart run tools/dev_tool/tool/e2e.dart --require-ran=iOS test/e2e/ios_simulator_e2e_test.dart test/e2e/asset_reload_e2e_test.dart test/e2e/plugin_example_e2e_test.dart
   conclusion:
     name: Conclusion
-    needs: [e2e-macos, e2e-linux-nightly]
+    needs: [e2e-macos, e2e-linux-nightly, dev-tool-ios]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 10
