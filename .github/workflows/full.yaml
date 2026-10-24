@@ -253,10 +253,15 @@ jobs:
   # The dev tool's iOS simulator e2e cases: the simulator runtime the manager
   # measured on macos-latest ships every device Shutdown, and the dev tool —
   # like `flutter run` — only uses one already booted, so every iOS case fails
-  # fast without one. The job boots a simulator first, then runs the three e2e
-  # files holding iOS cases through the suite's own runner with
+  # fast without one. The job boots a simulator first, then runs the iOS cases
+  # of the three e2e files holding them through the suite's own runner with
   # `--require-ran=iOS`, which fails the job when no iOS test actually
-  # executed rather than letting an all-skipped run exit 0.
+  # executed rather than letting an all-skipped run exit 0. `--name=iOS`
+  # selects only the iOS cases: run 1 ran the whole files, and beside a
+  # booted simulator two macOS cases failed there — they belong to another
+  # story, not this job. The cases bound their cold build (`app.start`, 20
+  # min) and launch (`app.started`, 10 min) separately, since one bound
+  # covering both times out a healthy cold run.
   #
   # Why each step is there:
   # - setup-bazel at the same pinned SHA as the other jobs, repository cache
@@ -305,7 +310,7 @@ jobs:
       - name: Boot an iOS simulator
         run: dart run tools/dev_tool/tool/boot_ios_simulator.dart
       - name: Dev tool iOS simulator e2e
-        run: dart run tools/dev_tool/tool/e2e.dart --require-ran=iOS test/e2e/ios_simulator_e2e_test.dart test/e2e/asset_reload_e2e_test.dart test/e2e/plugin_example_e2e_test.dart
+        run: dart run tools/dev_tool/tool/e2e.dart --require-ran=iOS --name=iOS test/e2e/ios_simulator_e2e_test.dart test/e2e/asset_reload_e2e_test.dart test/e2e/plugin_example_e2e_test.dart
   conclusion:
     name: Conclusion
     needs: [e2e-macos, e2e-linux-nightly, dev-tool-ios]
