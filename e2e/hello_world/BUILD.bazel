@@ -22,6 +22,7 @@ load(
     "flutter_ios_native_frameworks_gen",
     "flutter_ios_registrant_gen",
     "flutter_ios_runner_lib_gen",
+    "flutter_ios_simulator_build",
     "flutter_ios_simulator_build_test",
 )
 load("@rules_flutter//flutter:linux.bzl", "flutter_linux_app")
@@ -99,6 +100,21 @@ flutter_ios_app(
     app_name = "Hello World",
     application = ":hello_world_app",
     bundle_id = "com.example.helloworld",
+    version = ":hello_world_ios_app_version",
+)
+
+apple_bundle_version(
+    name = "hello_world_ios_app_version",
+    build_version = "42",
+    short_version_string = "2.3.4",
+)
+
+# `:hello_world_ios` as `verify_ios_bundle_contents_test` reads it: a
+# simulator bundle, which is always a debug build.
+flutter_ios_simulator_build(
+    name = "hello_world_ios_simulator",
+    testonly = True,
+    targets = [":hello_world_ios"],
 )
 
 # -- iOS app, signed for a physical device ------------------------------------
@@ -829,6 +845,20 @@ flutter_ios_simulator_build_test(
     name = "ios_bundle_build_test",
     target_compatible_with = ["@platforms//os:macos"],
     targets = [":hello_world_ios"],
+)
+
+# Inspects the simulator `.ipa`: the version it carries, the pub packages'
+# assets and fonts, the iOS-only platform assets (and the absence of other
+# platforms'), and the debug kernel payload. Parses the zip, the plist and
+# the JSON manifests in pure Dart; no host unzip, plutil or xcrun runs here.
+dart_test(
+    name = "verify_ios_bundle_contents_test",
+    data = [
+        "platform_assets/assets/any.txt",
+        ":hello_world_ios_simulator",
+    ],
+    main = "test/verify_ios_bundle_contents_test.dart",
+    target_compatible_with = ["@platforms//os:macos"],
 )
 
 build_test(
