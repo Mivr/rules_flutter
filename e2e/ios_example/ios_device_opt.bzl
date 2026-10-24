@@ -15,6 +15,8 @@ The rule also forwards the application's `debug_info` output group (the
 so the test reads the symbols of the very build it inspects.
 """
 
+load("@rules_apple//apple:providers.bzl", "AppleDynamicFrameworkInfo")
+
 def _ios_device_opt_transition_impl(_settings, _attr):
     return {
         "//command_line_option:compilation_mode": "opt",
@@ -36,9 +38,11 @@ _ios_device_opt_transition = transition(
 
 def _ios_device_opt_bundle_impl(ctx):
     # A 1:1 transition makes each labelled dependency a single-element list.
+    # apple_dynamic_framework_import carries no DefaultInfo files: the
+    # assembled framework travels in AppleDynamicFrameworkInfo.framework_files.
     return [DefaultInfo(files = depset(transitive = [
-        ctx.attr.framework[0][DefaultInfo].files,
-        ctx.attr.application[0][OutputGroupInfo].debug_info,
+        ctx.attr.framework[0][AppleDynamicFrameworkInfo].framework_files,
+        getattr(ctx.attr.application[0][OutputGroupInfo], "debug_info", depset()),
     ]))]
 
 ios_device_opt_bundle = rule(
@@ -52,6 +56,7 @@ ios_device_opt_bundle = rule(
         "framework": attr.label(
             cfg = _ios_device_opt_transition,
             mandatory = True,
+            providers = [AppleDynamicFrameworkInfo],
             doc = "The flutter_ios_framework_gen to rebuild for the device in release.",
         ),
         "_allowlist_function_transition": attr.label(
