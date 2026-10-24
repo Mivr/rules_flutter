@@ -6,10 +6,10 @@
 /// selection rules over synthetic listings, and every failure path over canned
 /// child results. Driven through [bootSimulator] rather than a subprocess, so
 /// these cases also pin the exact `xcrun` argument lists the script issues.
-/// The fake answers a `simctl list` call the way `simctl` does: the `devices`
-/// section always, the `runtimes` section only when the argv asks for it — so
-/// a script that stopped asking for runtimes would pick an unavailable newest
-/// runtime and fail its run as an unexpected child.
+/// The fake answers a `simctl list` call the way `simctl` does: at most one
+/// type (first positional only), later positionals filtering as search terms,
+/// no type meaning the full listing — so a script that filtered the listing
+/// would see filtered sections and fail its run as an unexpected child.
 library;
 
 import 'dart:async';
@@ -36,11 +36,53 @@ class CannedResult {
   });
 }
 
+/// The section kinds `simctl list` accepts: at most one per call, and only as
+/// the first positional — every later positional is a search term.
+const _listTypes = {'devices', 'devicetypes', 'runtimes', 'pairs'};
+
+/// Whether a raw device entry counts as available: the read `simctl`'s own
+/// `available` search term performs.
+bool _entryAvailable(Map<String, dynamic> entry) {
+  final flag = entry['isAvailable'];
+  return flag == true || (flag is String && flag.toUpperCase() == 'YES');
+}
+
+/// Whether a device entry survives [terms]: `available` keeps available
+/// entries, anything else must occur in the device name (case-insensitive).
+bool _deviceMatches(Map<String, dynamic> entry, List<String> terms) {
+  for (final term in terms) {
+    if (term.toLowerCase() == 'available') {
+      if (!_entryAvailable(entry)) return false;
+    } else {
+      final name = entry['name'];
+      if (name is! String || !name.toLowerCase().contains(term.toLowerCase())) {
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
+/// Whether a runtime entry survives [terms]: `available` drops runtimes the
+/// array marks unavailable, anything else must occur in the runtime name or
+/// identifier (case-insensitive).
+bool _runtimeMatches(Map<String, dynamic> entry, List<String> terms) {
+  for (final term in terms) {
+    if (term.toLowerCase() == 'available') {
+      if (entry['isAvailable'] == false) return false;
+    } else {
+      final name = '${entry['name'] ?? ''} ${entry['identifier'] ?? ''}';
+      if (!name.toLowerCase().contains(term.toLowerCase())) return false;
+    }
+  }
+  return true;
+}
+
 /// A [CommandSpawner] stub keyed by the joined argument list. Records every
 /// start and every kill, and throws [ProcessException] for `xcrun` when told
 /// there is no `xcrun` — the shape the real spawner surfaces. A `simctl list`
-/// call with no exact stub is answered from [listDevices]/[listRuntimes] the
-/// way `simctl` answers: `devices` always, `runtimes` only when asked for.
+/// call with no exact stub is answered from [listDevices]/[listRuntimes]
+/// following `simctl`'s grammar (one type at most, then search terms).
 class FakeSpawner implements CommandSpawner {
   final Map<String, CannedResult> results;
   final bool hasXcrun;
@@ -58,18 +100,37 @@ class FakeSpawner implements CommandSpawner {
   });
 
   /// The `simctl list` answer for [args], or null when this call is not a
-  /// `devices` listing (or no sections were given).
+  /// listing (or no sections were given). Follows `simctl`'s grammar: at most
+  /// one type, first positional only — every later positional is a search
+  /// term (`available` keeps available entries, anything else is a
+  /// case-insensitive substring of the name). No type means the full listing.
   CannedResult? _listResponse(List<String> args) {
     final devices = listDevices;
     if (devices == null) return null;
-    if (args.length < 3 || args[0] != 'simctl' || args[1] != 'list') {
+    if (args.length < 2 || args[0] != 'simctl' || args[1] != 'list') {
       return null;
     }
-    if (!args.contains('devices')) return null;
+    final positionals = args.skip(2).where((a) => !a.startsWith('-')).toList();
+    var type = '';
+    if (positionals.isNotEmpty && _listTypes.contains(positionals.first)) {
+      type = positionals.first;
+    }
+    final terms = positionals.sublist(type.isEmpty ? 0 : 1);
     return CannedResult(
       stdoutText: json.encode({
-        'devices': devices,
-        if (args.contains('runtimes')) 'runtimes': listRuntimes,
+        if (type.isEmpty || type == 'devices')
+          'devices': {
+            for (final section in devices.entries)
+              section.key: [
+                for (final entry in section.value)
+                  if (_deviceMatches(entry, terms)) entry,
+              ],
+          },
+        if (type.isEmpty || type == 'runtimes')
+          'runtimes': [
+            for (final entry in listRuntimes)
+              if (_runtimeMatches(entry, terms)) entry,
+          ],
       }),
     );
   }
@@ -113,7 +174,7 @@ Map<String, dynamic> device(
   'isAvailable': available,
 };
 
-String listKey() => 'xcrun simctl list devices runtimes -j';
+String listKey() => 'xcrun simctl list -j';
 
 /// Boots through [FakeSpawner] with a short `bootstatus` deadline, capturing
 /// the progress lines. Returns the progress plus the reported udid.
@@ -157,13 +218,15 @@ void main() {
   const ios2610 = 'com.apple.CoreSimulator.SimRuntime.iOS-26-10';
 
   group('simulator selection (whole path)', () {
-    test('the list call asks simctl for devices and runtimes', () async {
+    test('the list call is the unfiltered full listing', () async {
       final spawner = listingSpawner({
         ios265: [
           device('iPhone 17', 'udid-0'),
         ],
       }, extra: bootStubs('udid-0'));
       await bootWith(spawner);
+      // `list` takes at most one type: any type or search term here would
+      // filter the sections the choice reads, so the argv is exact.
       expect(spawner.started.first, listKey());
     });
 

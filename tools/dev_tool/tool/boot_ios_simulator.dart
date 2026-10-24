@@ -9,9 +9,10 @@
 /// waits on `bootstatus -b`, so a 0 exit means the device is usable now.
 ///
 /// Runtime availability is read from the `runtimes` array of the same listing
-/// call the devices come from (`xcrun simctl list -j devices runtimes`): the
-/// `devices` map carries no runtime-level flag, so the call must ask for both
-/// sections — a devices-only listing would treat an unavailable newest runtime
+/// call the devices come from (`xcrun simctl list -j`, unfiltered: `list`
+/// takes at most one type, so the devices and runtimes sections only arrive
+/// together in the full listing). The `devices` map carries no runtime-level
+/// flag — a devices-only listing would treat an unavailable newest runtime
 /// as a candidate.
 ///
 /// Run it locally before the dev tool's iOS simulator e2e cases:
@@ -378,10 +379,10 @@ void _requireSimctlSuccess(CommandResult result, String label) {
 Future<SimulatorChoice> bootSimulator(BootOptions options) async {
   final list = await runSimctl(
     options.spawner,
-    const ['simctl', 'list', 'devices', 'runtimes', '-j'],
+    const ['simctl', 'list', '-j'],
     timeout: _listTimeout,
   );
-  _requireSimctlSuccess(list, 'xcrun simctl list devices runtimes -j');
+  _requireSimctlSuccess(list, 'xcrun simctl list -j');
   final choice = selectSimulator(decodeListing(list.stdoutText));
   final device = choice.device;
   if (choice.wasBooted) {
