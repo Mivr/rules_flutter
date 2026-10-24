@@ -442,6 +442,7 @@ def _application_providers(flutter_sdk_info, is_debug, outputs, plugins):
         DefaultInfo(files = depset(outputs.default_files)),
         FlutterApplicationInfo(
             aot_output = outputs.aot_output,
+            aot_strip = outputs.aot_strip,
             kernel_dill = outputs.kernel_dill if is_debug else None,
             flutter_assets = outputs.flutter_assets,
             icu_data = flutter_sdk_info.icu_data,
@@ -574,6 +575,7 @@ def _flutter_application_impl(ctx):
         bundled_code_assets = bundled_code_assets,
         transitive_data_assets = transitive_data_assets,
         aot_output = aot_output,
+        aot_strip = strip,
         debug_info_output = debug_info_output,
         link_hook_validation = link_hook_validation,
         flutter_assets = flutter_assets,

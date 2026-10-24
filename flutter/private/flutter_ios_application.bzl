@@ -104,8 +104,13 @@ def _check_ios_simulator_aot(ctx, app_info, is_device):
              "use flutter_ios_simulator_build_test.") % ctx.var["COMPILATION_MODE"],
         )
 
-def _patch_ios_app_binary(ctx, dart_exe, dart_vm_files, dylib, framework_binary, vtool_platform, minimum_os_version):
-    """Copies the AOT dylib and rewrites its LC_BUILD_VERSION with macho_edit."""
+def _patch_ios_app_binary(ctx, dart_exe, dart_vm_files, dylib, framework_binary, vtool_platform, minimum_os_version, strip_symbols):
+    """Copies the AOT dylib and rewrites its LC_BUILD_VERSION with macho_edit.
+
+    When the snapshot was compiled stripped, the patch also drops its local
+    and stab symbols (`strip -x`, like `flutter build` runs on the dylib):
+    gen_snapshot's `--strip` leaves those behind on Apple.
+    """
     patch_args = [
         ctx.executable._macho_edit.path,
         "patch",
@@ -122,6 +127,8 @@ def _patch_ios_app_binary(ctx, dart_exe, dart_vm_files, dylib, framework_binary,
         "--install-name",
         "@rpath/App.framework/App",
     ]
+    if strip_symbols:
+        patch_args.append("--strip-symbols")
     for allowed in ctx.attr.allow_non_macho:
         patch_args.extend(["--allow-non-macho", allowed])
     ctx.actions.run(
@@ -300,7 +307,7 @@ def _flutter_ios_framework_impl(ctx):
 
     if app_info.aot_output:
         # Release mode: AOT binary + flutter_assets.
-        _patch_ios_app_binary(ctx, dart_exe, dart_vm_files, app_info.aot_output, framework_binary, vtool_platform, minimum_os_version)
+        _patch_ios_app_binary(ctx, dart_exe, dart_vm_files, app_info.aot_output, framework_binary, vtool_platform, minimum_os_version, app_info.aot_strip)
         _copy_ios_framework_assets(ctx, dart_exe, dart_vm_files, flutter_assets, framework_assets)
     else:
         # Debug mode: stub binary + flutter_assets with kernel_blob.bin.

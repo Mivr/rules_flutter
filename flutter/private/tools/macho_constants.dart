@@ -57,6 +57,17 @@ const int platformMacos = 1;
 const int platformIos = 2;
 const int platformIosSimulator = 7;
 
+// `nlist_64` symbol-table constants.
+const int nStabMask = 0xe0;
+const int nExtBit = 0x01;
+const int nTypeMask = 0x0e;
+const int nTypeUndef = 0x00;
+
+// Indirect-symbol-table special entries.
+const int indirectSymbolAbs = 0x40000000;
+const int indirectSymbolLocal = 0x80000000;
+const int indirectSymbolSpecialMask = 0xc0000000;
+
 // Code signature constants (big-endian in Mach-O).
 const int csMagicEmbeddedSignature = 0xfade0cc0;
 const int csMagicCodeDirectory = 0xfade0c02;
