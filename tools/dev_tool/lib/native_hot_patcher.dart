@@ -18,9 +18,12 @@
 ///
 /// On every hot reload, cheaply. A patch build costs a bazel invocation, so it
 /// only happens when something says the library's code may have moved: one of
-/// the source files the builder declared has a new size or mtime, or the
-/// reload's own rebuild (a codegen app's) moved the library itself. A Dart-only
-/// edit stats a handful of files and costs nothing else.
+/// the source files the builder declared changed under its stamp, or the
+/// reload's own rebuild (a codegen app's) moved the library itself. A same-size
+/// save inside one file-time tick counts: a matching stamp proves the bytes
+/// unchanged only when the file's mtime predates the window (see
+/// [findMovedFiles]), so a rewrite the stamp cannot prove away is read and
+/// patched. A Dart-only edit stats a handful of files and costs nothing else.
 ///
 /// ## Against what
 ///
@@ -39,6 +42,7 @@ import 'package:vm_service/vm_service.dart' show RPCError;
 
 import 'bazel.dart';
 import 'dev_tool_exception.dart';
+import 'file_snapshot.dart';
 import 'logging.dart';
 import 'native_hot_patch_tool.dart';
 import 'native_image_identity.dart';
@@ -76,12 +80,16 @@ class _Patchable {
   final NativePatchTool tool;
   final String libraryFileName;
   final String stateDirectory;
-  Map<String, String> sourceStamps;
+
+  /// What each declared source was when it was last read — the baseline a
+  /// reload compares against, advanced by every check (see [findMovedFiles])
+  /// and every delivered patch.
+  Map<String, FileSnapshot> sourceSnapshots;
 
   _Patchable({
     required this.tool,
     required this.stateDirectory,
-    required this.sourceStamps,
+    required this.sourceSnapshots,
   }) : libraryFileName = p.basename(tool.manifest.library);
 }
 
@@ -242,7 +250,7 @@ class NativeHotPatcher {
         _Patchable(
           tool: tool,
           stateDirectory: state.path,
-          sourceStamps: await _stamps(manifest.sources),
+          sourceSnapshots: await _snapshots(manifest.sources),
         ),
       );
     }
@@ -329,8 +337,14 @@ class NativeHotPatcher {
   Future<List<_Patchable>> _movedLibraries(Set<String> movedLibraries) async {
     final moved = <_Patchable>[];
     for (final library in _libraries) {
-      final stamps = await _stamps(library.tool.manifest.sources);
-      if (!_sameStamps(stamps, library.sourceStamps) ||
+      final movedSources = await findMovedFiles(
+        paths: [
+          for (final source in library.tool.manifest.sources)
+            p.join(workspace, source),
+        ],
+        live: library.sourceSnapshots,
+      );
+      if (movedSources.isNotEmpty ||
           movedLibraries.contains(library.libraryFileName)) {
         moved.add(library);
       }
@@ -457,9 +471,9 @@ class NativeHotPatcher {
 
     // Taken before the build: a source saved while bazel reads it is not in
     // what bazel builds, and recording it as delivered would lose that edit.
-    final stampsBefore = {
+    final snapshotsBefore = {
       for (final library in moved)
-        library: await _stamps(library.tool.manifest.sources),
+        library: await _snapshots(library.tool.manifest.sources),
     };
 
     final built = await build();
@@ -507,8 +521,9 @@ class NativeHotPatcher {
         ],
       );
     }
-    for (final MapEntry(key: library, value: stamps) in stampsBefore.entries) {
-      library.sourceStamps = stamps;
+    for (final MapEntry(key: library, value: snapshots)
+        in snapshotsBefore.entries) {
+      library.sourceSnapshots = snapshots;
     }
     _lastChanged = [
       for (final app in apps)
@@ -621,19 +636,25 @@ class NativeHotPatcher {
     }
   }
 
-  Future<Map<String, String>> _stamps(List<String> sources) async => {
-    for (final source in sources)
-      source: await _stamp(p.join(workspace, source)),
-  };
-
-  static Future<String> _stamp(String path) async {
-    final stat = await File(path).stat();
-    if (stat.type == FileSystemEntityType.notFound) return 'missing';
-    return '${stat.size}:${stat.modified.microsecondsSinceEpoch}';
+  /// What each declared source is on disk now, keyed by absolute path — the
+  /// same keys [findMovedFiles] compares in [_movedLibraries].
+  ///
+  /// A source that is not there keeps the missing snapshot rather than
+  /// throwing: a missing file that stays missing is not a change, and one
+  /// that appears or disappears still compares unequal (see [findMovedFiles]).
+  Future<Map<String, FileSnapshot>> _snapshots(List<String> sources) async {
+    final existing = <String>[];
+    final snapshots = <String, FileSnapshot>{};
+    for (final source in sources) {
+      final path = p.join(workspace, source);
+      if (await File(path).exists()) {
+        existing.add(path);
+      } else {
+        snapshots[path] = const FileSnapshot.missing();
+      }
+    }
+    return {...snapshots, ...await readFileSnapshots(existing)};
   }
-
-  static bool _sameStamps(Map<String, String> a, Map<String, String> b) =>
-      a.length == b.length && a.entries.every((e) => b[e.key] == e.value);
 
   /// Delete this patcher's scratch directory.
   Future<void> dispose() => deleteTempDir(_scratch);

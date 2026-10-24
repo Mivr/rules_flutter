@@ -167,6 +167,18 @@ void main() {
     file.writeAsStringSync('int mul() { return 2; } // ${'x' * grownBy}');
   }
 
+  /// A same-size rewrite that lands inside the stamp's own tick: one byte
+  /// changed, the length kept, and the mtime put back, so `size:mtime` is
+  /// exactly as it was. Only a content read sees this edit.
+  void rewriteSameSizeAndRestoreMtime() {
+    final file = File('$workspace/native/mul.c');
+    final modified = file.statSync().modified;
+    final bytes = file.readAsBytesSync();
+    bytes[bytes.length - 1] = bytes.last + 1;
+    file.writeAsBytesSync(bytes);
+    file.setLastModifiedSync(modified);
+  }
+
   group('arming', () {
     test('an app with no patch builder has no patcher', () async {
       expect(await arm(), isNull);
@@ -278,6 +290,38 @@ void main() {
 
       // Delivered, so the next reload with nothing new is free again.
       builds = 0;
+      expect(await patcher.patchIfMoved(), isA<NativePatchNotNeeded>());
+      expect(builds, 0);
+    });
+
+    test('a same-size rewrite in the stamp tick is patched', () async {
+      // The stamp is exactly as it was: same size, mtime put back. A patcher
+      // that trusts the stamp answers "nothing moved" over changed bytes and
+      // the edit never reaches the app — no patch and no error.
+      rewriteSameSizeAndRestoreMtime();
+      final outcome = await patcher.patchIfMoved();
+      expect(
+        outcome,
+        isA<NativePatched>().having((o) => o.functions, 'functions', {
+          'libmul.dylib': ['mul_body'],
+        }),
+      );
+      expect(builds, 1);
+    });
+
+    test('with a source older than the window reads no contents', () async {
+      // Re-baselined onto a source written before the window: a matching
+      // stamp proves its bytes unchanged, so a reload with nothing moved
+      // stats it and costs no build. Changed bytes under that stamp go
+      // unread — a content read would report a move and build a patch.
+      final file = File('$workspace/native/mul.c');
+      file.writeAsStringSync('int mul() { return 7; }');
+      file.setLastModifiedSync(
+        DateTime.now().subtract(const Duration(seconds: 10)),
+      );
+      await patcher.rebaseline();
+      builds = 0;
+      rewriteSameSizeAndRestoreMtime();
       expect(await patcher.patchIfMoved(), isA<NativePatchNotNeeded>());
       expect(builds, 0);
     });
