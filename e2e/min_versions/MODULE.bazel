@@ -3,7 +3,7 @@
 module(name = "rules_flutter_min_versions")
 
 bazel_dep(name = "ai_rules_flutter", version = "0.0.0", repo_name = "rules_flutter")
-bazel_dep(name = "ai_rules_dart", version = "0.15.2", repo_name = "rules_dart")
+bazel_dep(name = "ai_rules_dart", version = "0.15.3", repo_name = "rules_dart")
 bazel_dep(name = "rules_android", version = "0.8.0")
 bazel_dep(name = "rules_android_ndk", version = "0.1.5")
 bazel_dep(name = "rules_kotlin", version = "2.4.20")
@@ -18,7 +18,7 @@ local_path_override(
 
 git_override(
     module_name = "ai_rules_dart",
-    commit = "7fb11607021819832699b08463e950e8f5c3495a",
+    commit = "05ad4c5fbafb755d24191e424cc58f9875268560",
     remote = "https://github.com/Mivr/rules_dart.git",
 )
 
