@@ -107,6 +107,7 @@ apple_bundle_version(
     name = "hello_world_ios_app_version",
     build_version = "42",
     short_version_string = "2.3.4",
+    tags = ["manual"],
 )
 
 # `:hello_world_ios` as `verify_ios_bundle_contents_test` reads it: a
@@ -114,6 +115,7 @@ apple_bundle_version(
 flutter_ios_simulator_build(
     name = "hello_world_ios_simulator",
     testonly = True,
+    target_compatible_with = ["@platforms//os:macos"],
     targets = [":hello_world_ios"],
 )
 
