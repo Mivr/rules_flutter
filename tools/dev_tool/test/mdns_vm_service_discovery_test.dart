@@ -1,6 +1,8 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter_bazel_dev_tool/mdns_vm_service_discovery.dart';
+import 'package:multicast_dns/multicast_dns.dart';
 import 'package:test/test.dart';
 
 import 'fakes.dart';
@@ -11,6 +13,18 @@ Future<List<NetworkInterface>> noInterfaces({
   bool includeLinkLocal = false,
   InternetAddressType type = InternetAddressType.any,
 }) async => const [];
+
+/// An [MDnsClient] whose lookups never answer: the attempt stays in flight
+/// until the wait ends it, which is what proves an abandonment stops a
+/// listening client rather than merely winning a race the attempt already
+/// lost.
+class _HangingMDnsClient extends FakeMDnsClient {
+  @override
+  Stream<T> lookup<T extends ResourceRecord>(
+    ResourceRecordQuery query, {
+    Duration timeout = const Duration(seconds: 5),
+  }) => StreamController<T>().stream;
+}
 
 void main() {
   const bundleId = 'com.example.app';
@@ -510,6 +524,70 @@ void main() {
           ),
         );
       },
+    );
+  });
+
+  group('abandoning a wait', () {
+    test(
+      'abandoning ends the wait at once instead of sitting out the budget',
+      () async {
+        final factory = FakeMDnsClientFactory();
+        final abandoned = Completer<void>();
+        final discovery = discoveryOver(factory)..abandoned = abandoned.future;
+
+        final pending = discovery.discover(
+          bundleId: bundleId,
+          hostnames: deviceHostnames,
+          timeout: const Duration(minutes: 5),
+        );
+        // Let the wait start its first attempt, then end the run mid-gap.
+        while (factory.clients.isEmpty) {
+          await Future<void>.delayed(Duration.zero);
+        }
+        abandoned.complete();
+
+        await expectLater(pending, throwsA(isA<MdnsAbandoned>()));
+        // No second attempt started after the abandonment, and the first
+        // attempt's client was reaped: nothing pending holds the process.
+        expect(factory.clients, hasLength(1));
+        expect(factory.clients.single.stopped, isTrue);
+      },
+      timeout: const Timeout(Duration(seconds: 30)),
+    );
+
+    test(
+      'abandoning mid-attempt stops the listening client at once',
+      () async {
+        final client = _HangingMDnsClient();
+        final created = <FakeMDnsClient>[];
+        final abandoned = Completer<void>();
+        final discovery = MdnsVmServiceDiscovery(
+          clientFactory: () {
+            created.add(client);
+            return client;
+          },
+          listNetworkInterfaces: noInterfaces,
+        )..abandoned = abandoned.future;
+
+        final pending = discovery.discover(
+          bundleId: bundleId,
+          hostnames: deviceHostnames,
+          timeout: const Duration(minutes: 5),
+        );
+        // Past start(): the attempt owns a live socket it is listening on.
+        while (!client.started) {
+          await Future<void>.delayed(Duration.zero);
+        }
+        for (var i = 0; i < 10; i++) {
+          await Future<void>.delayed(Duration.zero);
+        }
+        abandoned.complete();
+
+        await expectLater(pending, throwsA(isA<MdnsAbandoned>()));
+        expect(client.stopped, isTrue);
+        expect(created, hasLength(1));
+      },
+      timeout: const Timeout(Duration(seconds: 30)),
     );
   });
 }

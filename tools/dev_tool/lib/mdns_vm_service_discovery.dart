@@ -80,6 +80,43 @@ class MdnsDiscoveryException implements Exception {
   String toString() => message;
 }
 
+/// The run ended while [MdnsVmServiceDiscovery.discover] was still waiting.
+///
+/// Thrown instead of waiting out the budget when the launch site ends the wait
+/// through [MdnsVmServiceDiscovery.abandoned]: the run ending is not an app
+/// that never advertises, so it must not read as a lookup failure. Carries no
+/// remedy because there is nothing to remedy; the caller reports the launch
+/// as cancelled.
+class MdnsAbandoned implements Exception {
+  /// The run ended while discovery was still waiting.
+  const MdnsAbandoned();
+
+  @override
+  String toString() =>
+      'The mDNS wait was abandoned because the run is shutting down or the '
+      'app was stopped.';
+}
+
+/// The two ways [_raceAbandon] — below — wakes up.
+sealed class _AbandonResult<T> {
+  const _AbandonResult();
+}
+
+/// The awaited work finished with [value].
+class _Worked<T> extends _AbandonResult<T> {
+  /// The awaited work finished with [value].
+  const _Worked(this.value);
+
+  /// The awaited work's value.
+  final T value;
+}
+
+/// The launch site ended the wait while the work was still in flight.
+class _Abandoned<T> extends _AbandonResult<T> {
+  /// The launch site ended the wait while the work was still in flight.
+  const _Abandoned();
+}
+
 /// One resolved `_dartVmService._tcp` advertisement.
 class MdnsVmServiceRecord {
   /// Fully-qualified name of the advertised instance, e.g.
@@ -145,6 +182,48 @@ class MdnsVmServiceDiscovery {
   }) : _clientFactory = clientFactory ?? MDnsClient.new,
        _listInterfaces = listNetworkInterfaces ?? _listNetworkInterfaces;
 
+  /// Ends the wait [discover] is sitting in at once, with a [MdnsAbandoned].
+  ///
+  /// The launch site sets this for the launch in flight — physical iOS from
+  /// its launch-abandonment signal — and clears it after, so the signal each
+  /// wait observes belongs to its own launch. While it completes, `discover`
+  /// throws instead of waiting out its budget: the run ending is not an app
+  /// that never advertises, and a wait stranded in it must not hold the
+  /// process open past shutdown. Every socket and timer the wait started is
+  /// stopped on the way out.
+  set abandoned(Future<void>? signal) {
+    final generation = ++_abandonGeneration;
+    _abandonSignal = signal;
+    _abandoned = false;
+    final pending = signal;
+    if (pending != null) {
+      unawaited(
+        pending.then((_) {
+          if (generation == _abandonGeneration) _abandoned = true;
+        }),
+      );
+    }
+  }
+
+  /// The signal the in-flight wait ends on, if the launch site set one.
+  Future<void>? _abandonSignal;
+
+  /// Whether [_abandonSignal] has completed. Set in the [abandoned] setter's
+  /// subscription, so the wait can observe it synchronously between attempts.
+  bool _abandoned = false;
+
+  /// Counts [abandoned] assignments, so a stale signal completing during a
+  /// later launch cannot end that launch's wait.
+  int _abandonGeneration = 0;
+
+  /// The client the in-flight attempt is listening on, if any.
+  ///
+  /// Set after `start()` (an abandonment during the start leaves nothing half
+  /// open: the attempt's own `finally` still stops it) and cleared by
+  /// whichever of the attempt and the abandonment stops it first, so each
+  /// client is stopped exactly once.
+  MDnsClient? _activeClient;
+
   /// Waits for [bundleId] to advertise a VM service from one of [hostnames].
   ///
   /// [hostnames] identifies the advertising machine — see
@@ -182,9 +261,14 @@ class MdnsVmServiceDiscovery {
     // "that was the copy running in a simulator on this Mac".
     final seen = <String, String>{};
     var window = _initialQueryWindow;
+    // The launch site may set [abandoned] per launch: read it once, so this
+    // wait observes its own launch's signal even if a later launch replaces
+    // the field while it is still running.
+    final abandonSignal = _abandonSignal;
 
     var warned = false;
     while (elapsed.elapsed < timeout) {
+      _throwIfAbandoned();
       if (!warned && elapsed.elapsed >= slowAfter) {
         warned = true;
         onSlow?.call(elapsed.elapsed);
@@ -192,14 +276,17 @@ class MdnsVmServiceDiscovery {
       final attemptStart = elapsed.elapsed;
       final remaining = timeout - attemptStart;
       final attemptWindow = window < remaining ? window : remaining;
-      final record = await _guarded(
-        () => _queryOnce(
-          bundleId: bundleId,
-          hostnames: hostnames,
-          resolveAddress: resolveAddress,
-          window: attemptWindow,
-          seen: seen,
+      final record = await _raceAbandon(
+        _guarded(
+          () => _queryOnce(
+            bundleId: bundleId,
+            hostnames: hostnames,
+            resolveAddress: resolveAddress,
+            window: attemptWindow,
+            seen: seen,
+          ),
         ),
+        abandonSignal,
       );
       if (record != null) return record;
 
@@ -209,14 +296,13 @@ class MdnsVmServiceDiscovery {
       // queries, which would flood the link and defeat the backoff.
       final spent = elapsed.elapsed - attemptStart;
       if (spent < attemptWindow) {
-        await Future<void>.delayed(
-          _roundUpToMillisecond(attemptWindow - spent),
-        );
+        await _waitGap(attemptWindow - spent, abandonSignal);
       }
 
       window *= 2;
       if (window > _maxQueryWindow) window = _maxQueryWindow;
     }
+    _throwIfAbandoned();
 
     throw MdnsDiscoveryException(
       MdnsDiscoveryFailure.notFound,
@@ -237,6 +323,70 @@ class MdnsVmServiceDiscovery {
   /// attempts in the sliver left before the timeout.
   static Duration _roundUpToMillisecond(Duration d) =>
       Duration(milliseconds: (d.inMicroseconds + 999) ~/ 1000);
+
+  /// Fail now when the launch site ended the wait.
+  ///
+  /// Checked between attempts and after the loop, so an abandonment that lands
+  /// while no future is in flight still ends the wait instead of starting more
+  /// work — or of reporting a timeout the run's ending caused.
+  void _throwIfAbandoned() {
+    if (_abandoned) throw const MdnsAbandoned();
+  }
+
+  /// Await [work] unless the launch site ends the wait first.
+  ///
+  /// The abandonment wins promptly: the wait's future throws [MdnsAbandoned]
+  /// without awaiting the attempt, and the attempt's client is stopped, so its
+  /// socket and timers do not outlive the wait and hold the process open past
+  /// shutdown. The attempt itself still runs to its own `finally`, which then
+  /// skips its stop — each client is stopped exactly once.
+  Future<T> _raceAbandon<T>(Future<T> work, Future<void>? abandonSignal) async {
+    if (abandonSignal == null) return work;
+    final outcome = await Future.any([
+      work.then((value) => _Worked<T>(value)),
+      abandonSignal.then((_) => _Abandoned<T>()),
+    ]);
+    switch (outcome) {
+      case _Worked(value: final value):
+        return value;
+      case _Abandoned():
+        _stopActiveClient();
+        throw const MdnsAbandoned();
+    }
+  }
+
+  /// Sleep out the retransmission gap, unless the wait ends first.
+  ///
+  /// A bare `Future.delayed` here would leave a pending timer behind when the
+  /// run is abandoned mid-gap; a pending timer is what holds the dev tool
+  /// process open after `daemon.shutdown` has answered.
+  Future<void> _waitGap(Duration gap, Future<void>? abandonSignal) async {
+    if (abandonSignal == null) {
+      await Future<void>.delayed(_roundUpToMillisecond(gap));
+      return;
+    }
+    final done = Completer<void>();
+    final timer = Timer(_roundUpToMillisecond(gap), () {
+      if (!done.isCompleted) done.complete();
+    });
+    try {
+      await Future.any([
+        done.future,
+        abandonSignal.then((_) => throw const MdnsAbandoned()),
+      ]);
+    } finally {
+      timer.cancel();
+    }
+  }
+
+  /// Stop the in-flight attempt's client, if one is listening.
+  ///
+  /// The attempt's own `finally` then skips its stop — see [_activeClient].
+  void _stopActiveClient() {
+    final client = _activeClient;
+    _activeClient = null;
+    client?.stop();
+  }
 
   /// Runs [body] where a socket error can be observed.
   ///
@@ -286,6 +436,9 @@ class MdnsVmServiceDiscovery {
   }) async {
     final client = _clientFactory();
     await client.start();
+    // From here the attempt owns a live socket: abandonment stops it through
+    // this field, and the `finally` below skips its own stop then.
+    _activeClient = client;
     try {
       final ptrStream = client.lookup<PtrResourceRecord>(
         ResourceRecordQuery.serverPointer(dartVmServiceMdnsName),
@@ -354,7 +507,12 @@ class MdnsVmServiceDiscovery {
 
       return null;
     } finally {
-      client.stop();
+      // The abandonment may have stopped this client already; only the
+      // attempt that still owns it stops it here.
+      if (identical(_activeClient, client)) {
+        _activeClient = null;
+        client.stop();
+      }
     }
   }
 

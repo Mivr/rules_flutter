@@ -25,6 +25,7 @@ import 'native_libs_watch.dart';
 import 'relaunch_outcome.dart';
 import 'session.dart';
 import 'vm_service_client.dart';
+import 'vm_service_discovery.dart';
 
 class Relauncher {
   /// The launch artifact, both to relaunch from and to fingerprint.
@@ -150,22 +151,20 @@ class Relauncher {
             ),
           );
         });
+      } on VmDiscoveryCancelled catch (e) {
+        // The run is ending: whatever this relaunch was waiting on is gone,
+        // and the next session's relaunch would fail the same way. Report this
+        // one — its message says the launch was cancelled — and stop instead
+        // of starting more launches a shutdown must then reap.
+        _recordRelaunchFailure(failures, session, e.message);
+        break;
       } catch (e) {
         // The old process is already gone, so this session has ended; what is
         // left to do is say why, in the log and in the restart's reply, before
         // the run ends with it. A device's launch failures are StateErrors
         // whose message is the whole account; the "Bad state: " prefix is not.
         final reason = e is StateError ? e.message : '$e';
-        failures[session.appId] = reason;
-        logger.severe({
-          'message': 'relaunch_failed',
-          'text':
-              'Stopped ${session.device.name} to relaunch it on its changed '
-              'native libraries, and the relaunch failed: $reason',
-          'appId': session.appId,
-          'device': session.device.name,
-          'error': reason,
-        });
+        _recordRelaunchFailure(failures, session, reason);
         continue;
       }
       relaunched.add(session);
@@ -193,6 +192,26 @@ class Relauncher {
         for (final session in relaunched) session.appId: session.launch,
       },
     );
+  }
+
+  /// Report a relaunch that did not come back, in the log and the restart's
+  /// reply: the old process is already gone, so the session has ended with
+  /// the relaunch, and the reply must say why.
+  void _recordRelaunchFailure(
+    Map<String, String> failures,
+    DeviceSession session,
+    String reason,
+  ) {
+    failures[session.appId] = reason;
+    logger.severe({
+      'message': 'relaunch_failed',
+      'text':
+          'Stopped ${session.device.name} to relaunch it on its changed '
+          'native libraries, and the relaunch failed: $reason',
+      'appId': session.appId,
+      'device': session.device.name,
+      'error': reason,
+    });
   }
 
   /// Reconnect [session] to its replacement process's VM service.

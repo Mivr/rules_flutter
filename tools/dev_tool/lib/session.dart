@@ -289,6 +289,12 @@ class DeviceSession {
     if (_shutDown) return;
     _shutDown = true;
     stopWaitingForFirstFrame();
+    // A relaunch in flight owns no instance yet — only the device can reach
+    // what it started — so end the launch first: its discovery wait resolves
+    // at once, and whatever it started is stopped rather than left running
+    // after this shutdown releases the apps. After a launch that already
+    // returned this is a no-op on released state.
+    await device.abandonLaunch();
     devToolsProcess?.kill();
     protocol.appStop(appId);
     // Retired, not merely disconnected: this session is over, and a client

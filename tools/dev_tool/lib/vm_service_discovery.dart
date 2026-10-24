@@ -16,6 +16,12 @@
 /// * An overall [VmDiscoveryConfig.bound] remains, so a hung app cannot wait
 ///   forever. It is the `dev_tool run --vm-service-timeout` value, and
 ///   hitting it names the bound, the option, and the last log lines.
+/// * [waitForVmServiceUri]'s abandoned signal ends a wait at once — with a
+///   [VmDiscoveryCancelled] — when the run is shutting down (`daemon.shutdown`,
+///   the run's SIGINT/SIGTERM handling, or the app being stopped). An in-flight
+///   discovery must never outlive the run: whatever bound was configured, no
+///   timer or subscription it left behind may keep the process alive past
+///   shutdown.
 ///
 /// ## Which devices observe their app
 ///
@@ -93,6 +99,35 @@ abstract class VmDiscoveryClock {
 
   /// A future completing after [duration] on this clock.
   Future<void> sleep(Duration duration);
+
+  /// A cancellable one-shot timer firing [onFire] after [duration].
+  ///
+  /// Discovery waits race several timers against each other and against the
+  /// app exiting; the losers must be cancellable, or the one firing last —
+  /// the bound, minutes out — keeps its Dart [Timer] pending and holds the
+  /// dev tool process alive after the run that started it has shut down.
+  VmDiscoveryTimer startTimer(Duration duration, void Function() onFire);
+}
+
+/// A one-shot timer from [VmDiscoveryClock.startTimer].
+///
+/// Cancelling stops the callback from firing. The discovery waits cancel
+/// every timer they started that has not fired by the time the wait ends,
+/// whatever the outcome, so nothing pending can keep the process alive.
+abstract class VmDiscoveryTimer {
+  /// Prevents the callback from firing. Safe to call after it fired.
+  void cancel();
+}
+
+/// The system timer behind [SystemVmDiscoveryClock.startTimer].
+class _SystemVmDiscoveryTimer implements VmDiscoveryTimer {
+  /// The system timer behind [SystemVmDiscoveryClock.startTimer].
+  _SystemVmDiscoveryTimer(this._timer);
+
+  final Timer _timer;
+
+  @override
+  void cancel() => _timer.cancel();
 }
 
 /// The production clock: wall time and real delays.
@@ -105,6 +140,10 @@ class SystemVmDiscoveryClock implements VmDiscoveryClock {
 
   @override
   Future<void> sleep(Duration duration) => Future<void>.delayed(duration);
+
+  @override
+  VmDiscoveryTimer startTimer(Duration duration, void Function() onFire) =>
+      _SystemVmDiscoveryTimer(Timer(duration, onFire));
 }
 
 /// The values one VM-service wait tunes together.
@@ -187,8 +226,11 @@ int? parseSimctlLaunchPid(String output) {
 /// [VmDiscoveryConfig.clock], so fake-time tests drive it without sleeps.
 ///
 /// [stop] ends the watch early: the launch site completes it when discovery
-/// ends, whatever the outcome, so no `ps` outlives the wait. No probe runs
-/// after [stop]; one already in flight finishes, and then the watch returns.
+/// ends, whatever the outcome, so no `ps` outlives the wait. Every wait
+/// between probes is a cancellable timer the watch cancels on its way out —
+/// watched or stopped — so no pending probe gap can keep the process alive.
+/// No probe runs after [stop]; one already in flight finishes, and then the
+/// watch returns.
 Future<int?> watchHostPid({
   required int pid,
   required Future<bool> Function(int pid) isAlive,
@@ -200,14 +242,19 @@ Future<int?> watchHostPid({
     stopped = true;
   });
   while (await isAlive(pid)) {
-    if (watchStop != null) {
-      await Future.any([
-        config.clock.sleep(config.livenessPollInterval),
-        watchStop,
-      ]);
-      if (stopped) return null;
-    } else {
-      await config.clock.sleep(config.livenessPollInterval);
+    final gap = Completer<void>();
+    final timer = config.clock.startTimer(config.livenessPollInterval, () {
+      gap.complete();
+    });
+    try {
+      if (watchStop != null) {
+        await Future.any([gap.future, watchStop]);
+        if (stopped) return null;
+      } else {
+        await gap.future;
+      }
+    } finally {
+      timer.cancel();
     }
   }
   return null;
@@ -242,6 +289,13 @@ typedef VmServiceDiscovery = ({
 /// [StateError] naming the device, with its exit code (or the fact that the
 /// platform reported none) plus the last 20 log lines.
 ///
+/// [abandoned] ends the wait at once, with a [VmDiscoveryCancelled], when the
+/// run is shutting down or the app is being stopped — before the bound, before
+/// the next progress point, before a racing exit's grace. The launch site
+/// completes it, and discovery cancels every timer it started that has not
+/// fired by the time the wait ends, so nothing pending keeps the process
+/// alive past shutdown.
+///
 /// Progress goes through [logger] (the run's logger in production) as
 /// `still waiting for the VM service ... (<n>s elapsed)` lines, the first
 /// after 30 s and then every [VmDiscoveryConfig.progressInterval].
@@ -251,6 +305,7 @@ Future<VmServiceDiscovery> waitForVmServiceUri({
   Future<int?>? appExit,
   required VmDiscoveryConfig config,
   Logger? logger,
+  Future<void>? abandoned,
 }) async {
   final wait = _VmServiceWait(
     logs: logs,
@@ -259,6 +314,7 @@ Future<VmServiceDiscovery> waitForVmServiceUri({
     config: config,
     log: logger ?? Logger('dev_tool.device'),
     start: config.clock.now(),
+    abandoned: abandoned,
   );
   return wait.run();
 }
@@ -269,12 +325,16 @@ Future<VmServiceDiscovery> waitForVmServiceUri({
 /// For sources where the helper exists *only* to find the URI (the iOS
 /// simulator's discovery stream); app output comes from a separate stream.
 /// Owns only its own subscription, like [waitForVmServiceUri] itself.
+/// Completing [abandoned] ends the wait at once, as in [waitForVmServiceUri];
+/// the relaunch path shuts the tool down through here, so a wait stranded
+/// inside a restart's relaunch must not hold the process open either.
 Future<VmServiceDiscovery> waitForVmServiceUriFromProcess(
   Process log, {
   required String deviceName,
   Future<int?>? appExit,
   required VmDiscoveryConfig config,
   Logger? logger,
+  Future<void>? abandoned,
 }) async {
   final logs = AppLogStream();
   final pump = pumpProcessLines(log, logs);
@@ -289,6 +349,7 @@ Future<VmServiceDiscovery> waitForVmServiceUriFromProcess(
       appExit: appExit,
       config: config,
       logger: logger,
+      abandoned: abandoned,
     );
   } finally {
     await pump.dispose();
@@ -323,6 +384,30 @@ class _ExitOutcome extends _DiscoveryOutcome {
 class _TickOutcome extends _DiscoveryOutcome {
   /// A clock sleep fired: a progress point or the bound.
   const _TickOutcome();
+}
+
+/// The run is ending (or the app is being stopped) while discovery waits.
+class _AbandonedOutcome extends _DiscoveryOutcome {
+  /// The run is ending (or the app is being stopped) while discovery waits.
+  const _AbandonedOutcome();
+}
+
+/// Discovery's wait was abandoned because the run is shutting down.
+///
+/// A [StateError] subclass, so a wait abandoned mid-flight reads as the launch
+/// failing — like the app exiting before it announced — and never as a quiet
+/// null: callers that catch the exit failure catch this too. The device name
+/// travels in the message; the last log lines are not attached, because at
+/// shutdown the launch reports the cancellation, it does not diagnose the app.
+class VmDiscoveryCancelled extends StateError {
+  /// Discovery's wait was abandoned because the run is shutting down.
+  VmDiscoveryCancelled(String deviceName)
+    : super(
+        'The launch on $deviceName was cancelled because the run is shutting '
+        'down or the app was stopped while discovery was still waiting for '
+        'the VM service. The launch ends here: nothing more starts after the '
+        'cancellation.',
+      );
 }
 
 /// The state one [waitForVmServiceUri] call loops on.
@@ -366,6 +451,11 @@ class _VmServiceWait {
   /// a fast announcement stays quiet.
   Duration _nextProgress = _firstProgressAfter;
 
+  /// Completes when the run is shutting down or the app is being stopped.
+  /// Null where the caller offers no signal. The wait then ends at once with
+  /// a [VmDiscoveryCancelled] instead of sitting out its bound.
+  final Future<void>? abandoned;
+
   /// The state one [waitForVmServiceUri] call loops on.
   _VmServiceWait({
     required this.logs,
@@ -374,12 +464,19 @@ class _VmServiceWait {
     required this.config,
     required this.log,
     required this.start,
+    required this.abandoned,
   });
 
   /// Wait for the announcement, the app exit, or the bound.
   ///
   /// Giving up on a living app returns a null URI with the note; only the
-  /// app exiting first throws.
+  /// app exiting first throws — and the wait being abandoned throws a
+  /// [VmDiscoveryCancelled], promptly, whatever point of the bound it reached.
+  /// An exit racing the abandonment still reads as the cancellation when the
+  /// abandonment landed first: the launch site completes the signal before it
+  /// stops anything, so a shutdown that kills the app reports the
+  /// cancellation, while an app that already exited on its own keeps its exit
+  /// report. Completion order decides, deterministically.
   Future<VmServiceDiscovery> run() async {
     final announced = Completer<Uri?>();
     _watchExit();
@@ -411,24 +508,14 @@ class _VmServiceWait {
           wait = untilProgress;
           tickIsProgress = true;
         }
-        // A local: the field is public, so it cannot be promoted.
-        final exitFuture = appExit;
-        final outcome = await Future.any<_DiscoveryOutcome>([
-          announced.future.then<_DiscoveryOutcome>(_LogOutcome.new),
-          if (exitFuture != null)
-            exitFuture.then<_DiscoveryOutcome>(_ExitOutcome.new),
-          config.clock
-              .sleep(wait)
-              .then<_DiscoveryOutcome>(
-                (_) => const _TickOutcome(),
-              ),
-        ]);
-        switch (outcome) {
+        switch (await _waitForOutcome(announced.future, wait)) {
           case _LogOutcome(:final uri):
             if (uri != null) return (uri: uri, gaveUpNote: null);
             return await _onSourceEnded();
           case _ExitOutcome(:final code):
             throw _exitFailure(code);
+          case _AbandonedOutcome():
+            throw VmDiscoveryCancelled(deviceName);
           case _TickOutcome():
             if (tickIsProgress) {
               _logProgress(config.clock.now().difference(start));
@@ -440,6 +527,39 @@ class _VmServiceWait {
       }
     } finally {
       await sub.cancel();
+    }
+  }
+
+  /// Race the announcement, the app exit, the clock tick, and the abandonment.
+  ///
+  /// The tick rides a cancellable timer, not a bare sleep: whichever way this
+  /// returns, the timer is cancelled before it does, so the wait never leaves
+  /// a pending timer behind — the bound-length sleep that used to lose this
+  /// race is what kept the dev tool process alive after `daemon.shutdown`.
+  Future<_DiscoveryOutcome> _waitForOutcome(
+    Future<Uri?> announced,
+    Duration wait,
+  ) async {
+    final tick = Completer<_DiscoveryOutcome>();
+    final timer = config.clock.startTimer(wait, () {
+      if (!tick.isCompleted) tick.complete(const _TickOutcome());
+    });
+    try {
+      // A local: the field is public, so it cannot be promoted.
+      final exitFuture = appExit;
+      final abandonFuture = abandoned;
+      return await Future.any<_DiscoveryOutcome>([
+        announced.then<_DiscoveryOutcome>(_LogOutcome.new),
+        if (exitFuture != null)
+          exitFuture.then<_DiscoveryOutcome>(_ExitOutcome.new),
+        if (abandonFuture != null)
+          abandonFuture.then<_DiscoveryOutcome>(
+            (_) => const _AbandonedOutcome(),
+          ),
+        tick.future,
+      ]);
+    } finally {
+      timer.cancel();
     }
   }
 
@@ -468,6 +588,8 @@ class _VmServiceWait {
   /// short grace — `dart:io` does not order the pipes closing against
   /// `exitCode` completing — and only then does the wait give up on a living
   /// app, with the note the run's abort-or-continue decision reports.
+  /// Abandonment during the grace ends it at once with a
+  /// [VmDiscoveryCancelled], like anywhere else in the wait.
   Future<VmServiceDiscovery> _onSourceEnded() async {
     // A local: `appExit` is a public field, which never promotes, so the
     // null check has to live on the copy the grace below awaits.
@@ -476,13 +598,34 @@ class _VmServiceWait {
     final error = _exitError;
     if (error != null) throw error;
     if (_exitSeen) throw _exitFailure(_exitCode);
-    // An exit failure propagates to the caller, reported, never swallowed.
-    final landed = await Future.any([
-      exitFuture.then((_) => true),
-      config.clock.sleep(config.sourceEndGrace).then((_) => _exitSeen),
-    ]);
-    if (landed) throw _exitFailure(_exitCode);
+    if (await _waitForGraceExit(exitFuture)) throw _exitFailure(_exitCode);
     return (uri: null, gaveUpNote: _sourceEndedNote());
+  }
+
+  /// Give a racing app exit [config]'s grace to land after the source ended.
+  ///
+  /// True when the exit landed; false when the grace expired on a living app.
+  /// Throws [VmDiscoveryCancelled] when the run is abandoned first. The grace
+  /// rides a cancellable timer like the main loop's ticks, so abandonment
+  /// leaves no pending timer behind.
+  Future<bool> _waitForGraceExit(Future<int?> exitFuture) async {
+    final grace = Completer<bool>();
+    final timer = config.clock.startTimer(config.sourceEndGrace, () {
+      if (!grace.isCompleted) grace.complete(_exitSeen);
+    });
+    try {
+      // A local: the field is public, so it cannot be promoted.
+      final abandonFuture = abandoned;
+      // An exit failure propagates to the caller, reported, never swallowed.
+      return await Future.any([
+        exitFuture.then((_) => true),
+        if (abandonFuture != null)
+          abandonFuture.then((_) => throw VmDiscoveryCancelled(deviceName)),
+        grace.future,
+      ]);
+    } finally {
+      timer.cancel();
+    }
   }
 
   /// The app exited before announcing: device, exit code or its absence, and

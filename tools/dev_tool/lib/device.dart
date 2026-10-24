@@ -359,6 +359,7 @@ abstract class Device {
       appExit: process.exitCode,
       config: _discoveryConfig(),
       logger: _discoveryLogger(),
+      abandoned: _launchAbortSignal,
     );
   }
 
@@ -387,9 +388,103 @@ abstract class Device {
   /// process keep ports and apps up with nothing left to stop them. A launch
   /// still in flight must fail rather than start anything more.
   ///
+  /// The base records the abandonment: every discovery wait a launch in
+  /// flight is sitting in ends at once through [_launchAbortSignal], and a
+  /// later launch on this device refuses rather than starts anything more —
+  /// a relaunch in flight at shutdown must stop, not go on to leave an app
+  /// running after the shutdown released the apps. The signal completes
+  /// before anything is stopped, so a shutdown that kills the app reports
+  /// the cancellation (the signal won the race) while an app that already
+  /// exited on its own keeps its exit report; then the launch's partial
+  /// state is released through [_releaseLaunch].
+  ///
   /// Called after the session's own [stop] when there is one, so it must be a
   /// no-op on anything that is already released.
-  Future<void> abandonLaunch() async {}
+  Future<void> abandonLaunch() async {
+    _launchAbandoned = true;
+    _launchCancel?.complete();
+    await _releaseLaunch();
+  }
+
+  /// Undo a launch that did not return: release its partial state.
+  ///
+  /// Runs at the end of [abandonLaunch], after the abandonment signal, and on
+  /// a launch failure through [_trackedLaunch]. A device whose launch may have
+  /// started something — an app process, log helpers, a staged copy —
+  /// overrides this to release it; the default is a no-op for devices with
+  /// nothing to release. Must itself be a no-op when nothing is in flight,
+  /// since abandonment also runs after a completed launch's [stop].
+  Future<void> _releaseLaunch() async {}
+
+  /// Run [start] as a tracked launch, releasing its partial state on failure.
+  ///
+  /// Refuses when the run is already ending ([abandonLaunch] ran), else arms
+  /// the abandonment signal for the launch in flight. When [start] returns,
+  /// the launch ends with the instance; when it throws, the launch ends and
+  /// what it started is released through [_releaseLaunch] before the error is
+  /// rethrown, so a failed launch leaves nothing running.
+  Future<AppInstance> _trackedLaunch(
+    Future<AppInstance> Function() start,
+  ) async {
+    _beginLaunch();
+    try {
+      final instance = await start();
+      _endLaunch();
+      return instance;
+    } catch (_) {
+      _endLaunch();
+      await _releaseLaunch();
+      rethrow;
+    }
+  }
+
+  /// Whether [abandonLaunch] has run on this device since the last launch.
+  ///
+  /// Sticky across the launch: once the run is ending, nothing on this device
+  /// starts anything more, including a relaunch the shutdown arrived in the
+  /// middle of.
+  bool _launchAbandoned = false;
+
+  /// Completed by [abandonLaunch] while a launch is in flight.
+  ///
+  /// Null between launches, so the signal each discovery wait races belongs
+  /// to its own launch: a stale completion must never end a later wait.
+  Completer<void>? _launchCancel;
+
+  /// The signal to end every discovery wait of the launch in flight.
+  ///
+  /// Null between launches; the wait then has no abandonment to observe.
+  Future<void>? get _launchAbortSignal => _launchCancel?.future;
+
+  /// Start a launch: refuse when the run is already ending, else arm the
+  /// abandonment signal for the launch in flight.
+  ///
+  /// A launch still in flight must fail rather than start anything more, and
+  /// so must a launch that starts after the abandonment: without the refusal
+  /// a relaunch racing the shutdown would go on to leave an app running after
+  /// the shutdown released the apps.
+  void _beginLaunch() {
+    _throwIfLaunchAbandoned();
+    _launchCancel = Completer<void>();
+  }
+
+  /// End a launch: disarm the abandonment signal, keeping the refusal.
+  ///
+  /// The flag stays set after a launch that [abandonLaunch] interrupted — the
+  /// device is done launching — while the completer goes, so a cancelled wait
+  /// cannot resolve a later one.
+  void _endLaunch() {
+    _launchCancel = null;
+  }
+
+  /// Fail now when [abandonLaunch] has run since the last launch began.
+  ///
+  /// A [VmDiscoveryCancelled] naming this device: an abandoned launch reports
+  /// the cancellation, whatever step it had reached, including the relaunch of
+  /// a restart's native libraries.
+  void _throwIfLaunchAbandoned() {
+    if (_launchAbandoned) throw VmDiscoveryCancelled(name);
+  }
 
   /// The external programs a launch on this device will drive.
   ///
@@ -594,17 +689,8 @@ class MacOSDevice extends Device {
   Process? _launching;
 
   @override
-  Future<AppInstance> launch(String appPath, {AppLogListener? onLog}) async {
-    try {
-      return await _launch(appPath, onLog: onLog);
-    } catch (_) {
-      await _releaseLaunch();
-      rethrow;
-    }
-  }
-
-  @override
-  Future<void> abandonLaunch() => _releaseLaunch();
+  Future<AppInstance> launch(String appPath, {AppLogListener? onLog}) =>
+      _trackedLaunch(() => _launch(appPath, onLog: onLog));
 
   /// Undo a launch that did not return: the app it started, which runs out of
   /// the extracted copy, and then that copy.
@@ -646,6 +732,9 @@ class MacOSDevice extends Device {
     if (resolvedPath.endsWith('.app')) {
       await _bringToFront(resolvedPath, process.pid);
     }
+    // The shutdown may have arrived while discovery or activation ran: refuse
+    // the launch rather than hand back an app nobody will stop.
+    _throwIfLaunchAbandoned();
 
     _launching = null;
     return AppInstance(
@@ -878,8 +967,23 @@ class LinuxDevice extends Device {
       ? const []
       : const ['--platforms=@rules_flutter//flutter/platforms:linux_x64'];
 
+  /// The app a launch in flight has started, until the launch returns it.
+  Process? _launching;
+
   @override
-  Future<AppInstance> launch(String appPath, {AppLogListener? onLog}) async {
+  Future<AppInstance> launch(String appPath, {AppLogListener? onLog}) =>
+      _trackedLaunch(() => _launch(appPath, onLog: onLog));
+
+  /// Undo a launch that did not return: kill the app it started.
+  Future<void> _releaseLaunch() async {
+    final process = _launching;
+    _launching = null;
+    if (process != null) {
+      await _stopProcess('Linux app', process, teardownBound);
+    }
+  }
+
+  Future<AppInstance> _launch(String appPath, {AppLogListener? onLog}) async {
     // Bundle directories contain the executable at <dir>/<name>.
     String executable = appPath;
     if (FileSystemEntity.isDirectorySync(appPath)) {
@@ -887,9 +991,13 @@ class LinuxDevice extends Device {
       executable = p.join(appPath, dirName);
     }
 
-    final process = await _startProcess(executable, []);
+    final process = _launching = await _startProcess(executable, []);
     final logs = _startProcessLogs(process, onLog);
     final discovery = await _discoverDesktopVmService(logs, process);
+    // The shutdown may have arrived while discovery ran: refuse the launch
+    // rather than hand back an app nobody will stop.
+    _throwIfLaunchAbandoned();
+    _launching = null;
     return AppInstance(
       process: process,
       vmServiceUri: discovery.uri,
@@ -972,8 +1080,24 @@ class WindowsDevice extends Device {
       ? const []
       : const ['--platforms=@rules_flutter//flutter/platforms:windows_x64'];
 
+  /// The app a launch in flight has started, until the launch returns it.
+  Process? _launching;
+
   @override
-  Future<AppInstance> launch(String appPath, {AppLogListener? onLog}) async {
+  Future<AppInstance> launch(String appPath, {AppLogListener? onLog}) =>
+      _trackedLaunch(() => _launch(appPath, onLog: onLog));
+
+  /// Undo a launch that did not return: kill the staged app it started.
+  Future<void> _releaseLaunch() async {
+    final process = _launching;
+    _launching = null;
+    if (process != null) {
+      await _stopProcess('Windows app', process, teardownBound);
+    }
+    _clearStaging();
+  }
+
+  Future<AppInstance> _launch(String appPath, {AppLogListener? onLog}) async {
     // Run from a copy, never from `bazel-out` itself.
     //
     // Windows holds an exclusive lock on a running executable image, so while
@@ -990,9 +1114,13 @@ class WindowsDevice extends Device {
       executable = p.join(launchPath, '$dirName.exe');
     }
 
-    final process = await _startProcess(executable, []);
+    final process = _launching = await _startProcess(executable, []);
     final logs = _startProcessLogs(process, onLog);
     final discovery = await _discoverDesktopVmService(logs, process);
+    // The shutdown may have arrived while discovery ran: refuse the launch
+    // rather than hand back an app nobody will stop.
+    _throwIfLaunchAbandoned();
+    _launching = null;
     return AppInstance(
       process: process,
       vmServiceUri: discovery.uri,
@@ -1234,6 +1362,13 @@ class AndroidDevice extends Device {
   /// INTERNET-permission preflight, which release/profile launches skip.
   bool expectsVmService = false;
 
+  /// The logcat a launch in flight has started, until the launch returns it.
+  ///
+  /// logcat is how the URI arrives *and* the instance's process; killing it on
+  /// abandonment ends both the discovery wait and the log source at once. The
+  /// app itself runs on the device and is force-stopped by [_releaseApp].
+  Process? _launchingLogcat;
+
   AndroidDevice({
     this.deviceId,
     String? packageName,
@@ -1339,11 +1474,35 @@ class AndroidDevice extends Device {
       deviceName: name,
       config: _discoveryConfig(),
       logger: _discoveryLogger(),
+      abandoned: _launchAbortSignal,
     );
   }
 
   @override
-  Future<AppInstance> launch(String appPath, {AppLogListener? onLog}) async {
+  Future<AppInstance> launch(String appPath, {AppLogListener? onLog}) =>
+      _trackedLaunch(() => _launch(appPath, onLog: onLog));
+
+  @override
+  Future<void> abandonLaunch() async {
+    // The signal and the logcat release run in `super`: see
+    // [Device.abandonLaunch] for why the signal comes first.
+    await super.abandonLaunch();
+    await _releaseApp();
+  }
+
+  /// Undo a launch that did not return: kill the logcat it started.
+  ///
+  /// The app on the device is force-stopped by the [_releaseApp] the override
+  /// runs next: a launch abandoned after `am start` must not leave it running.
+  Future<void> _releaseLaunch() async {
+    final logcat = _launchingLogcat;
+    _launchingLogcat = null;
+    if (logcat != null) {
+      await _stopProcess('adb logcat', logcat, teardownBound);
+    }
+  }
+
+  Future<AppInstance> _launch(String appPath, {AppLogListener? onLog}) async {
     final packageName = _packageName ?? await _readPackageName(appPath);
 
     // Step 1: Install the APK.
@@ -1366,6 +1525,9 @@ class AndroidDevice extends Device {
     if (expectsVmService) {
       await _verifyInternetPermission(packageName, appPath);
     }
+    // Installing and verifying took a while: the shutdown may have arrived
+    // meanwhile, and neither step observes the abandonment.
+    _throwIfLaunchAbandoned();
 
     // Step 2: Start adb logcat — the app's log source as well as where the
     // VM-service announcement appears.
@@ -1376,7 +1538,7 @@ class AndroidDevice extends Device {
     // exceptions (`AndroidRuntime`), VM messages (`DartVM`) and native crashes
     // — exactly the output you most need when an app misbehaves. Matches
     // flutter_tools' AdbLogReader, which filters host-side for the same reason.
-    final logcat = await _startProcess(
+    final logcat = _launchingLogcat = await _startProcess(
       adbPath,
       _adbArgs(['logcat', '-v', 'time', '-T', '1']),
     );
@@ -1392,6 +1554,9 @@ class AndroidDevice extends Device {
 
     // Step 3: Launch the activity.
     final activity = _activityName ?? '.MainActivity';
+    // Starting logcat took a while: refuse before `am start` puts an app on
+    // the device that nobody will stop.
+    _throwIfLaunchAbandoned();
     final startResult = await _runProcess(
       adbPath,
       _adbArgs([
@@ -1446,6 +1611,10 @@ class AndroidDevice extends Device {
       _forwardedHostPort = hostPort;
       vmServiceUri = deviceUri.replace(host: '127.0.0.1', port: hostPort);
     }
+    // The shutdown may have arrived while discovery ran: refuse the launch
+    // rather than hand back an app nobody will stop.
+    _throwIfLaunchAbandoned();
+    _launchingLogcat = null;
 
     return AppInstance(
       process: logcat,
@@ -1680,8 +1849,10 @@ class AndroidDevice extends Device {
 
   /// The launch's logcat ends with this process; the app and the forward,
   /// which live on the device and in the adb server, do not.
-  @override
-  Future<void> abandonLaunch() => _releaseApp();
+  ///
+  /// [abandonLaunch] runs [_releaseLaunch] first (killing the logcat a launch
+  /// in flight started) and [_releaseApp] next (force-stopping the app and
+  /// removing the forward): one override for both, in launch order.
 
   /// Stop the app and remove the forward this launch created.
   Future<void> _releaseApp() async {
@@ -2184,22 +2355,28 @@ class IOSSimulatorDevice extends Device {
   /// hands them to its [AppInstance].
   final _launchHelpers = <Process>[];
 
-  @override
-  Future<AppInstance> launch(String appPath, {AppLogListener? onLog}) async {
-    try {
-      return await _launch(appPath, onLog: onLog);
-    } catch (_) {
-      await _releaseLaunch();
-      rethrow;
-    }
-  }
+  /// Whether a launch in flight has started the app: `simctl launch` answered
+  /// success but the launch has not returned yet. A launch abandoned in that
+  /// window terminates the app it started, so no shutdown leaves one running.
+  bool _inFlightOwnsApp = false;
 
   @override
-  Future<void> abandonLaunch() => _releaseLaunch();
+  Future<AppInstance> launch(String appPath, {AppLogListener? onLog}) =>
+      _trackedLaunch(() => _launch(appPath, onLog: onLog));
 
-  /// Undo a launch that did not return: its log helpers and its unpacked app.
+  /// Undo a launch that did not return: the app it started, if it started one,
+  /// then its log helpers and its unpacked app.
   /// `simctl install` copies the app, so nothing runs out of the unpacked one.
   Future<void> _releaseLaunch() async {
+    // The launch may have put an app on the simulator and then been abandoned
+    // before it returned: terminate what it started first.
+    if (_inFlightOwnsApp) {
+      _inFlightOwnsApp = false;
+      final bundleId = _launchedBundleId ?? _bundleId;
+      if (bundleId != null) {
+        await _runProcess('xcrun', ['simctl', 'terminate', udid, bundleId]);
+      }
+    }
     final helpers = [..._launchHelpers];
     _launchHelpers.clear();
     await Future.wait(
@@ -2253,6 +2430,7 @@ class IOSSimulatorDevice extends Device {
               ),
         config: config,
         logger: _discoveryLogger(),
+        abandoned: _launchAbortSignal,
       );
     } finally {
       // The wait is over, whatever it concluded: end the `ps` polling.
@@ -2282,6 +2460,9 @@ class IOSSimulatorDevice extends Device {
     if (installResult.exitCode != 0) {
       throw StateError('simctl install failed: ${installResult.stderr}');
     }
+    // Installing took a while: the shutdown may have arrived meanwhile, and
+    // no simctl step observes the abandonment.
+    _throwIfLaunchAbandoned();
 
     // Two log streams, deliberately.
     //
@@ -2327,6 +2508,9 @@ class IOSSimulatorDevice extends Device {
     // Launch app.
     final bundleId = _launchedBundleId =
         _bundleId ?? await _extractBundleId(installPath, _runProcess);
+    // Refuse before `simctl launch` puts an app on the simulator that nobody
+    // will stop, rather than starting one only to terminate it below.
+    _throwIfLaunchAbandoned();
     final launchResult = await _runProcess('xcrun', [
       'simctl', 'launch', udid, bundleId,
       // Anything after the bundle id is passed to the app as argv, which is
@@ -2336,6 +2520,7 @@ class IOSSimulatorDevice extends Device {
     if (launchResult.exitCode != 0) {
       throw StateError('simctl launch failed: ${launchResult.stderr}');
     }
+    _inFlightOwnsApp = true;
 
     // Discover VM service URI from the dedicated discovery stream. A release
     // build serves none, so there is nothing to wait for — and no pid watch
@@ -2347,6 +2532,10 @@ class IOSSimulatorDevice extends Device {
           )
         : (uri: null, gaveUpNote: null);
 
+    // The shutdown may have arrived while discovery ran: refuse the launch
+    // rather than hand back an app nobody will stop.
+    _throwIfLaunchAbandoned();
+    _inFlightOwnsApp = false;
     _launchHelpers.clear();
     return AppInstance(
       process: discoveryLog,
@@ -2594,9 +2783,6 @@ class IOSDevice extends Device {
   /// What the current launch's lldb does with a stop, once the app runs.
   _LldbStops? _lldbStops;
 
-  /// Set by [abandonLaunch]: the launch in flight must start nothing more.
-  bool _launchAbandoned = false;
-
   IOSDevice({
     String? udid,
     String? bundleId,
@@ -2783,14 +2969,25 @@ class IOSDevice extends Device {
   /// a per-site version would have to be repeated at every future one.
   @override
   Future<AppInstance> launch(String appPath, {AppLogListener? onLog}) async {
+    _beginLaunch();
     try {
-      return await _launchAndAttach(appPath, onLog: onLog);
+      final instance = await _launchAndAttach(appPath, onLog: onLog);
+      _endLaunch();
+      return instance;
     } on MdnsDiscoveryException catch (e) {
       // A launch failure like any other, so the launcher reports it: its own
       // type escaped as an unhandled exception and took the tool down.
+      _endLaunch();
       await _abandonLaunch();
       throw StateError(e.message);
+    } on MdnsAbandoned {
+      // The run ended inside the mDNS wait: report the launch as cancelled,
+      // so a relaunch in flight at shutdown says so instead of going quiet.
+      _endLaunch();
+      await _abandonLaunch();
+      throw VmDiscoveryCancelled(name);
     } catch (_) {
+      _endLaunch();
       await _abandonLaunch();
       rethrow;
     }
@@ -2798,26 +2995,18 @@ class IOSDevice extends Device {
 
   @override
   Future<void> abandonLaunch() async {
-    _launchAbandoned = true;
+    await super.abandonLaunch();
     await _abandonLaunch();
-  }
-
-  void _throwIfAbandoned() {
-    if (_launchAbandoned) {
-      throw StateError(
-        'The launch on $name was abandoned because the run is ending.',
-      );
-    }
   }
 
   /// Start a launch helper, unless the launch has been abandoned; one started
   /// just as it was abandoned is killed rather than left to outlive the run.
   Future<Process> _startHelper(String executable, List<String> args) async {
-    _throwIfAbandoned();
+    _throwIfLaunchAbandoned();
     final process = await _startProcess(executable, args);
     if (_launchAbandoned) {
       process.kill(ProcessSignal.sigkill);
-      _throwIfAbandoned();
+      _throwIfLaunchAbandoned();
     }
     return process;
   }
@@ -2839,7 +3028,6 @@ class IOSDevice extends Device {
     String appPath, {
     AppLogListener? onLog,
   }) async {
-    _launchAbandoned = false;
     final info = await _resolveInfo();
 
     final installed = await _installAppOnDevice(appPath, info);
@@ -3087,7 +3275,7 @@ class IOSDevice extends Device {
       'device process attach --pid $processId',
       waitFor: _lldbTargetStopped,
     );
-    _throwIfAbandoned();
+    _throwIfLaunchAbandoned();
     _lldbStops = _LldbStops(
       from: _lldbOutput!.nextCursor,
       lldb: lldb,
@@ -3153,33 +3341,7 @@ class IOSDevice extends Device {
     // rather than a hang. flutter_tools splits the same two concerns, warning
     // at 60s/75s while its mDNS query runs for ten minutes
     // (`ios/devices.dart`).
-    final record = await _mdns.discover(
-      bundleId: bundleId,
-      hostnames: info.hostnames,
-      resolveAddress: info.transport == IOSDeviceTransport.wireless,
-      timeout: switch (info.transport) {
-        IOSDeviceTransport.wired => const Duration(minutes: 5),
-        IOSDeviceTransport.wireless => const Duration(minutes: 15),
-      },
-      // Sized well above a healthy host's launch: the trigger exists to
-      // reassure someone on a slow host that the wait is expected, and one
-      // sized for a fast host would fire on every ordinary launch. The message
-      // says what is outstanding and what is worth checking, and quotes no
-      // duration — the cost varies by host by more than an order of magnitude,
-      // so any figure here would be wrong for most readers.
-      slowAfter: const Duration(seconds: 45),
-      onSlow: (elapsed) => logs.add(
-        'Still waiting (${elapsed.inSeconds}s) for the app to advertise its '
-        'Dart VM service over mDNS — the only channel an iOS device has for '
-        'it.${buildMode == BuildMode.debug ? _slowJitStart : ''}\n'
-        'If this is the first launch of $bundleId on this device, look at '
-        'the phone instead. iOS asks once, per app, before it lets one onto '
-        'the local network, and the prompt appears over the app: until it is '
-        'answered the advertisement never goes out, and no amount of waiting '
-        'here will change that. Settings > Privacy & Security > Local '
-        'Network lists the app once it has been asked.',
-      ),
-    );
+    final record = await _discoverAdvertisedRecord(info, bundleId, logs);
 
     switch (info.transport) {
       case IOSDeviceTransport.wired:
@@ -3225,6 +3387,53 @@ class IOSDevice extends Device {
           host: record.address!.address,
           port: record.port,
         );
+    }
+  }
+
+  /// Find the app's mDNS advertisement, ending at once when abandoned.
+  ///
+  /// The minutes-long budget is for an app that never advertises; the run
+  /// ending is not that, so the launch-abandonment signal cuts the wait short
+  /// with a [VmDiscoveryCancelled] instead of sitting out the budget and
+  /// holding the process open past shutdown.
+  Future<MdnsVmServiceRecord> _discoverAdvertisedRecord(
+    IOSDeviceInfo info,
+    String bundleId,
+    AppLogStream logs,
+  ) async {
+    _mdns.abandoned = _launchAbortSignal;
+    try {
+      return await _mdns.discover(
+        bundleId: bundleId,
+        hostnames: info.hostnames,
+        resolveAddress: info.transport == IOSDeviceTransport.wireless,
+        timeout: switch (info.transport) {
+          IOSDeviceTransport.wired => const Duration(minutes: 5),
+          IOSDeviceTransport.wireless => const Duration(minutes: 15),
+        },
+        // Sized well above a healthy host's launch: the trigger exists to
+        // reassure someone on a slow host that the wait is expected, and one
+        // sized for a fast host would fire on every ordinary launch. The
+        // message says what is outstanding and what is worth checking, and
+        // quotes no duration — the cost varies by host by more than an order
+        // of magnitude, so any figure here would be wrong for most readers.
+        slowAfter: const Duration(seconds: 45),
+        onSlow: (elapsed) => logs.add(
+          'Still waiting (${elapsed.inSeconds}s) for the app to advertise its '
+          'Dart VM service over mDNS — the only channel an iOS device has for '
+          'it.${buildMode == BuildMode.debug ? _slowJitStart : ''}\n'
+          'If this is the first launch of $bundleId on this device, look at '
+          'the phone instead. iOS asks once, per app, before it lets one onto '
+          'the local network, and the prompt appears over the app: until it '
+          'is answered the advertisement never goes out, and no amount of '
+          'waiting here will change that. Settings > Privacy & Security > '
+          'Local Network lists the app once it has been asked.',
+        ),
+      );
+    } on MdnsAbandoned {
+      throw VmDiscoveryCancelled(name);
+    } finally {
+      _mdns.abandoned = null;
     }
   }
 
@@ -3392,7 +3601,7 @@ if not error.Success():
     RegExp? waitFor,
     bool returnMatch = false,
   }) async {
-    _throwIfAbandoned();
+    _throwIfLaunchAbandoned();
     final output = _lldbOutput;
     if (output == null) {
       throw StateError(
@@ -3429,12 +3638,12 @@ if not error.Success():
       onDone: () {
         if (completer.isCompleted) return;
         completer.completeError(
-          StateError(
-            _launchAbandoned
-                ? 'The launch on $name was abandoned because the run is ending.'
-                : 'lldb exited before answering "$command".\nlldb said:\n'
-                      '${output.read(-40).lines.map((l) => '  ${l.text}').join('\n')}',
-          ),
+          _launchAbandoned
+              ? VmDiscoveryCancelled(name)
+              : StateError(
+                  'lldb exited before answering "$command".\nlldb said:\n'
+                  '${output.read(-40).lines.map((l) => '  ${l.text}').join('\n')}',
+                ),
         );
       },
     );

@@ -5,12 +5,16 @@
 /// [AppInstance] with no URI and the note discovery gave up with — and pin
 /// the run's abort-or-continue decision: a [DevToolException] carrying the
 /// note by default, a warning and a session under `--allow-no-vm-service`.
+import 'dart:async';
+
 import 'package:flutter_bazel_dev_tool/device.dart';
 import 'package:flutter_bazel_dev_tool/device_launcher.dart';
 import 'package:flutter_bazel_dev_tool/dev_tool_exception.dart';
 import 'package:flutter_bazel_dev_tool/logging.dart';
 import 'package:flutter_bazel_dev_tool/run_plan.dart';
+import 'package:flutter_bazel_dev_tool/session.dart';
 import 'package:flutter_bazel_dev_tool/session_host.dart';
+import 'package:flutter_bazel_dev_tool/vm_service_discovery.dart';
 import 'package:logging/logging.dart' show LogRecord;
 import 'package:test/test.dart';
 
@@ -208,6 +212,89 @@ void main() {
         );
         // Continuing means the app keeps running: nothing stopped it.
         expect(device.stops, 0);
+      },
+    );
+  });
+
+  group('abandoning a launch in flight', () {
+    test(
+      'a discovery wait ends at once: the launch fails cancelled and the '
+      'app is stopped',
+      () async {
+        final proc = FakeProcess();
+        final device = LinuxDevice(
+          startProcess: (exe, args) async => proc,
+        );
+
+        final pending = device.launch('/path/to/app');
+        // The pump is draining the process's pipes: the launch is inside
+        // discovery, sitting out its bound.
+        await proc.outputAttached;
+        // Attached before the shutdown: the launch fails while abandonment
+        // is awaited, and a handler attached only afterwards would miss it
+        // and the failure would surface as an unhandled async error.
+        final outcome = expectLater(
+          pending,
+          throwsA(
+            isA<VmDiscoveryCancelled>().having(
+              (e) => e.message,
+              'message',
+              allOf(contains('Linux'), contains('cancelled')),
+            ),
+          ),
+        );
+        // `daemon.shutdown` (or the app being stopped) lands mid-discovery.
+        await device.abandonLaunch();
+        await outcome;
+        expect(proc.killed, isTrue);
+      },
+    );
+
+    test(
+      'a shutdown during a relaunch reports the cancellation and leaves no '
+      'running app',
+      () async {
+        final oldProc = FakeProcess();
+        final started = Completer<FakeProcess>();
+        final device = LinuxDevice(
+          startProcess: (exe, args) async {
+            final proc = FakeProcess();
+            if (!started.isCompleted) started.complete(proc);
+            return proc;
+          },
+        );
+        final host = SessionHost(
+          isMachine: false,
+          logger: Logger('test.device_launcher.relaunch_abandon.host'),
+        );
+        addTearDown(host.teardown.run);
+        final session = DeviceSession(
+          device: device,
+          appInstance: AppInstance(process: oldProc),
+          vmClient: null,
+          appId: 'canned_APP',
+        );
+
+        final relaunched = session.relaunch(() async {
+          await device.stop(session.appInstance);
+          return device.launch('/path/to/app');
+        });
+        // The replacement is past its start and inside discovery.
+        final replacement = await started.future;
+        await replacement.outputAttached;
+        // Attached before the shutdown, as above: the relaunch fails while
+        // the shutdown is awaited.
+        final outcome = expectLater(
+          relaunched,
+          throwsA(isA<VmDiscoveryCancelled>()),
+        );
+        // The shutdown lands mid-relaunch: the relaunch must not go on to
+        // leave an app running after it.
+        await session.shutdown(host.protocol);
+        await outcome;
+        expect(session.terminated, completes);
+        expect(replacement.killed, isTrue);
+        expect(oldProc.killed, isTrue);
       },
     );
   });

@@ -26,7 +26,7 @@ const _vmServiceLine =
 class FakeVmDiscoveryClock implements VmDiscoveryClock {
   DateTime _now;
 
-  final List<({DateTime at, Completer<void> done})> _timers = [];
+  final List<_FakeVmDiscoveryTimer> _timers = [];
 
   /// A [VmDiscoveryClock] the test drives by hand, starting at [start].
   FakeVmDiscoveryClock({DateTime? start})
@@ -38,9 +38,30 @@ class FakeVmDiscoveryClock implements VmDiscoveryClock {
   @override
   Future<void> sleep(Duration duration) {
     final done = Completer<void>();
-    _timers.add((at: _now.add(duration), done: done));
+    _timers.add(
+      _FakeVmDiscoveryTimer(
+        at: _now.add(duration),
+        onFire: () {
+          if (!done.isCompleted) done.complete();
+        },
+      ),
+    );
     return done.future;
   }
+
+  @override
+  VmDiscoveryTimer startTimer(Duration duration, void Function() onFire) {
+    final timer = _FakeVmDiscoveryTimer(
+      at: _now.add(duration),
+      onFire: onFire,
+    );
+    _timers.add(timer);
+    return timer;
+  }
+
+  /// Timers started and neither fired nor cancelled: what would keep the
+  /// process alive if the wait ended now.
+  int get pendingTimers => _timers.where((t) => !t.settled).length;
 
   /// Move virtual time forward by [duration], firing timers due on the way.
   ///
@@ -52,11 +73,13 @@ class FakeVmDiscoveryClock implements VmDiscoveryClock {
     final target = _now.add(duration);
     while (true) {
       _timers.sort((a, b) => a.at.compareTo(b.at));
-      final index = _timers.indexWhere((t) => !t.at.isAfter(target));
+      final index = _timers.indexWhere(
+        (t) => !t.settled && !t.at.isAfter(target),
+      );
       if (index == -1) break;
       final timer = _timers.removeAt(index);
       _now = timer.at;
-      timer.done.complete();
+      timer.fire();
       for (var i = 0; i < 5; i++) {
         await Future<void>.delayed(Duration.zero);
       }
@@ -65,6 +88,36 @@ class FakeVmDiscoveryClock implements VmDiscoveryClock {
     for (var i = 0; i < 5; i++) {
       await Future<void>.delayed(Duration.zero);
     }
+  }
+}
+
+/// One fake timer: the [VmDiscoveryTimer] the fake clock hands out.
+class _FakeVmDiscoveryTimer implements VmDiscoveryTimer {
+  /// The virtual instant this fires at, unless cancelled first.
+  final DateTime at;
+
+  /// The wait's callback.
+  final void Function() onFire;
+
+  /// One fake timer: the [VmDiscoveryTimer] the fake clock hands out.
+  _FakeVmDiscoveryTimer({required this.at, required this.onFire});
+
+  bool _cancelled = false;
+  bool _fired = false;
+
+  /// Whether this can still fire: fired or cancelled timers cannot.
+  bool get settled => _cancelled || _fired;
+
+  /// Fire the callback, unless cancelled. Called by the clock's [advance].
+  void fire() {
+    if (_cancelled || _fired) return;
+    _fired = true;
+    onFire();
+  }
+
+  @override
+  void cancel() {
+    _cancelled = true;
   }
 }
 
@@ -358,6 +411,180 @@ void main() {
             ),
           ),
         );
+      },
+    );
+  });
+
+  group('abandoning a wait', () {
+    test(
+      'abandoning mid-wait fails at once with the cancellation, leaving no '
+      'timer pending',
+      () async {
+        final clock = FakeVmDiscoveryClock();
+        final records = captureLog('test.vm_discovery.abandon');
+        final logs = AppLogStream();
+        addTearDown(logs.close);
+        final exit = Completer<int?>();
+        final abandoned = Completer<void>();
+
+        final pending = waitForVmServiceUri(
+          logs: logs,
+          deviceName: 'iOS Simulator (TEST)',
+          appExit: exit.future,
+          config: VmDiscoveryConfig(
+            bound: const Duration(seconds: 180),
+            clock: clock,
+          ),
+          logger: Logger('test.vm_discovery.abandon'),
+          abandoned: abandoned.future,
+        );
+        // Past the first progress point but short of the second: the wait is
+        // sitting in its bound tick when the shutdown arrives.
+        await clock.advance(const Duration(seconds: 35));
+        abandoned.complete();
+
+        await expectLater(
+          pending,
+          throwsA(
+            isA<VmDiscoveryCancelled>().having(
+              (e) => e.message,
+              'message',
+              allOf(contains('iOS Simulator (TEST)'), contains('cancelled')),
+            ),
+          ),
+        );
+        // Promptly: virtual time never moved past the abandonment, and the
+        // wait left nothing pending that could keep the process alive.
+        expect(clock.pendingTimers, isZero);
+        expect(
+          waitingLines(records).length,
+          1,
+          reason: 'no progress line goes out after the abandonment',
+        );
+      },
+    );
+
+    test(
+      'abandoning before the first progress point waits for nothing',
+      () async {
+        final clock = FakeVmDiscoveryClock();
+        final records = captureLog('test.vm_discovery.abandon_early');
+        final logs = AppLogStream();
+        addTearDown(logs.close);
+        final abandoned = Completer<void>();
+
+        final pending = waitForVmServiceUri(
+          logs: logs,
+          deviceName: 'Linux',
+          appExit: Completer<int?>().future,
+          config: VmDiscoveryConfig(
+            bound: const Duration(seconds: 180),
+            clock: clock,
+          ),
+          logger: Logger('test.vm_discovery.abandon_early'),
+          abandoned: abandoned.future,
+        );
+        abandoned.complete();
+
+        await expectLater(
+          pending,
+          throwsA(isA<VmDiscoveryCancelled>()),
+        );
+        expect(waitingLines(records), isEmpty);
+        expect(clock.pendingTimers, isZero);
+      },
+    );
+
+    test(
+      'abandoning during the source-end grace ends the grace at once',
+      () async {
+        final clock = FakeVmDiscoveryClock();
+        final logs = AppLogStream();
+        addTearDown(logs.close);
+        final exit = Completer<int?>();
+        final abandoned = Completer<void>();
+        logs.add('flutter: warming up');
+
+        final pending = waitForVmServiceUri(
+          logs: logs,
+          deviceName: 'Android (emulator-5554)',
+          appExit: exit.future,
+          config: VmDiscoveryConfig(
+            bound: const Duration(seconds: 180),
+            clock: clock,
+          ),
+          abandoned: abandoned.future,
+        );
+        await logs.close();
+        // Let the wait observe the close and enter the grace, then abandon:
+        // the exit never lands, and the wait must not sit out the grace.
+        await clock.advance(const Duration(seconds: 1));
+        abandoned.complete();
+
+        await expectLater(
+          pending,
+          throwsA(isA<VmDiscoveryCancelled>()),
+        );
+        expect(clock.pendingTimers, isZero);
+        // The exit never completed: nothing was awaited on a dead app.
+        expect(exit.isCompleted, isFalse);
+      },
+    );
+
+    test(
+      'an exit racing the abandonment still reads as the cancellation',
+      () async {
+        final clock = FakeVmDiscoveryClock();
+        final logs = AppLogStream();
+        addTearDown(logs.close);
+        final exit = Completer<int?>();
+        final abandoned = Completer<void>();
+
+        final pending = waitForVmServiceUri(
+          logs: logs,
+          deviceName: 'Linux',
+          appExit: exit.future,
+          config: VmDiscoveryConfig(
+            bound: const Duration(seconds: 180),
+            clock: clock,
+          ),
+          abandoned: abandoned.future,
+        );
+        // The shutdown completes the signal before it stops anything, so the
+        // abandonment lands first and the launch reports the cancellation,
+        // not the kill's exit code.
+        abandoned.complete();
+        exit.complete(-1);
+
+        await expectLater(
+          pending,
+          throwsA(isA<VmDiscoveryCancelled>()),
+        );
+        expect(clock.pendingTimers, isZero);
+      },
+    );
+
+    test(
+      'a wait that announces ends with no timer pending either',
+      () async {
+        final clock = FakeVmDiscoveryClock();
+        final logs = AppLogStream();
+        addTearDown(logs.close);
+
+        final pending = waitForVmServiceUri(
+          logs: logs,
+          deviceName: 'Linux',
+          appExit: Completer<int?>().future,
+          config: VmDiscoveryConfig(
+            bound: const Duration(seconds: 180),
+            clock: clock,
+          ),
+        );
+        logs.add(_vmServiceLine);
+
+        final discovery = await pending;
+        expect(discovery.uri, isNotNull);
+        expect(clock.pendingTimers, isZero);
       },
     );
   });
