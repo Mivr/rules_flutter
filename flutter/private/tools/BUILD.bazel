@@ -446,6 +446,7 @@ _TOOL_SRCS = {
 _TEST_DATA = {
     "macho_edit_test": [
         "@llvm//tools:llvm-lipo",
+        "@llvm//tools:llvm-nm",
         "@llvm//tools:llvm-objdump",
         "@llvm//tools:llvm-otool",
     ],
@@ -454,6 +455,7 @@ _TEST_DATA = {
 _TEST_ENV = {
     "macho_edit_test": {
         "LLVM_LIPO": "$(rlocationpath @llvm//tools:llvm-lipo)",
+        "LLVM_NM": "$(rlocationpath @llvm//tools:llvm-nm)",
         "LLVM_OBJDUMP": "$(rlocationpath @llvm//tools:llvm-objdump)",
         "LLVM_OTOOL": "$(rlocationpath @llvm//tools:llvm-otool)",
     },

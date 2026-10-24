@@ -322,6 +322,7 @@ FlutterApplicationInfo = provider(
     doc = "Outputs of the Flutter application compilation pipeline.",
     fields = {
         "aot_output": "File or None: The AOT compiled native code (.so, .dylib, or .S). None in debug mode.",
+        "aot_strip": "bool: Whether gen_snapshot stripped this AOT output (`--strip`: `-c opt`, forced by `obfuscate` unless `--no-strip` in `extra_gen_snapshot_options` wins). The Apple framework rules drop the snapshot's local and stab symbols from the shipped App binary exactly then, the way `flutter build` runs `strip -x` on the dylib.",
         "kernel_dill": "File or None: The kernel .dill file for JIT mode. None in release mode.",
         "flutter_assets": "File: The flutter_assets/ tree artifact.",
         "icu_data": "File: The icudtl.dat file.",
