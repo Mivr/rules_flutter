@@ -371,6 +371,278 @@ Uint8List _buildFullCoverageMachO() {
   return buf;
 }
 
+/// Appends [value] as ULEB128 to [out].
+void _writeUleb(BytesBuilder out, int value) {
+  var rest = value;
+  while (rest >= 0x80) {
+    out.addByte((rest & 0x7f) | 0x80);
+    rest >>= 7;
+  }
+  out.addByte(rest);
+}
+
+/// Builds the export trie under test: `_kDartSnapshotData` at 0x5000 and
+/// `_kDartSnapshotText` at 0x4000 sharing the `_kDartSnapshot` edge, matching
+/// the `n_value`s in [_buildUnstrippedDylib].
+Uint8List _buildSnapshotExportsTrie() {
+  // Every node is terminalSize, terminal bytes, childCount, children, so a
+  // leaf terminal ends with an explicit zero child count.
+  List<int> terminal(int address) {
+    final out = BytesBuilder(copy: false)..addByte(0);
+    _writeUleb(out, 0); // flags
+    _writeUleb(out, address);
+    final bytes = out.toBytes();
+    return [bytes.length - 1, ...bytes.sublist(1), 0];
+  }
+
+  final nodeA = terminal(0x5000);
+  final nodeB = terminal(0x4000);
+  final edge0 = utf8.encode('_kDartSnapshot\x00');
+  final edgeA = utf8.encode('Data\x00');
+  final edgeB = utf8.encode('Text\x00');
+  // Child offsets are absolute from the trie start.
+  final offNode1 = 2 + edge0.length + 1;
+  final offA = offNode1 + 2 + edgeA.length + 1 + edgeB.length + 1;
+  final offB = offA + nodeA.length;
+  assert(offB < 128, 'child offsets must stay single ULEB bytes');
+  final node1 = BytesBuilder(copy: false)
+    ..addByte(0) // terminalSize = 0
+    ..addByte(2) // two children
+    ..add(edgeA)
+    ..addByte(offA)
+    ..add(edgeB)
+    ..addByte(offB);
+  final node0 = BytesBuilder(copy: false)
+    ..addByte(0) // terminalSize = 0
+    ..addByte(1) // one child
+    ..add(edge0)
+    ..addByte(offNode1); // node1 starts after this node
+  return Uint8List.fromList([
+    ...node0.toBytes(),
+    ...node1.toBytes(),
+    ...nodeA,
+    ...nodeB,
+  ]);
+}
+
+/// Builds a synthetic arm64 dylib with a gen_snapshot-style symbol table:
+/// two local text symbols, `N_FUN`/`N_SO` stab entries naming `MyApp`, two
+/// exported globals, one undefined import, an export trie naming the
+/// exports, and a three-entry indirect table (a kept export, a dropped
+/// local, and an `INDIRECT_SYMBOL_LOCAL` entry).
+///
+/// Returns the binary and the file offsets of its symbol table, string
+/// table, indirect table and export trie for the assertions.
+({
+  Uint8List bytes,
+  int symoff,
+  int stroff,
+  int strsize,
+  int indirectoff,
+  int trieoff,
+  int triesize,
+})
+_buildUnstrippedDylib() {
+  const names = [
+    '_myLocal',
+    '_otherLocal',
+    '_MyApp.build',
+    'MyApp.dart',
+    '_kDartSnapshotText',
+    '_kDartSnapshotData',
+    '_printf',
+  ];
+  // N_SECT locals, N_FUN/N_SO stabs, N_SECT|N_EXT exports, N_UNDF|N_EXT import.
+  const types = [0x0e, 0x0e, 0x24, 0x64, 0x0f, 0x0f, 0x01];
+  const sects = [1, 1, 1, 0, 1, 1, 0];
+  const values = [0x1000, 0x1100, 0x1200, 0, 0x4000, 0x5000, 0];
+
+  final strings = BytesBuilder(copy: false)..addByte(0);
+  final strx = <int>[];
+  for (final name in names) {
+    strx.add(strings.length);
+    strings.add(utf8.encode(name));
+    strings.addByte(0);
+  }
+  final strBytes = strings.toBytes();
+  final symBytes = BytesBuilder(copy: false);
+  for (var i = 0; i < names.length; i++) {
+    final entry = ByteData(16)
+      ..setUint32(0, strx[i], Endian.little)
+      ..setUint8(4, types[i])
+      ..setUint8(5, sects[i])
+      ..setUint16(6, 0, Endian.little)
+      ..setUint64(8, values[i], Endian.little);
+    symBytes.add(entry.buffer.asUint8List());
+  }
+
+  final trie = _buildSnapshotExportsTrie();
+  // Indirect entries: the kept `_kDartSnapshotText` (old index 4), the
+  // dropped `_myLocal` (old index 0), and a LOCAL entry naming no index.
+  final indirect = ByteData(12)
+    ..setUint32(0, 4, Endian.little)
+    ..setUint32(4, 0, Endian.little)
+    ..setUint32(8, macho.indirectSymbolLocal, Endian.little);
+
+  // `__TEXT` with one `__text` section so `n_sect = 1` resolves.
+  final textSeg = Uint8List(72 + 80);
+  final textBd = ByteData.sublistView(textSeg);
+  textBd.setUint32(0, macho.lcSegment64, Endian.little);
+  textBd.setUint32(4, 152, Endian.little);
+  textSeg.setRange(8, 8 + '__TEXT'.length, ascii.encode('__TEXT'));
+  textBd.setUint64(24, 0, Endian.little);
+  textBd.setUint64(32, 0x4000, Endian.little);
+  textBd.setUint64(40, 0, Endian.little);
+  textBd.setUint64(48, 0x400, Endian.little);
+  textBd.setUint32(56, 5, Endian.little);
+  textBd.setUint32(60, 5, Endian.little);
+  textBd.setUint32(64, 1, Endian.little);
+  textSeg.setRange(72, 72 + '__text'.length, ascii.encode('__text'));
+  textSeg.setRange(
+    72 + 16,
+    72 + 16 + '__TEXT'.length,
+    ascii.encode('__TEXT'),
+  );
+  textBd.setUint64(72 + 32, 0x1000, Endian.little);
+  textBd.setUint64(72 + 40, 0x200, Endian.little);
+  textBd.setUint32(72 + 48, 0x200, Endian.little);
+  textBd.setUint32(72 + 52, 2, Endian.little);
+
+  const symoff = 0x400;
+  final symLen = symBytes.length;
+  final stroff = symoff + symLen;
+  final indirectoff = (stroff + strBytes.length + 3) & ~3;
+  final trieoff = indirectoff + indirect.lengthInBytes;
+  final fileSize = trieoff + trie.length;
+  final linkSize = fileSize - symoff;
+
+  final dysymtab = ByteData(80)
+    ..setUint32(0, macho.lcDysymtab, Endian.little)
+    ..setUint32(4, 80, Endian.little)
+    ..setUint32(8, 0, Endian.little) // ilocalsym
+    ..setUint32(12, 4, Endian.little) // nlocalsym
+    ..setUint32(16, 4, Endian.little) // iextdefsym
+    ..setUint32(20, 2, Endian.little) // nextdefsym
+    ..setUint32(24, 6, Endian.little) // iundefsym
+    ..setUint32(28, 1, Endian.little) // nundefsym
+    ..setUint32(56, indirectoff, Endian.little) // indirectsymoff
+    ..setUint32(60, 3, Endian.little); // nindirectsyms
+  final exportsTrie = ByteData(16)
+    ..setUint32(0, macho.lcDyldExportsTrie, Endian.little)
+    ..setUint32(4, 16, Endian.little)
+    ..setUint32(8, trieoff, Endian.little)
+    ..setUint32(12, trie.length, Endian.little);
+
+  final commands = <Uint8List>[
+    textSeg,
+    macho.buildLcSegment64((
+      segname: '__LINKEDIT',
+      vmaddr: 0x4000,
+      vmsize: linkSize,
+      fileoff: symoff,
+      filesize: linkSize,
+      maxprot: 1,
+      initprot: 1,
+      nsects: 0,
+      flags: 0,
+    )).bytes,
+    macho
+        .buildLcSymtab(
+          symoff: symoff,
+          nsyms: names.length,
+          stroff: stroff,
+          strsize: strBytes.length,
+        )
+        .bytes,
+    dysymtab.buffer.asUint8List(),
+    exportsTrie.buffer.asUint8List(),
+    macho.buildLcIdDylib('@rpath/Strip.dylib').bytes,
+  ];
+
+  var sizeofcmds = 0;
+  for (final c in commands) {
+    sizeofcmds += c.length;
+  }
+  final buf = Uint8List(fileSize);
+  final bd = ByteData.sublistView(buf);
+  bd.setUint32(0, macho.mhMagic64, Endian.little);
+  bd.setUint32(4, macho.cpuTypeArm64, Endian.little);
+  bd.setUint32(8, macho.cpuSubtypeArm64All, Endian.little);
+  bd.setUint32(12, macho.mhDylib, Endian.little);
+  bd.setUint32(16, commands.length, Endian.little);
+  bd.setUint32(20, sizeofcmds, Endian.little);
+  bd.setUint32(24, macho.mhNoReexportedDylibs, Endian.little);
+  bd.setUint32(28, 0, Endian.little);
+  var off = macho.mhHeaderSize64;
+  for (final c in commands) {
+    buf.setRange(off, off + c.length, c);
+    off += c.length;
+  }
+  buf.setRange(symoff, symoff + symLen, symBytes.toBytes());
+  buf.setRange(stroff, stroff + strBytes.length, strBytes);
+  buf.setRange(
+    indirectoff,
+    indirectoff + indirect.lengthInBytes,
+    indirect.buffer.asUint8List(),
+  );
+  buf.setRange(trieoff, trieoff + trie.length, trie);
+  return (
+    bytes: buf,
+    symoff: symoff,
+    stroff: stroff,
+    strsize: strBytes.length,
+    indirectoff: indirectoff,
+    trieoff: trieoff,
+    triesize: trie.length,
+  );
+}
+
+/// Reads the symbol names and `n_type` bytes of the `LC_SYMTAB` in [bytes].
+({List<String> names, List<int> types}) _readTestSymtab(Uint8List bytes) {
+  final lc = macho
+      .parseLoadCommands(bytes)
+      .singleWhere((c) => c.cmd == macho.lcSymtab);
+  final bd = ByteData.sublistView(lc.bytes);
+  final symoff = bd.getUint32(8, Endian.little);
+  final nsyms = bd.getUint32(12, Endian.little);
+  final stroff = bd.getUint32(16, Endian.little);
+  final names = <String>[];
+  final types = <int>[];
+  for (var i = 0; i < nsyms; i++) {
+    final entry = ByteData.sublistView(
+      bytes,
+      symoff + i * 16,
+      symoff + (i + 1) * 16,
+    );
+    names.add(_readCString(bytes, stroff + entry.getUint32(0, Endian.little)));
+    types.add(entry.getUint8(4));
+  }
+  return (names: names, types: types);
+}
+
+/// Reads the six `LC_DYSYMTAB` index groups of [bytes] in command order.
+List<int> _readTestDysymtabGroups(Uint8List bytes) {
+  final lc = macho
+      .parseLoadCommands(bytes)
+      .singleWhere((c) => c.cmd == macho.lcDysymtab);
+  final bd = ByteData.sublistView(lc.bytes);
+  return [for (var at = 8; at < 32; at += 4) bd.getUint32(at, Endian.little)];
+}
+
+/// Reads the indirect symbol entries of [bytes].
+List<int> _readTestIndirect(Uint8List bytes) {
+  final lc = macho
+      .parseLoadCommands(bytes)
+      .singleWhere((c) => c.cmd == macho.lcDysymtab);
+  final bd = ByteData.sublistView(lc.bytes);
+  final off = bd.getUint32(56, Endian.little);
+  final count = bd.getUint32(60, Endian.little);
+  final table = ByteData.sublistView(bytes, off, off + count * 4);
+  return [
+    for (var i = 0; i < count; i++) table.getUint32(i * 4, Endian.little),
+  ];
+}
+
 void main() {
   group('sha256', () {
     test('matches FIPS 180-4 test vectors', () {
@@ -906,6 +1178,154 @@ void main() {
       },
     );
 
+    test(
+      'stripSymbols drops locals and stabs, keeping exports and imports',
+      () {
+        final input = _buildUnstrippedDylib();
+        final stripped = macho.patchMachO(
+          input.bytes,
+          macho.PatchOptions(stripSymbols: true),
+        );
+        expect(stripped.length, lessThan(input.bytes.length));
+
+        // Only the two exports and the undefined import survive, defined
+        // first, with no stab entry left.
+        final table = _readTestSymtab(stripped);
+        expect(table.names, [
+          '_kDartSnapshotText',
+          '_kDartSnapshotData',
+          '_printf',
+        ]);
+        expect(table.types, [0x0f, 0x0f, 0x01]);
+        for (final type in table.types) {
+          expect(type & 0xe0, 0);
+        }
+
+        // The dysymtab groups say so too: no locals, two defined
+        // externals, one undefined import.
+        expect(_readTestDysymtabGroups(stripped), [0, 0, 0, 2, 2, 1]);
+
+        // The indirect table remaps the kept export, absolves the dropped
+        // local, and keeps the LOCAL entry.
+        expect(_readTestIndirect(stripped), [
+          0,
+          macho.indirectSymbolAbs,
+          macho.indirectSymbolLocal,
+        ]);
+
+        // No dropped name survives anywhere, and the export trie moves
+        // down byte-identical.
+        final text = latin1.decode(stripped);
+        for (final gone in ['_myLocal', '_otherLocal', 'MyApp']) {
+          expect(text, isNot(contains(gone)));
+        }
+        Uint8List trieOf(Uint8List bytes) {
+          final lc = macho
+              .parseLoadCommands(bytes)
+              .singleWhere((c) => c.cmd == macho.lcDyldExportsTrie);
+          final bd = ByteData.sublistView(lc.bytes);
+          final off = bd.getUint32(8, Endian.little);
+          final size = bd.getUint32(12, Endian.little);
+          return bytes.sublist(off, off + size);
+        }
+
+        expect(trieOf(stripped), trieOf(input.bytes));
+
+        // The hermetic llvm tools agree: only the two exports and the
+        // import remain, with no debugger entries.
+        final nm = _resolveHermeticTool('LLVM_NM');
+        final objdump = _resolveHermeticTool('LLVM_OBJDUMP');
+        if (Platform.environment.containsKey('TEST_SRCDIR')) {
+          expect(nm, isNotNull, reason: 'LLVM_NM must resolve in Bazel');
+          expect(
+            objdump,
+            isNotNull,
+            reason: 'LLVM_OBJDUMP must resolve in Bazel',
+          );
+        }
+        if (nm == null || objdump == null) return;
+
+        final stripDir = Directory.systemTemp.createTempSync(
+          'macho_strip_test_',
+        );
+        addTearDown(() => stripDir.deleteSync(recursive: true));
+        final strippedPath = '${stripDir.path}/stripped.dylib';
+        File(strippedPath).writeAsBytesSync(stripped);
+
+        final nmRes = Process.runSync(nm, [strippedPath]);
+        expect(nmRes.exitCode, 0, reason: '${nmRes.stderr}');
+        final nmOut = nmRes.stdout as String;
+        expect(nmOut, contains('T _kDartSnapshotText'));
+        expect(nmOut, contains('T _kDartSnapshotData'));
+        expect(nmOut, contains('_printf'));
+        for (final gone in ['myLocal', 'otherLocal', 'MyApp']) {
+          expect(nmOut, isNot(contains(gone)));
+        }
+
+        final nmDebugRes = Process.runSync(nm, [
+          '--debug-syms',
+          strippedPath,
+        ]);
+        expect(nmDebugRes.exitCode, 0, reason: '${nmDebugRes.stderr}');
+        final nmDebugOut = nmDebugRes.stdout as String;
+        expect(nmDebugOut, isNot(contains('FUN')));
+        expect(nmDebugOut, isNot(contains('MyApp')));
+
+        final symsRes = Process.runSync(objdump, [
+          '--macho',
+          '--syms',
+          strippedPath,
+        ]);
+        expect(symsRes.exitCode, 0, reason: '${symsRes.stderr}');
+        final symLines = [
+          for (final line in (symsRes.stdout as String).split('\n'))
+            if (RegExp(r'^[0-9a-f]{16} ').hasMatch(line)) line,
+        ];
+        expect(symLines.length, 3);
+        expect(symsRes.stdout as String, contains('_kDartSnapshotText'));
+        expect(symsRes.stdout as String, contains('_kDartSnapshotData'));
+
+        final trieRes = Process.runSync(objdump, [
+          '--macho',
+          '--exports-trie',
+          strippedPath,
+        ]);
+        expect(trieRes.exitCode, 0, reason: '${trieRes.stderr}');
+        final trieOut = trieRes.stdout as String;
+        expect(trieOut, contains('_kDartSnapshotText'));
+        expect(trieOut, contains('_kDartSnapshotData'));
+      },
+    );
+
+    test('a patch without stripping leaves the symbol table as it was', () {
+      final input = _buildUnstrippedDylib();
+      final patched = macho.patchMachO(
+        input.bytes,
+        macho.PatchOptions(
+          platform: macho.platformIos,
+          minOs: macho.parsePackedVersion('13.0'),
+        ),
+      );
+
+      // Same entries, same groups, same indirect entries.
+      final before = _readTestSymtab(input.bytes);
+      final after = _readTestSymtab(patched);
+      expect(after.names, before.names);
+      expect(after.types, before.types);
+      expect(
+        _readTestDysymtabGroups(patched),
+        _readTestDysymtabGroups(input.bytes),
+      );
+      expect(_readTestIndirect(patched), _readTestIndirect(input.bytes));
+
+      // The table payload bytes survive untouched.
+      final end = input.stroff + input.strsize;
+      expect(
+        patched.sublist(input.symoff, end),
+        input.bytes.sublist(input.symoff, end),
+      );
+    });
+
     test('patches a fat64 binary and keeps the fat64 header', () {
       final arm = macho.generateStubMachO(
         arch: 'arm64',
@@ -1074,6 +1494,30 @@ void main() {
       final bvBd = ByteData.sublistView(bvCmd.bytes);
       expect(bvBd.getUint32(12, Endian.little), 0x000f0000);
       expect(bvBd.getUint32(16, Endian.little), 0x00100200);
+    });
+
+    test('patch --strip-symbols drops local symbols from the CLI', () {
+      final inPath = '${tempDir.path}/strip_in.dylib';
+      final outPath = '${tempDir.path}/strip_out.dylib';
+      File(inPath).writeAsBytesSync(_buildUnstrippedDylib().bytes);
+
+      macho.main([
+        'patch',
+        '--input',
+        inPath,
+        '--output',
+        outPath,
+        '--strip-symbols',
+      ]);
+
+      final stripped = File(outPath).readAsBytesSync();
+      final table = _readTestSymtab(stripped);
+      expect(table.names, [
+        '_kDartSnapshotText',
+        '_kDartSnapshotData',
+        '_printf',
+      ]);
+      expect(_readTestDysymtabGroups(stripped), [0, 0, 0, 2, 2, 1]);
     });
 
     test('patch fails loudly on non-Mach-O and 32-bit Mach-O unless named in --allow-non-macho', () {
