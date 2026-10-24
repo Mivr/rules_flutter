@@ -4,9 +4,12 @@
 /// `xcrun` there, and the contract says that is simply one of its failures),
 /// so everything here runs through an injected [CommandSpawner]: the
 /// selection rules over synthetic listings, and every failure path over canned
-/// child results. Driven through [bootSimulator] and [selectSimulator] rather
-/// than a subprocess, so these cases also pin the exact `xcrun` argument
-/// lists the script issues.
+/// child results. Driven through [bootSimulator] rather than a subprocess, so
+/// these cases also pin the exact `xcrun` argument lists the script issues.
+/// The fake answers a `simctl list` call the way `simctl` does: the `devices`
+/// section always, the `runtimes` section only when the argv asks for it — so
+/// a script that stopped asking for runtimes would pick an unavailable newest
+/// runtime and fail its run as an unexpected child.
 library;
 
 import 'dart:async';
@@ -35,15 +38,41 @@ class CannedResult {
 
 /// A [CommandSpawner] stub keyed by the joined argument list. Records every
 /// start and every kill, and throws [ProcessException] for `xcrun` when told
-/// there is no `xcrun` — the shape the real spawner surfaces.
+/// there is no `xcrun` — the shape the real spawner surfaces. A `simctl list`
+/// call with no exact stub is answered from [listDevices]/[listRuntimes] the
+/// way `simctl` answers: `devices` always, `runtimes` only when asked for.
 class FakeSpawner implements CommandSpawner {
   final Map<String, CannedResult> results;
   final bool hasXcrun;
+  final Map<String, List<Map<String, dynamic>>>? listDevices;
+  final List<Map<String, dynamic>> listRuntimes;
 
   final started = <String>[];
   final killed = <String>[];
 
-  FakeSpawner(this.results, {this.hasXcrun = true});
+  FakeSpawner(
+    this.results, {
+    this.hasXcrun = true,
+    this.listDevices,
+    this.listRuntimes = const [],
+  });
+
+  /// The `simctl list` answer for [args], or null when this call is not a
+  /// `devices` listing (or no sections were given).
+  CannedResult? _listResponse(List<String> args) {
+    final devices = listDevices;
+    if (devices == null) return null;
+    if (args.length < 3 || args[0] != 'simctl' || args[1] != 'list') {
+      return null;
+    }
+    if (!args.contains('devices')) return null;
+    return CannedResult(
+      stdoutText: json.encode({
+        'devices': devices,
+        if (args.contains('runtimes')) 'runtimes': listRuntimes,
+      }),
+    );
+  }
 
   @override
   Future<SpawnedCommand> start(String executable, List<String> args) async {
@@ -52,7 +81,7 @@ class FakeSpawner implements CommandSpawner {
     if (!hasXcrun) {
       throw ProcessException(executable, args, 'No such file or directory', 2);
     }
-    final canned = results[key];
+    final canned = results[key] ?? _listResponse(args);
     if (canned == null) fail('unexpected child: $key');
     Future<int> exitCode;
     if (canned.hang) {
@@ -84,17 +113,7 @@ Map<String, dynamic> device(
   'isAvailable': available,
 };
 
-/// A listing with the given runtime keys (each `runtime key → devices`), plus
-/// an optional `runtimes` array for runtime-level availability.
-Map<String, dynamic> listing(
-  Map<String, List<Map<String, dynamic>>> devices, {
-  List<Map<String, dynamic>> runtimes = const [],
-}) => {
-  'devices': devices,
-  if (runtimes.isNotEmpty) 'runtimes': runtimes,
-};
-
-String listKey() => 'xcrun simctl list devices -j';
+String listKey() => 'xcrun simctl list devices runtimes -j';
 
 /// Boots through [FakeSpawner] with a short `bootstatus` deadline, capturing
 /// the progress lines. Returns the progress plus the reported udid.
@@ -114,65 +133,80 @@ Future<({List<String> log, String udid})> bootWith(
   return (log: log, udid: udid);
 }
 
-/// The [FakeSpawner] whose `list` call serves [devices].
+/// The [FakeSpawner] whose `list` call serves [devices] (and [runtimes] when
+/// asked for, the way `simctl` does), plus any extra canned children.
 FakeSpawner listingSpawner(
   Map<String, List<Map<String, dynamic>>> devices, {
   List<Map<String, dynamic>> runtimes = const [],
   Map<String, CannedResult> extra = const {},
-}) => FakeSpawner({
-  listKey(): CannedResult(
-    stdoutText: json.encode(listing(devices, runtimes: runtimes)),
-  ),
-  ...extra,
-});
+}) => FakeSpawner(
+  extra,
+  listDevices: devices,
+  listRuntimes: runtimes,
+);
+
+/// `boot` + `bootstatus` stubs for the device the run is expected to pick: a
+/// wrong pick hits no stub and fails the test as an unexpected child.
+Map<String, CannedResult> bootStubs(String udid, {bool skipBoot = false}) => {
+  if (!skipBoot) 'xcrun simctl boot $udid': const CannedResult(),
+  'xcrun simctl bootstatus $udid -b': const CannedResult(),
+};
 
 void main() {
   const ios265 = 'com.apple.CoreSimulator.SimRuntime.iOS-26-5';
   const ios2610 = 'com.apple.CoreSimulator.SimRuntime.iOS-26-10';
 
-  group('selectSimulator', () {
-    test('takes the newest available iOS runtime, numerically', () {
-      final choice = selectSimulator(
-        listing({
-          'com.apple.CoreSimulator.SimRuntime.iOS-17-2': [
-            device('iPhone 15', 'old'),
-          ],
-          ios265: [
-            device('iPhone 17', 'mid'),
-          ],
-          ios2610: [
-            device('iPhone 17 Pro', 'new'),
-          ],
-        }),
-      );
+  group('simulator selection (whole path)', () {
+    test('the list call asks simctl for devices and runtimes', () async {
+      final spawner = listingSpawner({
+        ios265: [
+          device('iPhone 17', 'udid-0'),
+        ],
+      }, extra: bootStubs('udid-0'));
+      await bootWith(spawner);
+      expect(spawner.started.first, listKey());
+    });
+
+    test('takes the newest available iOS runtime, numerically', () async {
+      final spawner = listingSpawner({
+        'com.apple.CoreSimulator.SimRuntime.iOS-17-2': [
+          device('iPhone 15', 'old'),
+        ],
+        ios265: [
+          device('iPhone 17', 'mid'),
+        ],
+        ios2610: [
+          device('iPhone 17 Pro', 'new'),
+        ],
+      }, extra: bootStubs('new'));
+      final outcome = await bootWith(spawner);
       // 26.10 is newer than 26.5: a string compare would order them wrong.
-      expect(choice.device.udid, 'new');
-      expect(choice.runtime.label, 'iOS 26.10');
+      expect(outcome.udid, 'new');
     });
 
-    test('ignores watchOS, tvOS and visionOS runtimes, however new', () {
-      final choice = selectSimulator(
-        listing({
-          ios265: [
-            device('iPhone 17', 'phone'),
-          ],
-          'com.apple.CoreSimulator.SimRuntime.watchOS-26-5': [
-            device('Apple Watch SE', 'watch'),
-          ],
-          'com.apple.CoreSimulator.SimRuntime.tvOS-99-0': [
-            device('Apple TV', 'tv'),
-          ],
-          'com.apple.CoreSimulator.SimRuntime.visionOS-99-0': [
-            device('Apple Vision Pro', 'vision'),
-          ],
-        }),
-      );
-      expect(choice.device.udid, 'phone');
+    test('ignores watchOS, tvOS and visionOS runtimes, however new', () async {
+      final spawner = listingSpawner({
+        ios265: [
+          device('iPhone 17', 'phone'),
+        ],
+        'com.apple.CoreSimulator.SimRuntime.watchOS-26-5': [
+          device('Apple Watch SE', 'watch'),
+        ],
+        'com.apple.CoreSimulator.SimRuntime.tvOS-99-0': [
+          device('Apple TV', 'tv'),
+        ],
+        'com.apple.CoreSimulator.SimRuntime.visionOS-99-0': [
+          device('Apple Vision Pro', 'vision'),
+        ],
+      }, extra: bootStubs('phone'));
+      final outcome = await bootWith(spawner);
+      expect(outcome.udid, 'phone');
     });
 
-    test('skips a runtime the runtimes array marks unavailable', () {
-      final choice = selectSimulator(
-        listing(
+    test(
+      'skips a newest runtime the runtimes array marks unavailable',
+      () async {
+        final spawner = listingSpawner(
           {
             ios265: [
               device('iPhone 17', 'mid'),
@@ -185,54 +219,91 @@ void main() {
             {'identifier': ios2610, 'isAvailable': false},
             {'identifier': ios265, 'isAvailable': true},
           ],
+          // Stubs only for the fallback: picking the unavailable newest fails
+          // the run as an unexpected child.
+          extra: bootStubs('mid'),
+        );
+        final outcome = await bootWith(spawner);
+        expect(outcome.udid, 'mid');
+        expect(
+          spawner.startedCall('xcrun simctl boot new'),
+          isFalse,
+          reason: 'the unavailable newest runtime must never be booted',
+        );
+      },
+    );
+
+    test('fails when every iOS runtime is unavailable', () async {
+      final spawner = listingSpawner(
+        {
+          ios265: [
+            device('iPhone 17', 'mid'),
+          ],
+          ios2610: [
+            device('iPhone 17 Pro', 'new'),
+          ],
+        },
+        runtimes: [
+          {'identifier': ios2610, 'isAvailable': false},
+          {'identifier': ios265, 'isAvailable': false},
+        ],
+      );
+      await expectLater(
+        bootWith(spawner),
+        throwsA(
+          isA<BootFailure>().having(
+            (e) => e.reason,
+            'reason',
+            contains('no available iOS runtime'),
+          ),
         ),
       );
-      expect(choice.device.udid, 'mid');
-    });
-
-    test('prefers an already-booted iPhone wherever it is listed', () {
-      final choice = selectSimulator(
-        listing({
-          ios265: [
-            device('iPhone 17', 'first'),
-            device('iPhone 17 Pro', 'second', state: 'Booted'),
-          ],
-        }),
-      );
-      expect(choice.device.udid, 'second');
-      expect(choice.wasBooted, isTrue);
-    });
-
-    test('otherwise takes the first shutdown iPhone in listed order', () {
-      final choice = selectSimulator(
-        listing({
-          ios265: [
-            device('iPad mini', 'pad', state: 'Booted'),
-            device('iPhone 17', 'first'),
-            device('iPhone 17 Pro', 'second'),
-          ],
-        }),
-      );
-      // The booted iPad is not an iPhone; the first shutdown iPhone wins.
-      expect(choice.device.udid, 'first');
-      expect(choice.wasBooted, isFalse);
-    });
-
-    test('ignores unavailable devices', () {
-      final choice = selectSimulator(
-        listing({
-          ios265: [
-            device('iPhone 17', 'gone', available: false),
-            device('iPhone 17 Pro', 'here'),
-          ],
-        }),
-      );
-      expect(choice.device.udid, 'here');
-    });
-
-    test('fails when the listing names no available iOS runtime', () {
       expect(
-        () => selectSimulator(listing(const {})),
+        spawner.started.where((s) => s.contains('simctl boot ')),
+        isEmpty,
+        reason: 'no runtime means nothing may be booted',
+      );
+    });
+
+    test('prefers an already-booted iPhone wherever it is listed', () async {
+      final spawner = listingSpawner({
+        ios265: [
+          device('iPhone 17', 'first'),
+          device('iPhone 17 Pro', 'second', state: 'Booted'),
+        ],
+      }, extra: bootStubs('second', skipBoot: true));
+      final outcome = await bootWith(spawner);
+      expect(outcome.udid, 'second');
+    });
+
+    test('otherwise takes the first shutdown iPhone in listed order', () async {
+      final spawner = listingSpawner({
+        ios265: [
+          device('iPad mini', 'pad', state: 'Booted'),
+          device('iPhone 17', 'first'),
+          device('iPhone 17 Pro', 'second'),
+        ],
+      }, extra: bootStubs('first'));
+      // The booted iPad is not an iPhone; the first shutdown iPhone wins.
+      final outcome = await bootWith(spawner);
+      expect(outcome.udid, 'first');
+    });
+
+    test('ignores unavailable devices', () async {
+      final spawner = listingSpawner({
+        ios265: [
+          device('iPhone 17', 'gone', available: false),
+          device('iPhone 17 Pro', 'here'),
+        ],
+      }, extra: bootStubs('here'));
+      final outcome = await bootWith(spawner);
+      expect(outcome.udid, 'here');
+    });
+
+    test('fails when the listing names no available iOS runtime', () async {
+      final spawner = listingSpawner(const {});
+      await expectLater(
+        bootWith(spawner),
         throwsA(
           isA<BootFailure>().having(
             (e) => e.reason,
@@ -243,16 +314,15 @@ void main() {
       );
     });
 
-    test('fails without creating a device when no iPhone qualifies', () {
-      expect(
-        () => selectSimulator(
-          listing({
-            ios265: [
-              device('iPad Pro', 'pad'),
-              device('iPhone 17', 'gone', available: false),
-            ],
-          }),
-        ),
+    test('fails without creating a device when no iPhone qualifies', () async {
+      final spawner = listingSpawner({
+        ios265: [
+          device('iPad Pro', 'pad'),
+          device('iPhone 17', 'gone', available: false),
+        ],
+      });
+      await expectLater(
+        bootWith(spawner),
         throwsA(
           isA<BootFailure>().having(
             (e) => e.reason,
