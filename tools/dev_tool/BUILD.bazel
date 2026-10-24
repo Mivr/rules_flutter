@@ -263,6 +263,18 @@ dart_test(
     deps = _TEST_DEPS,
 )
 
+# Same shape as `e2e_runner_test`: `tool/boot_ios_simulator.dart` is the
+# script that boots one iOS simulator ahead of the dev tool's simulator e2e
+# cases, and carrying it in `srcs` puts its selection rules and failure paths
+# under `bazel test //...` on every host (there is no `xcrun` off macOS, so
+# the tests inject the process spawner rather than booting anything).
+dart_test(
+    name = "boot_ios_simulator_test",
+    srcs = ["tool/boot_ios_simulator.dart"],
+    main = "test/boot_ios_simulator_test.dart",
+    deps = _TEST_DEPS,
+)
+
 # The Dart in this package that belongs to no package's `lib/` and to no test
 # target: every file under `test/e2e/`, and every script under `tool/` that is
 # not already carried by a test's `srcs`. Nothing analyzed any of it. Closing
