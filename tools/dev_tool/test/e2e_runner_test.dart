@@ -7,6 +7,9 @@
 /// lines rather than by setting fields, so these cases also pin the reporter
 /// contract the class documents: `skipped` wins over `result`, a skipped test
 /// reports `result: "success"`, and `hidden` entries are not tests.
+///
+/// `--require-ran` extends the same verdict: a run that passed without running
+/// the named tests is refused, with the diagnosis naming the unmet substring.
 library;
 
 import 'dart:convert';
@@ -24,8 +27,9 @@ Outcome runOf(
   Map<String, String> tests, {
   bool? verdict = true,
   int exitCode = 0,
+  Iterable<String> requireRan = const [],
 }) {
-  final outcome = Outcome();
+  final outcome = Outcome(requireRan: requireRan);
   var id = 0;
   tests.forEach((name, result) {
     id++;
@@ -366,6 +370,189 @@ void main() {
       );
       expect(outcome.skipReport, isEmpty);
       expect(outcome.passed, ['macOS renders']);
+    });
+  });
+
+  /// `--require-ran`: a passing run still fails unless the named tests ran.
+  group('Outcome.requireRan', () {
+    test('a run that ran the required tests still passes', () {
+      final outcome = runOf(
+        {
+          'iOS Simulator e2e renders': 'pass',
+          'macOS e2e renders': 'pass',
+        },
+        requireRan: ['iOS'],
+      );
+
+      expect(outcome.ok, isTrue);
+      expect(outcome.diagnosis, isNull);
+    });
+
+    test('several substrings must each be met', () {
+      final passing = runOf(
+        {
+          'iOS Simulator e2e renders': 'pass',
+          'asset reload on iOS': 'pass',
+        },
+        requireRan: ['iOS', 'asset'],
+      );
+      expect(passing.ok, isTrue);
+
+      final missing = runOf(
+        {
+          'iOS Simulator e2e renders': 'pass',
+          'macOS e2e renders': 'pass',
+        },
+        requireRan: ['iOS', 'asset'],
+      );
+      expect(missing.ok, isFalse);
+      expect(missing.diagnosis, contains('--require-ran=asset'));
+      expect(missing.diagnosis, isNot(contains('--require-ran=iOS')));
+    });
+
+    test('an unmatched substring names itself and says nothing matched', () {
+      final outcome = runOf(
+        {
+          'macOS e2e renders': 'pass',
+        },
+        requireRan: ['iOS'],
+      );
+
+      expect(outcome.ok, isFalse);
+      expect(outcome.diagnosis, contains('--require-ran=iOS'));
+      expect(outcome.diagnosis, contains('no test name contained "iOS"'));
+    });
+
+    test('a skipped match is listed with its skip reason', () {
+      final outcome = Outcome(requireRan: ['iOS']);
+      outcome.consume(
+        json.encode({
+          'type': 'testStart',
+          'test': {
+            'id': 1,
+            'name': 'iOS Simulator e2e renders',
+            'metadata': {'skip': true, 'skipReason': 'no simulator booted'},
+          },
+        }),
+      );
+      outcome.consume(
+        json.encode({
+          'type': 'testDone',
+          'testID': 1,
+          'result': 'success',
+          'skipped': true,
+          'hidden': false,
+        }),
+      );
+      outcome.consume(json.encode({'type': 'done', 'success': true}));
+
+      expect(outcome.ok, isFalse);
+      expect(outcome.diagnosis, contains('--require-ran=iOS'));
+      expect(outcome.diagnosis, contains('iOS Simulator e2e renders'));
+      expect(outcome.diagnosis, contains('no simulator booted'));
+    });
+
+    test('a matching skip poisons a matching pass', () {
+      // The suite ran something with the name in it, but not all of it: one
+      // of the required tests never executed, so the requirement is unmet.
+      final outcome = runOf(
+        {
+          'iOS Simulator e2e renders': 'pass',
+          'iOS Simulator e2e restarts': 'skip',
+        },
+        requireRan: ['iOS'],
+      );
+
+      expect(outcome.ok, isFalse);
+      expect(outcome.diagnosis, contains('--require-ran=iOS'));
+    });
+
+    test('a failed match refuses the run and is still named', () {
+      final outcome = runOf(
+        {
+          'iOS Simulator e2e renders': 'fail',
+        },
+        verdict: false,
+        requireRan: ['iOS'],
+      );
+
+      expect(outcome.ok, isFalse);
+      // The requirement comes first, and it carries the failure with it.
+      expect(outcome.diagnosis, contains('--require-ran=iOS'));
+      expect(outcome.diagnosis, contains('iOS Simulator e2e renders'));
+    });
+
+    test('matching is case-sensitive', () {
+      final outcome = runOf(
+        {
+          'iOS Simulator e2e renders': 'pass',
+        },
+        requireRan: ['ios'],
+      );
+
+      expect(outcome.ok, isFalse);
+      expect(outcome.diagnosis, contains('no test name contained "ios"'));
+    });
+
+    test('diagnosis stays the exact negation of ok with requirements', () {
+      final cases = <Outcome>[
+        runOf({'iOS renders': 'pass'}, requireRan: ['iOS']),
+        runOf({'macOS renders': 'pass'}, requireRan: ['iOS']),
+        runOf({'iOS renders': 'skip'}, requireRan: ['iOS']),
+        runOf({'iOS renders': 'fail'}, verdict: false, requireRan: ['iOS']),
+        runOf(
+          {'iOS renders': 'pass', 'other': 'skip'},
+          requireRan: ['iOS', 'other'],
+        ),
+      ];
+
+      for (final outcome in cases) {
+        expect(
+          (outcome.diagnosis == null),
+          outcome.ok,
+          reason: 'ok=${outcome.ok} but diagnosis=${outcome.diagnosis}',
+        );
+      }
+    });
+  });
+
+  /// The argument split: `--require-ran=` is consumed, everything else passes
+  /// through verbatim and in order.
+  group('splitRunnerArgs', () {
+    test('consumes require-ran and forwards the rest untouched', () {
+      final split = splitRunnerArgs([
+        '--require-ran=iOS',
+        '--plain-name=macOS e2e',
+        'test/e2e/plugin_example_e2e_test.dart',
+        '--require-ran=asset',
+      ]);
+
+      expect(split.requireRan, ['iOS', 'asset']);
+      expect(split.forwarded, [
+        '--plain-name=macOS e2e',
+        'test/e2e/plugin_example_e2e_test.dart',
+      ]);
+    });
+
+    test('no flag means no requirements and identical forwarding', () {
+      final split = splitRunnerArgs(['--tags=e2e', 'test/e2e/']);
+
+      expect(split.requireRan, isEmpty);
+      expect(split.forwarded, ['--tags=e2e', 'test/e2e/']);
+    });
+
+    test('a bare flag or an empty value is a usage error', () {
+      for (final args in const [
+        ['--require-ran'],
+        ['--require-ran='],
+        ['--require-ran', 'test/e2e/'],
+      ]) {
+        expect(
+          () => splitRunnerArgs(args),
+          throwsA(isA<RequireRanUsage>()),
+          reason: '$args',
+        );
+      }
     });
   });
 }

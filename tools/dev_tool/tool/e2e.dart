@@ -8,7 +8,18 @@
 /// ```
 ///
 /// Arguments are forwarded to `dart test`; any positional one replaces the
-/// default `test/e2e/` path.
+/// default `test/e2e/` path. The one exception is `--require-ran=<substring>`
+/// (repeatable, `=` form only): the runner consumes it, and it is never
+/// forwarded to `dart test`.
+///
+/// ## What `--require-ran` guarantees
+///
+/// Each `--require-ran=<substring>` names tests that must have run for the run
+/// to count as a pass: at least one test whose full name contains the
+/// substring (case-sensitive) passed, and no test whose name contains it
+/// skipped or failed. A bare `--require-ran` or an empty value is a usage
+/// error and exits non-zero before anything runs. Without the flag behaviour
+/// is unchanged.
 ///
 /// ## Why this exists rather than a bare `dart test`
 ///
@@ -83,7 +94,55 @@ const _defaultPath = 'test/e2e/';
 /// tagged files and the unit tests already have Bazel targets.
 const _alwaysArgs = ['--tags=e2e', '--concurrency=1'];
 
+/// The usage line printed when `--require-ran` is misused.
+const _requireRanUsage =
+    'usage: e2e.dart [--require-ran=<substring>]... [<dart test args>]';
+
+/// A misused `--require-ran`: bare, empty, or any other non-`=` shape.
+class RequireRanUsage implements Exception {
+  /// The usage text the runner prints for this misuse.
+  final String usage;
+
+  const RequireRanUsage([this.usage = _requireRanUsage]);
+
+  @override
+  String toString() => usage;
+}
+
+/// The runner's own arguments, split from the ones `dart test` gets.
+///
+/// Every `--require-ran=<substring>` is consumed here (repeatable; the `=`
+/// form only) and the rest is forwarded to `dart test` verbatim and in order.
+({List<String> forwarded, List<String> requireRan}) splitRunnerArgs(
+  List<String> args,
+) {
+  final forwarded = <String>[];
+  final requireRan = <String>[];
+  for (final arg in args) {
+    if (arg.startsWith('--require-ran')) {
+      const prefix = '--require-ran=';
+      if (!arg.startsWith(prefix) || arg.substring(prefix.length).isEmpty) {
+        throw const RequireRanUsage();
+      }
+      requireRan.add(arg.substring(prefix.length));
+    } else {
+      forwarded.add(arg);
+    }
+  }
+  return (forwarded: forwarded, requireRan: requireRan);
+}
+
 Future<void> main(List<String> args) async {
+  final List<String> forwarded;
+  final List<String> requireRan;
+  try {
+    final split = splitRunnerArgs(args);
+    forwarded = split.forwarded;
+    requireRan = split.requireRan;
+  } on RequireRanUsage catch (e) {
+    stderr.writeln(e.usage);
+    exit(2);
+  }
   final packageDir = _packageDir();
   // Forwarded verbatim and in order — splitting flags from positionals would
   // tear `--plain-name occluded` in half, since the value carries no leading
@@ -93,9 +152,9 @@ Future<void> main(List<String> args) async {
   // `--tags=e2e` still selects these files and nothing else.
   final testArgs = [
     'test',
-    if (!args.any((a) => !a.startsWith('-'))) _defaultPath,
+    if (!forwarded.any((a) => !a.startsWith('-'))) _defaultPath,
     ..._alwaysArgs,
-    ...args,
+    ...forwarded,
   ];
 
   // `Platform.version` is `<semver> (<channel>) (<date>) on "<os>"`; the
@@ -104,7 +163,7 @@ Future<void> main(List<String> args) async {
   stderr.writeln('e2e: ${Platform.resolvedExecutable} ($runner)');
   stderr.writeln('e2e: ${packageDir.path}\$ dart ${testArgs.join(' ')}');
 
-  final outcome = await _runSuite(packageDir, testArgs);
+  final outcome = await _runSuite(packageDir, testArgs, requireRan);
   outcome.report();
   exit(outcome.ok ? 0 : 1);
 }
@@ -123,7 +182,11 @@ Directory _packageDir() {
   return dir;
 }
 
-Future<Outcome> _runSuite(Directory packageDir, List<String> testArgs) async {
+Future<Outcome> _runSuite(
+  Directory packageDir,
+  List<String> testArgs,
+  List<String> requireRan,
+) async {
   final process = await Process.start(
     Platform.resolvedExecutable,
     [...testArgs, '--reporter', 'json'],
@@ -134,7 +197,7 @@ Future<Outcome> _runSuite(Directory packageDir, List<String> testArgs) async {
   // place that says why. Relayed line by line rather than with `addStream`,
   // which would bind `stderr` and make this runner's own writes throw
   // `StreamSink is bound to a stream` the moment a test reported anything.
-  final outcome = Outcome();
+  final outcome = Outcome(requireRan: requireRan);
   await Future.wait([
     process.stderr
         .transform(utf8.decoder)
@@ -160,6 +223,14 @@ Future<Outcome> _runSuite(Directory packageDir, List<String> testArgs) async {
 /// `success: true` for both of the run-nothing cases, which is exactly why the
 /// counts below, and not `done`, decide the verdict.
 class Outcome {
+  /// Substrings that must have run for this run to count: for each one, some
+  /// test whose full name contains it passed, and none containing it skipped
+  /// or failed. From `--require-ran=`; empty means no requirement.
+  final List<String> requireRan;
+
+  Outcome({Iterable<String> requireRan = const []})
+    : requireRan = List<String>.unmodifiable(requireRan);
+
   final _names = <int, String>{};
   final _errors = <String, List<String>>{};
 
@@ -271,12 +342,31 @@ class Outcome {
   int get executed => passed.length + failed.length;
 
   /// A run counts only when the runner reached its own verdict, nothing failed,
-  /// and at least one test passed.
+  /// at least one test passed, and every `--require-ran` substring is met.
   ///
   /// That last clause matters: `dart test` exits 0 when every
   /// selected test skipped, so "no failures" alone cannot tell a pass from a
   /// suite that never ran.
-  bool get ok => runnerVerdict == true && failed.isEmpty && passed.isNotEmpty;
+  bool get ok =>
+      runnerVerdict == true &&
+      failed.isEmpty &&
+      passed.isNotEmpty &&
+      _unmetRequirements.isEmpty;
+
+  /// The `--require-ran` substrings no passing run satisfied: each names tests
+  /// that either never matched, or matched only in skips and failures.
+  List<String> get _unmetRequirements => [
+    for (final required in requireRan)
+      if (!_requirementMet(required)) required,
+  ];
+
+  /// One substring is met when some test containing it passed and none
+  /// containing it skipped or failed. A matching skip poisons the requirement
+  /// even beside a matching pass: the suite did not run what was asked.
+  bool _requirementMet(String required) =>
+      passed.any((name) => name.contains(required)) &&
+      !skipped.any((name) => name.contains(required)) &&
+      !failed.any((name) => name.contains(required));
 
   /// Each name followed by whatever it reported, indented under it.
   String _indented(Iterable<String> names) => names
@@ -314,6 +404,14 @@ class Outcome {
           '$executed test(s) that did run are a prefix of an unknown '
           'whole, and none of this is a pass.';
     }
+    // Before the run-nothing branches: an unmet `--require-ran` names its
+    // substring whatever else happened, so a requirement is never silently
+    // absorbed into "nothing ran" or "all skipped".
+    final unmet = _unmetRequirements;
+    if (unmet.isNotEmpty) {
+      return 'required tests did not run as asked:\n'
+          '${unmet.map(_requirementDiagnosis).join('\n')}';
+    }
     if (executed == 0 && skipped.isEmpty) {
       return 'nothing was selected to run (dart test exited '
           '$runnerExitCode). Check the paths, --tags and -n you passed.';
@@ -335,6 +433,40 @@ class Outcome {
           'a test\'s own lifetime:\n${_indented(_errors.keys)}';
     }
     return '${failed.length} test(s) failed:\n${_indented(failed)}';
+  }
+
+  /// Why one `--require-ran` substring is unmet: the matching tests that
+  /// skipped (with their reasons) and failed (with what they said), or that
+  /// nothing matched at all.
+  String _requirementDiagnosis(String required) {
+    final matchingSkipped = [
+      for (final name in skipped)
+        if (name.contains(required)) name,
+    ];
+    final matchingFailed = [
+      for (final name in failed)
+        if (name.contains(required)) name,
+    ];
+    if (matchingSkipped.isEmpty && matchingFailed.isEmpty) {
+      return '  --require-ran=$required was not met: '
+          'no test name contained "$required".';
+    }
+    final lines = <String>[
+      '  --require-ran=$required was not met: '
+          'no test containing "$required" passed '
+          'without a skip or failure.',
+    ];
+    if (matchingFailed.isNotEmpty) {
+      lines.add(
+        '  ${matchingFailed.length} matching test(s) failed:\n'
+        '${_indented(matchingFailed)}',
+      );
+    }
+    for (final name in matchingSkipped) {
+      final why = _skipReasonByName[name];
+      lines.add('  skipped — $name${why == null ? '' : ' — $why'}');
+    }
+    return lines.join('\n');
   }
 
   /// One line per skipped test, each carrying why it skipped.
