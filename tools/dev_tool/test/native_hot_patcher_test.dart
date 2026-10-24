@@ -158,10 +158,14 @@ void main() {
     ),
   );
 
-  /// An edit a stat can see: a different size.
-  void editSource() => File(
-    '$workspace/native/mul.c',
-  ).writeAsStringSync('int mul() { return ${DateTime.now().microsecond}2; }');
+  /// An edit a stat can see: a different size, whatever the clock. Each edit
+  /// grows the file, so the stamp moves even when two writes land in one
+  /// mtime tick and without sleeping for the clock.
+  void editSource() {
+    final file = File('$workspace/native/mul.c');
+    final grownBy = file.lengthSync() + 1;
+    file.writeAsStringSync('int mul() { return 2; } // ${'x' * grownBy}');
+  }
 
   group('arming', () {
     test('an app with no patch builder has no patcher', () async {
