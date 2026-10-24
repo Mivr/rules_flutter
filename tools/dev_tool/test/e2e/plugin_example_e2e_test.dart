@@ -36,11 +36,19 @@ const _pngHeader = <int>[0x89, 0x50, 0x4E, 0x47];
 /// bundle target (`:plugin_macos`, `:plugin_ios`, `:plugin_android`),
 /// not the underlying `:plugin_app` flutter_application — the dev_tool
 /// resolves the first build output and expects a runnable artifact.
+///
+/// [buildTimeout] bounds the dev tool's own build of the workspace copy
+/// (`app.start` fires once it is done and the launch begins) and
+/// [launchTimeout] bounds the launch itself (`app.started`). The defaults
+/// fit warm runs; the iOS cases pass cold-CI bounds, where the build alone
+/// takes many minutes.
 Future<void> _runScreenshotTest({
   required String workspace,
   required String target,
   required String device,
   required String outputBasename,
+  Duration buildTimeout = const Duration(seconds: 120),
+  Duration launchTimeout = const Duration(seconds: 120),
 }) async {
   final dt = await startDevTool(
     workspace: workspace,
@@ -48,7 +56,8 @@ Future<void> _runScreenshotTest({
     device: device,
   );
 
-  await dt.waitForEvent('app.started');
+  await dt.waitForEvent('app.start', timeout: buildTimeout);
+  await dt.waitForEvent('app.started', timeout: launchTimeout);
   final http = await dt.waitForHttpControl();
   expect(http, isNotNull);
 
@@ -422,8 +431,10 @@ void main() {
           target: ':plugin_ios',
           device: 'ios-simulator',
           outputBasename: 'plugin_ios_sim_e2e',
+          buildTimeout: const Duration(minutes: 20),
+          launchTimeout: const Duration(minutes: 10),
         );
-      });
+      }, timeout: const Timeout(Duration(minutes: 35)));
 
       test(
         'hot restart re-registers the iOS plugin set, not the host\'s',
@@ -452,7 +463,17 @@ void main() {
             target: ':plugin_ios',
             device: 'ios-simulator',
           );
-          await dt.waitForEvent('app.started');
+          // The build and the launch wait separately, as in the screenshot
+          // case above: cold, the second launch of this app still needed
+          // over 100 s between `app.start` and `app.started`.
+          await dt.waitForEvent(
+            'app.start',
+            timeout: const Duration(minutes: 20),
+          );
+          await dt.waitForEvent(
+            'app.started',
+            timeout: const Duration(minutes: 10),
+          );
           await dt.waitForHttpControl();
           final appId = dt.appId!;
 
@@ -516,7 +537,7 @@ void main() {
                 'registrant, not the host platform\'s',
           );
         },
-        timeout: const Timeout(Duration(minutes: 8)),
+        timeout: const Timeout(Duration(minutes: 35)),
       );
 
       test(
@@ -532,8 +553,12 @@ void main() {
             device: 'ios-simulator',
           );
           await dt.waitForEvent(
+            'app.start',
+            timeout: const Duration(minutes: 20),
+          );
+          await dt.waitForEvent(
             'app.started',
-            timeout: const Duration(minutes: 6),
+            timeout: const Duration(minutes: 10),
           );
 
           final line = await dt.waitForAppLog(
@@ -587,7 +612,8 @@ void main() {
 
           await dt.sendCommand(1, 'daemon.shutdown');
         },
-        timeout: const Timeout(Duration(minutes: 10)),
+        // Above the waits' sum (20 build + 10 launch + 4 app-log).
+        timeout: const Timeout(Duration(minutes: 40)),
       );
     },
     skip: !Platform.isMacOS ? 'macOS only (needs Xcode Simulator)' : null,

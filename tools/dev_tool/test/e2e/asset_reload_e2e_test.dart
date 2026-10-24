@@ -267,9 +267,18 @@ void main() {
           target: ':app',
           device: 'ios-simulator',
         );
+        // The build and the launch wait separately: on a cold CI runner the
+        // workspace copy's own Bazel build takes many minutes before the
+        // launch can begin (`app.start`), and the simulator install plus
+        // first launch takes minutes more (`app.started`). Measured cold,
+        // the build was still emitting actions past the old 300 s bound.
         final start = await dt.waitForEvent(
           'app.start',
-          timeout: const Duration(seconds: 300),
+          timeout: const Duration(minutes: 20),
+        );
+        await dt.waitForEvent(
+          'app.started',
+          timeout: const Duration(minutes: 10),
         );
         final appId = start['params']?['appId'] as String? ?? dt.appId!;
         await dt.waitForHttpControl(timeout: const Duration(seconds: 60));
@@ -325,7 +334,7 @@ void main() {
           reason: 'the simulator app must be showing the edited asset',
         );
       },
-      timeout: const Timeout(Duration(minutes: 8)),
+      timeout: const Timeout(Duration(minutes: 35)),
       skip: !Platform.isMacOS ? 'macOS only (needs Xcode Simulator)' : null,
     );
   });
