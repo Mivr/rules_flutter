@@ -125,7 +125,7 @@ _application_obfuscate_strips_test = analysistest.make(
     config_settings = _FASTBUILD,
 )
 
-def _missing_aot_strip_app_impl(ctx):
+def _missing_aot_strip_app_impl(_ctx):
     """Application fixture omitting `aot_strip`, which the provider requires."""
     return [FlutterApplicationInfo(
         aot_output = None,
