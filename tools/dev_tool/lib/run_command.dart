@@ -258,6 +258,21 @@ class RunCommand {
           'what serves the VM service there — the run then falls back to '
           'serving the last build statically.',
     )
+    ..addOption(
+      'vm-service-timeout',
+      defaultsTo: '180',
+      help:
+          'How long to wait for the app to announce its VM service before '
+          'giving up, in seconds. While the app is still running the run '
+          'keeps waiting up to this bound and reports that it is still '
+          'waiting every 10 seconds; when the bound expires on a living app '
+          'the run gives up and reports the bound, this option, and the '
+          'last log lines — aborting, unless --allow-no-vm-service '
+          'continues without a VM service. Applies where the run reads the '
+          'announcement from a log (desktop, simulator, Android); a '
+          'physical iOS device discovers over mDNS on its own budget, so '
+          'this option does not apply there. Defaults to 180 seconds.',
+    )
     ..addFlag(
       'help',
       abbr: 'h',

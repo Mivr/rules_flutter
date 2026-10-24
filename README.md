@@ -1700,6 +1700,7 @@ bazel run @rules_flutter//tools/dev_tool:flutter_bazel -- run -t //:my_app_macos
 | `--no-hot` | Run without hot reload. |
 | `--profile` | Profile mode: AOT with the Dart VM service, for DevTools. Builds `-c opt --@rules_flutter//flutter:profile`. Not on the iOS simulator. |
 | `--start-paused` | Hold the app at the start of `main()` until a debugger resumes it. |
+| `--vm-service-timeout` | How long to wait for the app's VM-service announcement, in seconds. Defaults to 180. Applies where the run reads the announcement from a log; a physical iOS device discovers over mDNS on its own budget instead. See below. |
 | `--route` | The initial route. |
 | `--no-watch` | Do not reload on save. Watching is on in terminal mode and off in `--machine` mode. |
 | `--no-devtools` | Do not launch DevTools. |
@@ -1790,6 +1791,14 @@ Each platform has exactly one log source, because a Dart `print()` reaches both 
 | Chrome, dev loop | The DWDS VM service's `Stdout` and `Stderr` streams. |
 | Chrome, WASM or production JS | Chrome DevTools Protocol console events. |
 | `attach` | The VM service's `Stdout` and `Stderr` streams, since there is no process to read. |
+
+### Waiting for the VM service
+
+A freshly booted iOS simulator can take well past 30 seconds to print its VM-service announcement, so the run keeps waiting while the launched app is still alive instead of giving up at a fixed timeout. After 30 seconds it reports `still waiting for the VM service` with the elapsed time, then repeats every 10 seconds, so a slow launch stays distinguishable from a hang.
+
+When the app exits before announcing, the run fails at once with the device name, the exit code (or the fact that the platform reported none), and the app's last 20 log lines. A `--vm-service-timeout` bound, in seconds and 180 by default, still caps the wait so a hung app cannot wait forever; when it expires on a living app the run gives up and reports the bound, the option that raises it, and the last log lines — aborting, unless `--allow-no-vm-service` continues without a VM service.
+
+How the run knows the app is alive depends on the device: on macOS, Linux and Windows the app is a child process, so its exit ends the wait; on the iOS simulator the pid `simctl launch` reports is polled; on Android there is no such signal, so the bound alone ends the wait. A physical iOS device is the exception to all of this: it discovers the VM service over mDNS on its own budget (5 minutes wired, 15 minutes wireless), so `--vm-service-timeout` does not apply there. Release builds serve no VM service and skip the wait entirely.
 
 ### Assets and fonts
 

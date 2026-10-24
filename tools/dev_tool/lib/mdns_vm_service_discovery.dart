@@ -10,7 +10,7 @@
 /// attached device, where there is no USB transport to scrape.
 ///
 /// This is deliberately *not* a second discovery mechanism racing the log
-/// scrapers used by every other platform ([discoverVmServiceUri]). It is the
+/// scrapers used by every other platform ([waitForVmServiceUri]). It is the
 /// single mechanism for physical iOS devices, and no other platform uses it.
 /// A device's records are told apart from the host's — a Mac running the same
 /// app in a simulator advertises on the same network — by matching the SRV

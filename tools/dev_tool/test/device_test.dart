@@ -2475,7 +2475,7 @@ Filesystem       1K-blocks    Used Available Use% Mounted on
     });
   });
 
-  // The app's stdout and stderr keep flowing after `_discoverVmServiceUri`
+  // The app's stdout and stderr keep flowing after `_discoverDesktopVmService`
   // matches the VM-service announcement, and the OS pipes stay drained.
   // Parameterised over the three desktop devices, which share the launch path.
   group('desktop app output forwarding', () {

@@ -140,6 +140,7 @@ _UNIT_TESTS = {
     },
     "device_integration_test": {"fakes": True},
     "device_id_test": {},
+    "device_launcher_test": {"fakes": True},
     "device_test": {"fakes": True},
     "file_clock_test": {"deps": _PATH_DEP},
     "flutter_error_report_test": {"deps": _PATH_DEP},
@@ -205,6 +206,7 @@ _UNIT_TESTS = {
         "deps": _PATH_DEP,
     },
     "vm_service_conformance_test": {"fakes": True},
+    "vm_service_discovery_test": {"fakes": True},
     "vm_service_logs_test": {"fakes": True},
     "web_bootstrap_test": {},
     "web_expression_compiler_test": {

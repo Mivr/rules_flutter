@@ -31,7 +31,7 @@
 /// On every platform above, the VM-service URI arrives in-band: the engine
 /// prints it, so discovery is a *reader* of the log stream and never an owner
 /// of the underlying subscriptions (see [pumpProcessLines] and
-/// [discoverVmServiceUri]).
+/// [waitForVmServiceUri]).
 ///
 /// A physical iOS device is the one exception, and it is out-of-band rather
 /// than a second in-band source: a wirelessly attached device has no console
@@ -60,6 +60,7 @@ import 'runfiles_helper.dart';
 import 'temp_dir.dart';
 import 'toolchain_info.dart';
 import 'vm_service_client.dart';
+import 'vm_service_discovery.dart';
 import 'teardown.dart';
 import 'web_module_server.dart';
 import 'web_options.dart';
@@ -67,6 +68,7 @@ import 'web_options.dart';
 export 'app_log.dart' show AppLogLine, AppLogStream, LogPage;
 export 'build_mode.dart' show BuildMode;
 export 'host_tools.dart' show HostTool, MissingHostToolException;
+export 'vm_service_discovery.dart' show vmServiceUriPattern;
 
 final _logger = Logger('dev_tool.device');
 
@@ -207,6 +209,15 @@ class AppInstance {
   final Process process;
   final Uri? vmServiceUri;
 
+  /// Why VM-service discovery gave up while the app was still alive.
+  ///
+  /// Null when discovery announced a URI, or never waited on a living app
+  /// (no liveness signal, or a build mode that serves no VM service). The
+  /// run's abort-or-continue decision reports this when the launch continues
+  /// without a URI: the bound, the option that raises it, and the last log
+  /// lines.
+  final String? vmServiceDiscoveryNote;
+
   /// Optional HTTP server (used by WebDevice).
   final HttpServer? server;
 
@@ -232,6 +243,7 @@ class AppInstance {
   AppInstance({
     required this.process,
     this.vmServiceUri,
+    this.vmServiceDiscoveryNote,
     this.server,
     AppLogStream? logs,
     this.auxiliaryProcesses = const [],
@@ -301,6 +313,54 @@ abstract class Device {
   /// Settable so tests can drive the expiry paths in milliseconds instead of
   /// waiting out the real bound.
   Duration teardownBound = const Duration(seconds: 5);
+
+  /// How long VM-service discovery waits for the app's announcement.
+  ///
+  /// While the app is alive the wait keeps going up to this bound, logging
+  /// `still waiting` progress lines; a hung app still fails at it. The
+  /// `dev_tool run --vm-service-timeout` value in production, which
+  /// [prepareDevicesForLaunch] copies here before [launch].
+  ///
+  /// Settable so tests can drive the expiry in seconds instead of minutes.
+  Duration vmServiceTimeout = defaultVmServiceDiscoveryBound;
+
+  /// The run's logger, for discovery's progress lines.
+  ///
+  /// Set by [prepareDevicesForLaunch] so the `still waiting` lines go through
+  /// the same logger the rest of the run reports through. Null outside a run
+  /// (tests, direct use), where discovery falls back to the module logger.
+  Logger? discoveryLogger;
+
+  /// The discovery wait this device launches with: its [vmServiceTimeout] as
+  /// the bound, on the system clock.
+  VmDiscoveryConfig _discoveryConfig() =>
+      VmDiscoveryConfig(bound: vmServiceTimeout);
+
+  /// Where discovery's progress lines go: the run's logger, or the module
+  /// logger outside a run.
+  Logger _discoveryLogger() => discoveryLogger ?? _logger;
+
+  /// Wait for a desktop app's VM-service announcement on [logs].
+  ///
+  /// Null URI in a build mode that serves none (release): there is nothing
+  /// to wait for, so the launch continues at once. Otherwise the wait lasts
+  /// while the app lives — a desktop app is a child process, so its exit
+  /// ends the wait at once — up to [vmServiceTimeout].
+  Future<VmServiceDiscovery> _discoverDesktopVmService(
+    AppLogStream logs,
+    Process process,
+  ) {
+    if (!buildMode.servesVmService) {
+      return Future.value((uri: null, gaveUpNote: null));
+    }
+    return waitForVmServiceUri(
+      logs: logs,
+      deviceName: name,
+      appExit: process.exitCode,
+      config: _discoveryConfig(),
+      logger: _discoveryLogger(),
+    );
+  }
 
   /// Launch the app and return the running instance.
   ///
@@ -582,7 +642,7 @@ class MacOSDevice extends Device {
     );
 
     final logs = _startProcessLogs(process, onLog);
-    final vmServiceUri = await discoverVmServiceUri(logs);
+    final discovery = await _discoverDesktopVmService(logs, process);
     if (resolvedPath.endsWith('.app')) {
       await _bringToFront(resolvedPath, process.pid);
     }
@@ -590,7 +650,8 @@ class MacOSDevice extends Device {
     _launching = null;
     return AppInstance(
       process: process,
-      vmServiceUri: vmServiceUri,
+      vmServiceUri: discovery.uri,
+      vmServiceDiscoveryNote: discovery.gaveUpNote,
       logs: logs,
       // The app runs out of this directory, so it goes only once the process
       // has exited — which `stop` awaits before disposing it.
@@ -828,10 +889,11 @@ class LinuxDevice extends Device {
 
     final process = await _startProcess(executable, []);
     final logs = _startProcessLogs(process, onLog);
-    final vmServiceUri = await discoverVmServiceUri(logs);
+    final discovery = await _discoverDesktopVmService(logs, process);
     return AppInstance(
       process: process,
-      vmServiceUri: vmServiceUri,
+      vmServiceUri: discovery.uri,
+      vmServiceDiscoveryNote: discovery.gaveUpNote,
       logs: logs,
     );
   }
@@ -930,10 +992,11 @@ class WindowsDevice extends Device {
 
     final process = await _startProcess(executable, []);
     final logs = _startProcessLogs(process, onLog);
-    final vmServiceUri = await discoverVmServiceUri(logs);
+    final discovery = await _discoverDesktopVmService(logs, process);
     return AppInstance(
       process: process,
-      vmServiceUri: vmServiceUri,
+      vmServiceUri: discovery.uri,
+      vmServiceDiscoveryNote: discovery.gaveUpNote,
       logs: logs,
     );
   }
@@ -1098,7 +1161,7 @@ Map<String, String> desktopLaunchEnvironment({
     ...(base ?? Platform.environment),
     // Always: a fixed port would collide across a multi-device run, and 0
     // makes the embedder pick one and announce it on stdout, which is where
-    // [discoverVmServiceUri] reads it from.
+    // [waitForVmServiceUri] reads it from.
     'FLUTTER_VM_SERVICE_PORT': '0',
     if (switches.isNotEmpty) 'FLUTTER_ENGINE_SWITCHES': '${switches.length}',
     for (var i = 0; i < switches.length; i++)
@@ -1260,6 +1323,25 @@ class AndroidDevice extends Device {
       ? 'adb $what failed: $stderr'
       : 'adb $what failed (adb -s $deviceId): $stderr';
 
+  /// Discover the VM-service URI from logcat.
+  ///
+  /// A release build serves none, so there is nothing to wait for. logcat is
+  /// a helper rather than the app — which runs on the device — so its end is
+  /// not an app exit: without a liveness signal the wait ends at the
+  /// announcement or the log's end, and only the bound still waits out a
+  /// living app.
+  Future<VmServiceDiscovery> _discoverAndroidVmService(AppLogStream logs) {
+    if (!buildMode.servesVmService) {
+      return Future.value((uri: null, gaveUpNote: null));
+    }
+    return waitForVmServiceUri(
+      logs: logs,
+      deviceName: name,
+      config: _discoveryConfig(),
+      logger: _discoveryLogger(),
+    );
+  }
+
   @override
   Future<AppInstance> launch(String appPath, {AppLogListener? onLog}) async {
     final packageName = _packageName ?? await _readPackageName(appPath);
@@ -1324,8 +1406,10 @@ class AndroidDevice extends Device {
       throw StateError(_adbFailure('am start', startResult.stderr));
     }
 
-    // Step 4: Discover VM service URI from logcat.
-    final deviceUri = await discoverVmServiceUri(logs);
+    // Step 4: Discover VM service URI from logcat (see
+    // [_discoverAndroidVmService] for the wait's shape).
+    final discovery = await _discoverAndroidVmService(logs);
+    final deviceUri = discovery.uri;
 
     // Port forwarding — the URI logcat announces is device-local, and a failed
     // forward has no usable second answer. `127.0.0.1:<devicePort>` on the host
@@ -1363,7 +1447,12 @@ class AndroidDevice extends Device {
       vmServiceUri = deviceUri.replace(host: '127.0.0.1', port: hostPort);
     }
 
-    return AppInstance(process: logcat, vmServiceUri: vmServiceUri, logs: logs);
+    return AppInstance(
+      process: logcat,
+      vmServiceUri: vmServiceUri,
+      vmServiceDiscoveryNote: discovery.gaveUpNote,
+      logs: logs,
+    );
   }
 
   /// Read the package name (and launchable activity) out of the APK.
@@ -1924,56 +2013,6 @@ String? androidLogFilter(String rawLine) {
   return line.display;
 }
 
-/// Pattern matching Dart VM service URI announcements from Flutter apps.
-/// Matches Flutter's own `kVMServiceMessageRegExp` from globals.dart.
-final vmServiceUriPattern = RegExp(
-  r'The Dart VM service is listening on ((http|//)[a-zA-Z0-9:/=_\-\.\[\]]+)',
-);
-
-/// How long a launch waits for the VM-service announcement before giving up.
-const _vmServiceDiscoveryTimeout = Duration(seconds: 30);
-
-/// Watch [logs] for the VM-service announcement.
-///
-/// The Flutter engine prints a line like:
-///   "The Dart VM service is listening on http://127.0.0.1:XXXXX/..."
-///
-/// This is a pure *reader*: it owns only its own subscription to [logs] and
-/// cancels only that, leaving whatever feeds the stream running for the app's
-/// lifetime. Cancelling the app's own stdout/stderr subscriptions here would
-/// kill all subsequent output and leave the OS pipes unread — see the library
-/// docs.
-///
-/// Returns null if nothing announced a VM service within
-/// [_vmServiceDiscoveryTimeout] or the stream ended first.
-Future<Uri?> discoverVmServiceUri(
-  AppLogStream logs, {
-  Duration timeout = _vmServiceDiscoveryTimeout,
-}) async {
-  final completer = Completer<Uri?>();
-  final timer = Timer(timeout, () {
-    if (!completer.isCompleted) completer.complete(null);
-  });
-
-  final sub = logs.lines.listen(
-    (line) {
-      if (completer.isCompleted) return;
-      final match = vmServiceUriPattern.firstMatch(line.text);
-      if (match != null) completer.complete(Uri.parse(match.group(1)!));
-    },
-    onDone: () {
-      if (!completer.isCompleted) completer.complete(null);
-    },
-  );
-
-  try {
-    return await completer.future;
-  } finally {
-    timer.cancel();
-    await sub.cancel();
-  }
-}
-
 /// Create the log stream for a launch, attach [onLog], and start draining
 /// [process] into it as its only source.
 ///
@@ -2175,6 +2214,52 @@ class IOSSimulatorDevice extends Device {
     return process;
   }
 
+  /// Whether the simulator app with host pid [pid] is still running.
+  ///
+  /// Simulator apps run as host processes, so `ps` sees them. The probe for
+  /// [watchHostPid]: injected there rather than read inline so tests can
+  /// stand in for it.
+  Future<bool> _isSimPidAlive(int pid) async {
+    final result = await _runProcess('ps', ['-p', '$pid']);
+    return result.exitCode == 0;
+  }
+
+  /// Discover the VM-service URI from the simulator's discovery stream.
+  ///
+  /// The pid watch starts only here — never in a build mode that serves no VM
+  /// service — and stops when the wait ends, whatever the outcome, so no `ps`
+  /// probe outlives discovery ([watchHostPid]'s `stop`). The pid `simctl
+  /// launch` reports is the liveness signal: while it lives, the wait keeps
+  /// going. No pid (an unparsed format) means no signal, and the wait then
+  /// relies on the bound alone, as on Android.
+  Future<VmServiceDiscovery> _discoverSimVmService(
+    Process discoveryLog,
+    String launchStdout,
+  ) async {
+    final config = _discoveryConfig();
+    final stopWatch = Completer<void>();
+    try {
+      final simPid = parseSimctlLaunchPid(launchStdout);
+      return await waitForVmServiceUriFromProcess(
+        discoveryLog,
+        deviceName: name,
+        appExit: simPid == null
+            ? null
+            : watchHostPid(
+                pid: simPid,
+                isAlive: _isSimPidAlive,
+                config: config,
+                stop: stopWatch.future,
+              ),
+        config: config,
+        logger: _discoveryLogger(),
+      );
+    } finally {
+      // The wait is over, whatever it concluded: end the `ps` polling.
+      stopWatch.complete();
+    }
+  }
+
   Future<AppInstance> _launch(String appPath, {AppLogListener? onLog}) async {
     // Extract .app from .ipa if needed — simctl install requires .app.
     String installPath = appPath;
@@ -2242,20 +2327,31 @@ class IOSSimulatorDevice extends Device {
     // Launch app.
     final bundleId = _launchedBundleId =
         _bundleId ?? await _extractBundleId(installPath, _runProcess);
-    await _runProcess('xcrun', [
+    final launchResult = await _runProcess('xcrun', [
       'simctl', 'launch', udid, bundleId,
       // Anything after the bundle id is passed to the app as argv, which is
       // where the iOS embedder looks for engine switches.
       if (startPaused) '--start-paused',
     ]);
+    if (launchResult.exitCode != 0) {
+      throw StateError('simctl launch failed: ${launchResult.stderr}');
+    }
 
-    // Discover VM service URI from the dedicated discovery stream.
-    final uri = await discoverVmServiceUriFromProcess(discoveryLog);
+    // Discover VM service URI from the dedicated discovery stream. A release
+    // build serves none, so there is nothing to wait for — and no pid watch
+    // to start.
+    final discovery = buildMode.servesVmService
+        ? await _discoverSimVmService(
+            discoveryLog,
+            launchResult.stdout as String,
+          )
+        : (uri: null, gaveUpNote: null);
 
     _launchHelpers.clear();
     return AppInstance(
       process: discoveryLog,
-      vmServiceUri: uri,
+      vmServiceUri: discovery.uri,
+      vmServiceDiscoveryNote: discovery.gaveUpNote,
       logs: logs,
       auxiliaryProcesses: [outputLog],
       scratchDirs: _scratch.handOver(),
@@ -3693,29 +3789,6 @@ String? parseUnifiedLoggingLine(String line) {
     return decoded is String ? decoded : null;
   } on FormatException {
     return null;
-  }
-}
-
-/// Watch a log-emitting helper process for the VM-service announcement.
-///
-/// For sources where the helper process exists *only* to find the URI (the iOS
-/// Simulator's discovery stream); app output comes from a separate stream. Like
-/// [discoverVmServiceUri], this owns only its own subscription.
-Future<Uri?> discoverVmServiceUriFromProcess(
-  Process log, {
-  Duration timeout = _vmServiceDiscoveryTimeout,
-}) async {
-  final logs = AppLogStream();
-  final pump = pumpProcessLines(log, logs);
-  // The helper is this stream's only source, so a helper that dies takes the
-  // stream with it and discovery gives up at once instead of waiting out its
-  // timeout on a process that will never say anything again.
-  logs.closeWhen([pump.done]);
-  try {
-    return await discoverVmServiceUri(logs, timeout: timeout);
-  } finally {
-    await pump.dispose();
-    await logs.close();
   }
 }
 

@@ -239,7 +239,9 @@ class DeviceLauncher {
   /// Connect to the VM service, owning a DDS for it. Web has none.
   ///
   /// Never throws: a launch without a VM service is reported through the
-  /// returned reason, and [_ensureVmService] decides what that means.
+  /// returned reason, and [_ensureVmService] decides what that means. Where
+  /// discovery waited on a living app and gave up, the reason is its note —
+  /// the bound, the option that raises it, and the last log lines.
   Future<_VmConnection> _connectVmService(
     Device device,
     String appId,
@@ -295,12 +297,17 @@ class DeviceLauncher {
         vmFailureReason = connected.failureReason ?? vmFailureReason;
       }
     } else if (!plan.isWebDevice) {
-      vmFailureReason = 'no VM service URI was discovered at launch';
+      // The reason carries the note for [_ensureVmService]; the log line
+      // keeps the original sentence, with the note appended when there is
+      // one, so a multi-device run still names the device.
+      final note = appInstance.vmServiceDiscoveryNote;
+      vmFailureReason = note ?? 'no VM service URI was discovered at launch';
       plan.logger.severe({
         'message': 'vm_service_uri_not_found',
         'text':
-            'No VM service URI was discovered on ${device.name}. Hot '
-            'reload, DevTools, and agent control will be unavailable.',
+            'No VM service URI was discovered on ${device.name}.'
+            '${note == null ? '' : ' $note.'} Hot reload, DevTools, and '
+            'agent control will be unavailable.',
         'device': device.name,
       });
     }

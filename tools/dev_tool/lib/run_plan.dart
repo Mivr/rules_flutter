@@ -20,6 +20,7 @@ import 'device.dart';
 import 'device_id.dart';
 import 'logging.dart';
 import 'toolchain_info.dart';
+import 'vm_service_discovery.dart';
 import 'web_mode.dart';
 import 'web_options.dart';
 
@@ -137,6 +138,7 @@ typedef LaunchPreparation = ({
   String? initialRoute,
   bool traceStartup,
   bool allowNoVmService,
+  Duration vmServiceTimeout,
 });
 
 /// Prepare resolved devices for launch: VM-service, pause and web settings.
@@ -163,6 +165,12 @@ void prepareDevicesForLaunch(
   for (final device in devices) {
     device.startPaused = preparation.startPaused;
   }
+  // Before launch, for the same reason: discovery reads these once it starts
+  // waiting, so a bound or logger handed over afterwards would miss the wait.
+  for (final device in devices) {
+    device.vmServiceTimeout = preparation.vmServiceTimeout;
+    device.discoveryLogger = logger;
+  }
   // Same reason, same moment: a browser's static-bundle server is built
   // inside `launch`, so this is the last point at which it can be told how
   // to serve. The DDC path's server is built by the assembler from the same
@@ -177,6 +185,58 @@ void prepareDevicesForLaunch(
     preparation.initialRoute,
     preparation.traceStartup,
     preparation.startPaused,
+  );
+}
+
+/// Read `--vm-service-timeout` (seconds) off the parsed flags.
+///
+/// A value that is not a positive number of seconds is a usage error, not a
+/// default: silently waiting three minutes when the user asked for nonsense
+/// is the opposite of what the flag is for.
+Duration _vmServiceTimeoutFor(ArgResults results) {
+  try {
+    return parseVmServiceTimeoutOption(
+      results['vm-service-timeout'] as String?,
+    );
+  } on FormatException catch (e) {
+    throw DevToolException('Invalid --vm-service-timeout: ${e.message}');
+  }
+}
+
+/// The `run` flags that need no I/O to interpret.
+///
+/// One record because `resolve` reads ten of them before its first spawn;
+/// ten locals there cost it its size budget, and ten return values would be
+/// this record without a name.
+typedef ResolvedRunFlags = ({
+  String target,
+  List<String> defineFlags,
+  bool isMachine,
+  bool hotReloadEnabled,
+  bool profileMode,
+  String? initialRoute,
+  bool traceStartup,
+  bool startPaused,
+  bool allowNoVmService,
+  Duration vmServiceTimeout,
+});
+
+/// Read the I/O-free `run` flags, refusing typos before any spawn.
+///
+/// A mistyped `--vm-service-timeout` is refused here with the other flag
+/// typos — before devices resolve and builds run — rather than after.
+ResolvedRunFlags resolveRunFlags(ArgResults results) {
+  return (
+    target: results['target'] as String,
+    defineFlags: dartDefineFlags(results['dart-define'] as List<String>),
+    isMachine: results['machine'] as bool,
+    hotReloadEnabled: results['hot'] as bool,
+    profileMode: results['profile'] as bool,
+    initialRoute: results['route'] as String?,
+    traceStartup: results['trace-startup'] as bool,
+    startPaused: results['start-paused'] as bool,
+    allowNoVmService: results['allow-no-vm-service'] as bool,
+    vmServiceTimeout: _vmServiceTimeoutFor(results),
   );
 }
 
@@ -216,6 +276,7 @@ typedef AssembledPlan = ({
   bool allowNoVmService,
   WebMode? webMode,
   WebOptions? webOptions,
+  Duration vmServiceTimeout,
 });
 
 class RunPlan {
@@ -257,6 +318,10 @@ class RunPlan {
   final bool httpChannelEnabled;
   final bool allowNoVmService;
 
+  /// How long VM-service discovery waits for the app's announcement before
+  /// giving up: the `--vm-service-timeout` value.
+  final Duration vmServiceTimeout;
+
   /// Which of the three shapes this web run takes, or null for a native run.
   /// The one derivation — every question about the run's web shape is asked
   /// of this, never re-derived from the raw flags.
@@ -291,11 +356,57 @@ class RunPlan {
     required this.devToolsEnabled,
     required this.httpChannelEnabled,
     required this.allowNoVmService,
+    required this.vmServiceTimeout,
     required this.webMode,
     required this.webOptions,
     required this.logger,
     required this.bazel,
   });
+
+  /// A native debug plan for tests that drive the launch decision, not flag
+  /// parsing: the VM-service tests vary only [allowNoVmService] (and the
+  /// devices), while everything else takes the quietest value — no web, no
+  /// route, no pause, no trace. Flag-level coverage stays in the resolve
+  /// tests; the toolchain paths are empty because these tests never build.
+  factory RunPlan.forTest({
+    required String target,
+    required List<Device> devices,
+    required Logger logger,
+    bool allowNoVmService = false,
+    Duration vmServiceTimeout = defaultVmServiceDiscoveryBound,
+  }) => RunPlan._(
+    target: target,
+    extraArgs: const [],
+    userBuildArgs: const [],
+    // `dbg`: a debug plan, the only kind the launch decision tests drive —
+    // a release plan serves no VM service and is exempt from it.
+    compilationMode: 'dbg',
+    devices: devices,
+    workspace: '',
+    toolchain: ToolchainPaths(
+      dart: '',
+      dartaotruntime: '',
+      frontendServer: '',
+      platformDill: '',
+      patchedSdkRoot: '',
+    ),
+    hotReloadEnabled: true,
+    profileMode: false,
+    initialRoute: null,
+    traceStartup: false,
+    startPaused: false,
+    isMachine: false,
+    watchEnabled: false,
+    wasmMode: false,
+    devToolsEnabled: false,
+    httpChannelEnabled: false,
+    allowNoVmService: allowNoVmService,
+    vmServiceTimeout: vmServiceTimeout,
+    webMode: null,
+    webOptions: null,
+    logger: logger,
+    bazel: Bazel(),
+  );
 
   /// Whether this run targets a browser.
   bool get isWebDevice => devices.first is WebDevice;
@@ -512,6 +623,7 @@ class RunPlan {
       devToolsEnabled: results['devtools'] as bool,
       httpChannelEnabled: results['http-control-channel'] as bool,
       allowNoVmService: plan.allowNoVmService,
+      vmServiceTimeout: plan.vmServiceTimeout,
       webMode: plan.webMode,
       webOptions: plan.webOptions,
       logger: logger,
@@ -524,15 +636,7 @@ class RunPlan {
     Logger logger, {
     required Bazel bazel,
   }) async {
-    final target = results['target'] as String;
-    final defineFlags = dartDefineFlags(results['dart-define'] as List<String>);
-    final isMachine = results['machine'] as bool;
-    final hotReloadEnabled = results['hot'] as bool;
-    final profileMode = results['profile'] as bool;
-    final initialRoute = results['route'] as String?;
-    final traceStartup = results['trace-startup'] as bool;
-    final startPaused = results['start-paused'] as bool;
-    final allowNoVmService = results['allow-no-vm-service'] as bool;
+    final flags = resolveRunFlags(results);
 
     // Reads nothing but the flags, so it comes before any I/O: a `-c` that
     // contradicts the run is a typo to report at once, not after two `bazel
@@ -549,8 +653,8 @@ class RunPlan {
       results,
       bazel,
       devices,
-      defineFlags: defineFlags,
-      profileMode: profileMode,
+      defineFlags: flags.defineFlags,
+      profileMode: flags.profileMode,
       compilationMode: compilationMode,
     );
 
@@ -562,8 +666,8 @@ class RunPlan {
     final webMode = resolveWebMode(
       isWebDevice: devices.first is WebDevice,
       wasmMode: results['wasm'] as bool,
-      profileMode: profileMode,
-      hotReloadEnabled: hotReloadEnabled,
+      profileMode: flags.profileMode,
+      hotReloadEnabled: flags.hotReloadEnabled,
       hotExplicit: results.wasParsed('hot'),
     );
     final webOptions = WebOptions.resolve(results, webMode);
@@ -578,7 +682,7 @@ class RunPlan {
 
     final buildMode = applyBuildMode(
       devices,
-      profileMode: profileMode,
+      profileMode: flags.profileMode,
       compilationMode: compilationMode,
     );
 
@@ -589,11 +693,12 @@ class RunPlan {
       logger,
       preparation: (
         buildMode: buildMode,
-        startPaused: startPaused,
+        startPaused: flags.startPaused,
         webOptions: webOptions,
-        initialRoute: initialRoute,
-        traceStartup: traceStartup,
-        allowNoVmService: allowNoVmService,
+        initialRoute: flags.initialRoute,
+        traceStartup: flags.traceStartup,
+        allowNoVmService: flags.allowNoVmService,
+        vmServiceTimeout: flags.vmServiceTimeout,
       ),
     );
 
@@ -602,17 +707,18 @@ class RunPlan {
       logger,
       plan: (
         bazel: bazel,
-        target: target,
+        target: flags.target,
         resolved: resolved,
         compilationMode: compilationMode,
         devices: devices,
-        hotReloadEnabled: hotReloadEnabled,
-        profileMode: profileMode,
-        initialRoute: initialRoute,
-        traceStartup: traceStartup,
-        startPaused: startPaused,
-        isMachine: isMachine,
-        allowNoVmService: allowNoVmService,
+        hotReloadEnabled: flags.hotReloadEnabled,
+        profileMode: flags.profileMode,
+        initialRoute: flags.initialRoute,
+        traceStartup: flags.traceStartup,
+        startPaused: flags.startPaused,
+        isMachine: flags.isMachine,
+        allowNoVmService: flags.allowNoVmService,
+        vmServiceTimeout: flags.vmServiceTimeout,
         webMode: webMode,
         webOptions: webOptions,
       ),
