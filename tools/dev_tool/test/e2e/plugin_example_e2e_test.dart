@@ -518,6 +518,77 @@ void main() {
         },
         timeout: const Timeout(Duration(minutes: 8)),
       );
+
+      test(
+        'every plugin answers on the simulator',
+        () async {
+          final ws = await editableWorkspace('plugin_example');
+          // The app's single diagnostic line, read off the machine protocol
+          // like the web group does: a screenshot would prove the app drew,
+          // not that every plugin call behind the line resolved.
+          final dt = await startDevTool(
+            workspace: ws.root,
+            target: ':plugin_ios',
+            device: 'ios-simulator',
+          );
+          await dt.waitForEvent(
+            'app.started',
+            timeout: const Duration(minutes: 6),
+          );
+
+          final line = await dt.waitForAppLog(
+            'plugin_example_results',
+            timeout: const Duration(minutes: 4),
+          );
+
+          // The macOS checks of `test/verify_macos_app_test.dart`, on the
+          // simulator: one expectation per field, each naming the field and
+          // showing the line, so a failure says which plugin call broke.
+          expect(
+            line,
+            contains('appName=Plugin Example'),
+            reason: 'appName in: $line',
+          );
+          expect(
+            line,
+            contains('greeting=Hello from GreetingPlugin!'),
+            reason: 'greeting in: $line',
+          );
+          expect(
+            line,
+            contains('documentsPath=/'),
+            reason: 'documentsPath (a real path) in: $line',
+          );
+          expect(
+            line,
+            isNot(contains('documentsPath=error:')),
+            reason: 'documentsPath must resolve, not error, in: $line',
+          );
+          expect(
+            line,
+            contains('tempPath=/'),
+            reason: 'tempPath (a real path) in: $line',
+          );
+          expect(
+            line,
+            isNot(contains('tempPath=error:')),
+            reason: 'tempPath must resolve, not error, in: $line',
+          );
+          expect(
+            line,
+            contains('launchOk=launch ok'),
+            reason: 'launchOk in: $line',
+          );
+          expect(
+            line,
+            contains('audioSession=audio ok'),
+            reason: 'audioSession in: $line',
+          );
+
+          await dt.sendCommand(1, 'daemon.shutdown');
+        },
+        timeout: const Timeout(Duration(minutes: 10)),
+      );
     },
     skip: !Platform.isMacOS ? 'macOS only (needs Xcode Simulator)' : null,
   );
