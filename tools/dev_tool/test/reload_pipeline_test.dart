@@ -11,6 +11,7 @@ import 'dart:io';
 import 'package:flutter_bazel_dev_tool/command_report.dart';
 import 'package:flutter_bazel_dev_tool/compiler_config.dart';
 import 'package:flutter_bazel_dev_tool/device.dart' as device;
+import 'package:flutter_bazel_dev_tool/device_desktop.dart' as device;
 import 'package:flutter_bazel_dev_tool/frontend_server.dart';
 import 'package:flutter_bazel_dev_tool/hot_reload/app_instance.dart';
 import 'package:flutter_bazel_dev_tool/hot_reload/asset_bundle.dart';

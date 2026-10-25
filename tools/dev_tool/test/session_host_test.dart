@@ -5,6 +5,7 @@ import 'package:flutter_bazel_dev_tool/bazel.dart';
 import 'package:flutter_bazel_dev_tool/command_failure.dart';
 import 'package:flutter_bazel_dev_tool/dev_tool_exception.dart';
 import 'package:flutter_bazel_dev_tool/device.dart';
+import 'package:flutter_bazel_dev_tool/device_desktop.dart';
 import 'package:flutter_bazel_dev_tool/logging.dart';
 import 'package:flutter_bazel_dev_tool/session.dart';
 import 'package:flutter_bazel_dev_tool/session_host.dart';

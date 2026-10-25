@@ -8,6 +8,7 @@
 import 'dart:async';
 
 import 'package:flutter_bazel_dev_tool/device.dart';
+import 'package:flutter_bazel_dev_tool/device_desktop.dart';
 import 'package:flutter_bazel_dev_tool/device_launcher.dart';
 import 'package:flutter_bazel_dev_tool/dev_tool_exception.dart';
 import 'package:flutter_bazel_dev_tool/logging.dart';

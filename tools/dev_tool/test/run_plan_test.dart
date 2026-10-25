@@ -7,6 +7,7 @@ import 'package:args/args.dart';
 import 'package:flutter_bazel_dev_tool/bazel.dart' show bazelBuildArgs;
 import 'package:flutter_bazel_dev_tool/dev_tool_exception.dart';
 import 'package:flutter_bazel_dev_tool/device.dart';
+import 'package:flutter_bazel_dev_tool/device_desktop.dart';
 import 'package:flutter_bazel_dev_tool/run_command.dart' show RunCommand;
 import 'package:flutter_bazel_dev_tool/run_plan.dart';
 import 'package:test/test.dart';

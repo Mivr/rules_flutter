@@ -7,6 +7,7 @@ import 'package:flutter_bazel_dev_tool/command_report.dart';
 import 'package:flutter_bazel_dev_tool/command_runner.dart';
 import 'package:flutter_bazel_dev_tool/compiler_config.dart';
 import 'package:flutter_bazel_dev_tool/device.dart';
+import 'package:flutter_bazel_dev_tool/device_desktop.dart';
 import 'package:flutter_bazel_dev_tool/frontend_server.dart';
 import 'package:flutter_bazel_dev_tool/machine_protocol.dart';
 import 'package:flutter_bazel_dev_tool/outcome_renderer.dart';
