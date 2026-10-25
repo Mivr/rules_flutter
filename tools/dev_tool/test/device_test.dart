@@ -3380,6 +3380,39 @@ Filesystem       1K-blocks    Used Available Use% Mounted on
         reason: 'a truncated document reports rather than reading as quiet',
       );
     });
+
+    test('skips a non-JSON preamble before the document', () {
+      // The runners print `getpwuid_r did not find a match for uid 501`
+      // before the JSON. Stale entries still lose to this launch's own.
+      final output =
+          'getpwuid_r did not find a match for uid 501\n'
+          '${doc([
+            body(
+              pid: 9999,
+              message: 'The Dart VM service is listening on '
+                  'http://127.0.0.1:1111/stale-other=/',
+            ),
+            body(timestamp: since.subtract(const Duration(seconds: 1))),
+            body(),
+          ])}';
+      expect(
+        findSimLogVmServiceUri(output, pid: 4242, since: since),
+        Uri.parse(uri),
+      );
+    });
+
+    test('a preamble with no JSON is an error, not quiet', () {
+      expect(
+        () => findSimLogVmServiceUri(
+          'getpwuid_r did not find a match for uid 501',
+          pid: 4242,
+          since: since,
+        ),
+        throwsA(isA<FormatException>()),
+        reason:
+            'a preamble alone must be reported, never taken for an empty log',
+      );
+    });
   });
 
   group('SimLogFallback.logShowArgs', () {
@@ -3421,6 +3454,129 @@ Filesystem       1K-blocks    Used Available Use% Mounted on
         '${two(local.hour)}:${two(local.minute)}:${two(local.second)}',
       );
     });
+  });
+
+  group('SimLogFallback with noisy log show output', () {
+    // The runners print `getpwuid_r did not find a match for uid 501` before
+    // the JSON, on stdout or stderr. The fallback reads past it.
+    const preamble = 'getpwuid_r did not find a match for uid 501';
+    const announced = 'http://127.0.0.1:7777/fresh=/';
+
+    String noisyAnswer({required DateTime at}) =>
+        '$preamble\n${_simLogShowDoc([
+          _simLogShowEntry(
+            pid: 9999,
+            timestamp: at,
+            message: 'The Dart VM service is listening on '
+                'http://127.0.0.1:1111/stale-other=/',
+          ),
+          _simLogShowEntry(
+            pid: 4242,
+            timestamp: at,
+            message: 'The Dart VM service is listening on $announced',
+          ),
+        ])}';
+
+    Future<List<AppLogLine>> feedUntilLine(
+      SimLogFallback fallback,
+      AppLogStream out,
+    ) async {
+      final stop = Completer<void>();
+      final feeding = fallback.feedAnnouncements(out, stop: stop.future);
+      try {
+        final deadline = DateTime.now().add(const Duration(seconds: 30));
+        while (out.read(0).lines.isEmpty) {
+          if (DateTime.now().isAfter(deadline)) {
+            fail('the fallback never fed the announcement');
+          }
+          await Future<void>.delayed(const Duration(milliseconds: 5));
+        }
+      } finally {
+        stop.complete();
+        await feeding;
+      }
+      return out.read(0).lines;
+    }
+
+    test('finds the announcement past a preamble and stderr noise', () async {
+      final out = AppLogStream();
+      final fallback = SimLogFallback(
+        query: (
+          udid: 'TEST-UDID',
+          pid: 4242,
+          since: DateTime.now().subtract(const Duration(minutes: 1)),
+        ),
+        runProcess: (exe, args) async => ProcessResult(
+          0,
+          0,
+          noisyAnswer(at: DateTime.now()),
+          'runner noise on stderr',
+        ),
+        pollInterval: const Duration(milliseconds: 1),
+      );
+
+      final lines = await feedUntilLine(fallback, out);
+
+      expect(lines, hasLength(1));
+      expect(
+        lines.single.text,
+        'The Dart VM service is listening on $announced',
+        reason:
+            'a preamble on stdout and noise on stderr (exit 0) must not stop '
+            'the read, and the stale pid must not win',
+      );
+    });
+
+    test(
+      'a preamble with no JSON is reported once, and polling carries on',
+      () async {
+        var shows = 0;
+        final records = <LogRecord>[];
+        final sub = Logger.root.onRecord.listen(records.add);
+        try {
+          final out = AppLogStream();
+          final fallback = SimLogFallback(
+            query: (
+              udid: 'TEST-UDID',
+              pid: 4242,
+              since: DateTime.now().subtract(const Duration(minutes: 1)),
+            ),
+            runProcess: (exe, args) async {
+              shows++;
+              if (shows <= 2) {
+                return ProcessResult(0, 0, preamble, '');
+              }
+              return ProcessResult(0, 0, noisyAnswer(at: DateTime.now()), '');
+            },
+            pollInterval: const Duration(milliseconds: 1),
+          );
+
+          final lines = await feedUntilLine(fallback, out);
+
+          expect(
+            lines.single.text,
+            'The Dart VM service is listening on $announced',
+          );
+        } finally {
+          await sub.cancel();
+        }
+
+        expect(
+          shows,
+          greaterThan(2),
+          reason: 'polling must carry on past the preamble-only answers',
+        );
+        expect(
+          records
+              .where((r) => _logMessageOf(r) == 'sim_log_fallback_poll_failed')
+              .length,
+          1,
+          reason:
+              'the preamble with no JSON is one distinct failure, not one per '
+              'poll and not fatal',
+        );
+      },
+    );
   });
 
   group('MacOSDevice.screenshot', () {

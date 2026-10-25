@@ -167,16 +167,34 @@ Uri? _judgeJsonEntry(
   return Uri.parse(match.group(1)!);
 }
 
+/// The JSON document inside one `log show` call's stdout.
+///
+/// `simctl spawn … log` prints non-JSON lines before its own output on the
+/// runners (`getpwuid_r did not find a match for uid 501`, on stdout or
+/// stderr), so the read starts at the first line that opens the array.
+/// Output with no such line comes back whole, so the decode below reports it
+/// as before instead of mistaking it for quiet.
+String _jsonDocument(String text) {
+  final lines = text.split('\n');
+  for (var i = 0; i < lines.length; i++) {
+    if (lines[i].trimLeft().startsWith('[')) {
+      return lines.sublist(i).join('\n');
+    }
+  }
+  return text;
+}
+
 /// Find this launch's VM-service announcement in one `log show` call's
 /// output, or null when it holds none.
 ///
 /// The output is the JSON document `--style json` prints: an array of entries
 /// whose first line is `[{`, whose entries are joined as `},{`, and whose last
-/// line is `}]`. Entries are judged in order and the first proven one wins
-/// (`log show` reads oldest-first). Throws [FormatException] when non-blank
-/// output is not that document — that is not "no announcement yet", it is a
-/// caller looking at something that is not `log show` JSON, and the poller
-/// reports it rather than mistaking it for quiet.
+/// line is `}]`. Non-JSON lines before the document (the runners' `getpwuid_r`
+/// preamble) are skipped. Entries are judged in order and the first proven one
+/// wins (`log show` reads oldest-first). Throws [FormatException] when the
+/// output holds no JSON document at all — that is not "no announcement yet",
+/// it is a caller looking at something that is not `log show` output, and the
+/// poller reports it rather than mistaking it for quiet.
 Uri? findSimLogVmServiceUri(
   String output, {
   required int pid,
@@ -186,7 +204,7 @@ Uri? findSimLogVmServiceUri(
   if (text.isEmpty) return null;
   late final List<Object?> entries;
   try {
-    final decoded = json.decode(text);
+    final decoded = json.decode(_jsonDocument(text));
     if (decoded is! List) {
       throw const FormatException('not a JSON array of log entries');
     }
@@ -298,7 +316,9 @@ class SimLogFallback {
   /// One `log show` read: feed this launch's announcement, if it is there.
   ///
   /// Spawn failures, refusals, and unparsable answers are reported once per
-  /// distinct failure; the poller carries on either way.
+  /// distinct failure; the poller carries on either way. Text on stderr next
+  /// to a zero exit is not a failure: the runners print there too, and the
+  /// announcement on stdout still counts.
   Future<void> _pollOnce(
     AppLogStream out,
     Set<String> seen,
