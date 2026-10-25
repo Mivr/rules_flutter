@@ -10,8 +10,13 @@ public class IosGreetingPlugin: NSObject, FlutterPlugin {
 
   public func handle(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
     switch call.method {
-    case "getGreeting":
-      result("Hello from iOS Swift plugin!")
+    // The app's own bundle identifier, read from the native bundle object.
+    // The Dart side has no API for this (nothing in scope reports the
+    // enclosing app's id), so the rule-assigned id is only observable
+    // through this channel: the test checks it against the `ios_bundle_id`
+    // default, proving the installed app is the one the rule built.
+    case "getAppBundleId":
+      result(Bundle.main.bundleIdentifier)
     default:
       result(FlutterMethodNotImplemented)
     }

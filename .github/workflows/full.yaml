@@ -150,7 +150,8 @@ jobs:
         run: bazel test //:verify_ios_simulator_test --test_output=errors
       # The harness proof behind the green simulator run: the iOS runner
       # reports through the Bazel test protocol, so its JUnit XML names the
-      # suite after the entrypoint with zero failures. A missing or
+      # suite after the entrypoint with zero failures. The whole file is
+      # printed so the two cases are visible in the log; a missing or
       # failure-carrying test.xml fails the job.
       - name: iOS simulator test.xml (e2e/integration_ios)
         if: matrix.workspace == 'integration_ios'
@@ -158,25 +159,30 @@ jobs:
         run: |
           xml="$(bazel info bazel-testlogs)/app_test/test.xml"
           test -f "$xml"
+          cat "$xml"
           grep -F '<testsuite name="integration_test/app_test.dart"' "$xml"
           grep -F 'failures="0" errors="0"' "$xml"
-      # The red twin behind `manual`: `//...` never runs `:red_test`, so the
-      # integration_ios leg runs it by name and asserts the failure, proving
-      # assertion failures are loud. No `continue-on-error`: a passing red
-      # twin fails the job.
+      # The red twin behind `manual`: `//...` never runs `:app_test_red`, so
+      # the integration_ios leg runs it once by name and asserts the failure,
+      # proving assertion failures are loud. The output goes to a file: the
+      # step requires a non-zero exit, then greps the failure message the
+      # README documents. No `continue-on-error`: a passing red twin fails
+      # the job.
       - name: iOS simulator red twin (e2e/integration_ios)
         if: matrix.workspace == 'integration_ios'
         working-directory: e2e/integration_ios
         run: |
-          if out=$(bazel test //:red_test --test_output=errors 2>&1); then
-            echo "$out"
+          status=0
+          bazel test //:app_test_red --test_output=errors >app_test_red_output.log 2>&1 || status=$?
+          cat app_test_red_output.log
+          if [ "$status" -eq 0 ]; then
             echo "expected the red-twin integration test to fail, but it passed"
             exit 1
           fi
-          echo "$out" | grep -F "FAILED: //:red_test"
-          xml="$(bazel info bazel-testlogs)/red_test/test.xml"
+          grep -F 'RED_TWIN_MUST_FAIL' app_test_red_output.log
+          xml="$(bazel info bazel-testlogs)/app_test_red/test.xml"
           grep -F '<testsuite name="integration_test/red_test.dart"' "$xml"
-          grep -F "<failure" "$xml"
+          grep -F '<failure' "$xml"
       - name: Report cache sizes
         if: always()
         run: du -sh ~/.cache/bazel-disk ~/.cache/bazel-repo 2>/dev/null || true

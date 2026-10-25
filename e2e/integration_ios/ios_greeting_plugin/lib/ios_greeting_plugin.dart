@@ -1,6 +1,6 @@
 import 'package:flutter/services.dart';
 
-/// Method-channel client for the native iOS Swift greeting plugin.
+/// Method-channel client for the native iOS app-identity plugin.
 class IosGreetingPlugin {
   /// Creates an [IosGreetingPlugin] instance.
   const IosGreetingPlugin();
@@ -9,8 +9,9 @@ class IosGreetingPlugin {
     'rules_flutter/ios_greeting',
   );
 
-  /// Requests the greeting string from the native iOS Swift plugin.
-  Future<String?> getGreeting() {
-    return _channel.invokeMethod<String>('getGreeting');
+  /// Requests the enclosing app's bundle identifier from the native iOS
+  /// plugin, which reads it off `Bundle.main`.
+  Future<String?> getAppBundleId() {
+    return _channel.invokeMethod<String>('getAppBundleId');
   }
 }

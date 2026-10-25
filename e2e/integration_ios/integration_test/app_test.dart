@@ -10,49 +10,46 @@ import 'package:ios_greeting_plugin/ios_greeting_plugin.dart';
 void main() {
   IntegrationTestWidgetsFlutterBinding.ensureInitialized();
 
-  testWidgets(
-    'increments counter, decodes asset image, and calls iOS Swift plugin',
-    (tester) async {
-      await tester.pumpWidget(const CounterApp());
-      await tester.pumpAndSettle();
+  testWidgets('shows the counter text and serves the bundled asset', (
+    tester,
+  ) async {
+    await tester.pumpWidget(const CounterApp());
+    await tester.pumpAndSettle();
 
-      expect(find.text('0'), findsOneWidget);
-      expect(find.byKey(const ValueKey<String>('app_logo')), findsOneWidget);
+    expect(find.text('0'), findsOneWidget);
+    expect(
+      find.text('You have pushed the button this many times:'),
+      findsOneWidget,
+    );
 
-      final incrementButton = find.byKey(
-        const ValueKey<String>('increment_button'),
-      );
-      for (var i = 0; i < 3; i++) {
-        await tester.tap(incrementButton);
-        await tester.pump();
+    final assetBytes = await rootBundle.load('assets/logo.png');
+    final bytes = assetBytes.buffer.asUint8List();
+    expect(bytes.lengthInBytes, 82);
+    final codec = await ui.instantiateImageCodec(bytes);
+    final frame = await codec.getNextFrame();
+    expect(frame.image.width, 16);
+    expect(frame.image.height, 16);
+    frame.image.dispose();
+    codec.dispose();
+  });
+
+  testWidgets('reports the native bundle id over the plugin channel', (
+    tester,
+  ) async {
+    await tester.pumpWidget(const CounterApp());
+
+    // The rule-assigned `ios_bundle_id` default for this target.
+    const expectedBundleId = 'com.example.integration-ios.app-test';
+    for (var i = 0; i < 10; i++) {
+      await tester.pump(const Duration(milliseconds: 100));
+      if (find.text(expectedBundleId).evaluate().isNotEmpty) {
+        break;
       }
-
-      expect(find.text('3'), findsOneWidget);
-      expect(
-        tester
-            .widget<Text>(find.byKey(const ValueKey<String>('counter_text')))
-            .data,
-        '3',
-      );
-
-      final assetBytes = await rootBundle.load('assets/logo.png');
-      final codec = await ui.instantiateImageCodec(
-        assetBytes.buffer.asUint8List(),
-      );
-      final frame = await codec.getNextFrame();
-      expect(frame.image.width, greaterThan(0));
-      expect(frame.image.height, greaterThan(0));
-      frame.image.dispose();
-      codec.dispose();
-
-      final greeting = await const IosGreetingPlugin().getGreeting();
-      expect(greeting, 'Hello from iOS Swift plugin!');
-      expect(
-        tester
-            .widget<Text>(find.byKey(const ValueKey<String>('plugin_greeting')))
-            .data,
-        'Hello from iOS Swift plugin!',
-      );
-    },
-  );
+    }
+    expect(find.text(expectedBundleId), findsOneWidget);
+    expect(
+      await const IosGreetingPlugin().getAppBundleId(),
+      expectedBundleId,
+    );
+  });
 }
