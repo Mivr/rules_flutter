@@ -3402,6 +3402,25 @@ Filesystem       1K-blocks    Used Available Use% Mounted on
       expect(predicate, contains('processIdentifier == 4242'));
       expect(predicate, contains('Dart VM service'));
     });
+
+    test('--start is the launch instant as local wall-clock time', () {
+      // `log show --start` reads a bare date-time as local time, so the
+      // launch instant must be rendered in the machine's zone, not UTC.
+      final since = DateTime.utc(2026, 10, 25, 12);
+      final fallback = SimLogFallback(
+        query: (udid: 'TEST-UDID', pid: 4242, since: since),
+        runProcess: (exe, args) async => ProcessResult(0, 0, '', ''),
+      );
+      final args = fallback.logShowArgs;
+      final start = args[args.indexOf('--start') + 1];
+      final local = since.toLocal();
+      String two(int n) => n.toString().padLeft(2, '0');
+      expect(
+        start,
+        '${local.year}-${two(local.month)}-${two(local.day)} '
+        '${two(local.hour)}:${two(local.minute)}:${two(local.second)}',
+      );
+    });
   });
 
   group('MacOSDevice.screenshot', () {

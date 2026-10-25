@@ -59,10 +59,13 @@ const defaultSimLogFallbackPollInterval = Duration(seconds: 2);
 /// The logger the fallback reports through when the caller names none.
 final Logger _fallbackLogger = Logger('dev_tool.ios_sim_log');
 
-/// `log show --start` takes `YYYY-MM-DD HH:MM:SS`-shaped instants; the
-/// fallback reads in UTC so the text is unambiguous.
+/// `log show --start` takes `YYYY-MM-DD HH:MM:SS`-shaped instants, which `log`
+/// reads as local wall-clock time: format the launch instant the same way, or
+/// west of UTC the start lands hours in the future and the read finds nothing.
+/// What makes an entry count is still the absolute-time check
+/// [findSimLogVmServiceUri] runs on every returned entry.
 String _formatShowStart(DateTime instant) {
-  final start = instant.toUtc();
+  final start = instant.toLocal();
   String two(int n) => n.toString().padLeft(2, '0');
   return '${start.year}-${two(start.month)}-${two(start.day)} '
       '${two(start.hour)}:${two(start.minute)}:${two(start.second)}';
