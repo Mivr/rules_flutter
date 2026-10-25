@@ -661,6 +661,12 @@ bzl_library(
 )
 
 bzl_library(
+    name = "ios_sim_debug",
+    srcs = ["ios_sim_debug.bzl"],
+    visibility = ["//flutter:__subpackages__"],
+)
+
+bzl_library(
     name = "macos_app",
     srcs = ["macos_app.bzl"],
     visibility = ["//flutter:__subpackages__"],

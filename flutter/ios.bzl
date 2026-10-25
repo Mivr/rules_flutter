@@ -69,6 +69,7 @@ load("//flutter/private:flutter_ios_registrant.bzl", _flutter_ios_registrant_rul
 load("//flutter/private:flutter_plist_merge.bzl", _flutter_entitlements_merge = "flutter_entitlements_merge")
 load("//flutter/private:flutter_xtool_bundle.bzl", _flutter_darwin_xcframework_import = "flutter_darwin_xcframework_import", _flutter_xtool_bundle_version = "flutter_xtool_bundle_version", _flutter_xtool_ios_bundle = "flutter_xtool_ios_bundle")
 load("//flutter/private:ios_app.bzl", _IOS_DEFAULT_LAUNCH_STORYBOARD = "IOS_DEFAULT_LAUNCH_STORYBOARD", _IOS_DEFAULT_MAIN_STORYBOARD = "IOS_DEFAULT_MAIN_STORYBOARD", _flutter_ios_app = "flutter_ios_app", _flutter_ios_engine = "flutter_ios_engine")
+load("//flutter/private:ios_sim_debug.bzl", _ios_sim_debug_app = "ios_sim_debug_app")
 
 # Re-export constants for user BUILD files.
 IOS_MINIMUM_OS_VERSION = _IOS_MINIMUM_OS_VERSION
@@ -90,6 +91,13 @@ flutter_xtool_ios_bundle = _flutter_xtool_ios_bundle
 # re-exported here so user BUILD files are unaffected.
 flutter_ios_engine = _flutter_ios_engine
 flutter_ios_app = _flutter_ios_app
+
+# Simulator-debug (JIT) rebuild of an iOS app: `-c dbg` plus
+# `--ios_multi_cpus=sim_arm64` on the app only, so `bazel test //...` needs
+# no flags. Used by `flutter_integration_test(platform = "ios")`; also handy
+# for hand-rolled simulator tests. See `flutter_ios_simulator_build` below
+# for the `-c dbg`-only variant.
+ios_sim_debug_app = _ios_sim_debug_app
 
 # -- Composable rules (Tier 2) ------------------------------------------------
 #
