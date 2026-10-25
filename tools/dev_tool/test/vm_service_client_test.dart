@@ -2759,6 +2759,70 @@ void main() {
       },
     );
 
+    /// The connect-time half of the slow-start race: the first `getVM`
+    /// predates the isolate, so without the post-subscription re-read the
+    /// client adopts nothing and the frame wait below answers at once.
+    test(
+      'connect re-reads getVM after subscribing when no main was found',
+      () async {
+        final fake = FakeVmService(isolates: const []);
+        fake.getVMIsolates = [
+          [],
+          [IsolateRef(id: 'iso-1', name: 'main', number: '1')],
+        ];
+        fake.extensionResponses['ext.flutter.didSendFirstFrameEvent'] = {
+          'enabled': 'true',
+        };
+        final client = await connected(fake);
+
+        expect(fake.getVMCalls, 2);
+        expect(await client.waitForFirstFrame(), isTrue);
+      },
+    );
+
+    /// The wait half: no isolate at connect, and the start that creates it
+    /// lands while the frame wait is running. Pre-fix this answered false at
+    /// once off the missing isolate.
+    test(
+      'true when the main isolate starts while the frame wait runs',
+      () async {
+        final fake = FakeVmService(isolates: const []);
+        fake.extensionResponses['ext.flutter.didSendFirstFrameEvent'] = {
+          'enabled': 'true',
+        };
+        final client = await connected(fake);
+
+        final waiting = client.waitForFirstFrame(
+          timeout: const Duration(seconds: 10),
+        );
+        await pumpEventQueue();
+        fake.emitIsolateStart('iso-1');
+
+        expect(await waiting, isTrue);
+      },
+    );
+
+    /// A faulted isolate read is why, not a bare false: when the reads that
+    /// should have found an isolate keep failing, the wait throws the fault
+    /// rather than reporting that nothing painted.
+    test('a faulted getVM read surfaces instead of a bare false', () async {
+      var ticks = 0;
+      final epoch = DateTime(2026, 10, 25);
+      final fake = FakeVmService(isolates: const []);
+      fake.getVMIsolates = [[], []];
+      final client = VmServiceClient(
+        connector: (_) async => fake,
+        now: () => epoch.add(Duration(milliseconds: 500 * ticks++)),
+      );
+      await client.connect(serviceUri, createDevFS: false);
+      fake.getVMError = RPCError('getVM', 100, 'boom');
+
+      await expectLater(
+        client.waitForFirstFrame(timeout: const Duration(seconds: 10)),
+        throwsA(isA<RPCError>().having((e) => e.code, 'code', 100)),
+      );
+    });
+
     /// The precondition every framework-extension caller shares. Asking whether
     /// an extension is registered and then calling it regardless makes a
     /// `-32601` ambiguous: a framework still starting and a framework that will

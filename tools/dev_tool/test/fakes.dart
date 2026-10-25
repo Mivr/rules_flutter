@@ -462,6 +462,21 @@ class FakeVmService implements VmService {
   /// a test drive DWDS's unbounded `waitForIsolateStarted` deterministically.
   Completer<void>? hotRestartGate;
 
+  /// Calls to [getVM] so far, faulted ones included. Lets a test assert the
+  /// connect-time re-read happened (or that a wait stopped polling).
+  int getVMCalls = 0;
+
+  /// Per-call isolate lists answering [getVM], consumed in order: call `n`
+  /// answers `getVMIsolates[n]`, and calls past the end answer [isolates].
+  /// Lets a test bring the main isolate up late — or never.
+  List<List<IsolateRef>> getVMIsolates = const [];
+
+  /// If non-null, every [getVM] throws this instead of answering. A protocol
+  /// fault, answered the way a live service answers one: a rejected future,
+  /// not the synchronous throw a disposed connection gives ([_checkAlive]
+  /// still owns that shape).
+  RPCError? getVMError;
+
   final StreamController<Event> _extController =
       StreamController<Event>.broadcast();
   final StreamController<Event> _stdoutController =
@@ -689,8 +704,11 @@ class FakeVmService implements VmService {
   }
 
   Future<VM> _getVM() async {
+    final n = getVMCalls++;
+    final fault = getVMError;
+    if (fault != null) throw fault;
     return VM(
-      isolates: isolates,
+      isolates: n < getVMIsolates.length ? getVMIsolates[n] : isolates,
       name: 'fake_vm',
       architectureBits: 64,
       hostCPU: 'fake',

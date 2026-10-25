@@ -1390,6 +1390,27 @@ void main() {
       fake.callServiceExtensionGate!.complete();
     });
 
+    /// A slow-starting app is drivable once its isolate shows up late: no
+    /// isolate at connect is a moment to wait through, not a verdict.
+    test('settles ready when the main isolate starts late', () async {
+      final sink = BufferSink();
+      final protocol = MachineProtocol(enabled: true, output: sink);
+      final fake = FakeVmService(isolates: const []);
+      fake.extensionResponses['ext.flutter.didSendFirstFrameEvent'] = {
+        'enabled': 'true',
+      };
+      final client = await connected(fake);
+      final session = sessionOn(MacOSDevice(), client);
+
+      final waiting = session.waitUntilDrivable(protocol);
+      await pumpEventQueue();
+      fake.emitIsolateStart('iso-1');
+      await waiting;
+
+      expect(session.drivable.isReady, isTrue);
+      expect(session.drivable.unavailableReason, isNull);
+    });
+
     test(
       'an app that never paints settles with a reason, not silence',
       () async {

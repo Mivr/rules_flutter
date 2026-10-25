@@ -121,6 +121,14 @@ class ServiceExtensionUnavailable implements Exception {
 /// `package:vm_service` exposes the wire codes only as literals.
 const int _rpcMethodNotFound = -32601;
 
+/// How often [VmServiceClient.waitForFirstFrame] re-reads `getVM` while it
+/// waits for a main isolate to appear.
+///
+/// Prompt enough that a start landing just after the subscription is picked up
+/// without adding load to a VM that is still booting. Bounded by the caller's
+/// own timeout, so this only decides how promptly a late isolate is noticed.
+const Duration _isolateWaitPollInterval = Duration(milliseconds: 100);
+
 /// How often [VmServiceClient.waitForFirstFrame] re-asks
 /// `ext.flutter.didSendFirstFrameEvent`.
 ///
@@ -472,6 +480,24 @@ class VmServiceClient {
     }
   }
 
+  /// Point at the `main` isolate [vm] names, keeping the previous main — or
+  /// the first isolate — when it names none.
+  ///
+  /// One policy for every read: [_connect] adopts the pre-subscription read
+  /// and the post-subscription re-read, and [_waitForMainIsolate] adopts each
+  /// re-read while it waits. Returns whether [vm] named a `main`.
+  bool _adoptMainIsolate(VM vm) {
+    String? found;
+    for (final isolateRef in vm.isolates ?? <IsolateRef>[]) {
+      if (isolateRef.name == 'main') {
+        found = isolateRef.id;
+        break;
+      }
+    }
+    _setMainIsolate(found ?? _mainIsolateId ?? vm.isolates?.firstOrNull?.id);
+    return found != null;
+  }
+
   Future<void> _connect(
     Uri serviceUri,
     int attempt, {
@@ -495,15 +521,7 @@ class VmServiceClient {
     _service = svc;
 
     // Find the main isolate.
-    final vm = await _service!.getVM();
-    String? found;
-    for (final isolateRef in vm.isolates ?? <IsolateRef>[]) {
-      if (isolateRef.name == 'main') {
-        found = isolateRef.id;
-        break;
-      }
-    }
-    _setMainIsolate(found ?? _mainIsolateId ?? vm.isolates?.firstOrNull?.id);
+    _adoptMainIsolate(await _service!.getVM());
 
     // Register the Extension stream so Flutter.Error / Flutter.Frame
     // events flow; the per-reload verdict listener is attached in
@@ -517,6 +535,13 @@ class VmServiceClient {
     await _ensureStream(EventStreams.kIsolate);
     await _isolateEvents?.cancel();
     _isolateEvents = _service!.onIsolateEvent.listen(_onIsolateEvent);
+    if (_mainIsolateId == null) {
+      // A start that landed in the getVM-to-subscribe gap posted to a stream
+      // with no listener yet. Re-read now that there is one: the first read
+      // predates it, and without this the client reports no main isolate
+      // until the next start — which, for a slow-starting app, is never.
+      _adoptMainIsolate(await _service!.getVM());
+    }
 
     if (createDevFS) await _createDevFS();
 
@@ -1753,6 +1778,71 @@ class VmServiceClient {
     }
   }
 
+  /// Wait up to [budget] for a main isolate and report what the wait found.
+  ///
+  /// The socket can answer before the app's isolate exists: [connect] then
+  /// adopts nothing, and the start that creates it may already be in the past
+  /// — posted in the getVM-to-subscribe gap, before the listener that would
+  /// have adopted it. So this both listens and reads. An `IsolateStart` the
+  /// existing [_onIsolateEvent] listener adopts ends the wait at once; between
+  /// events `getVM` is re-read, so a start nobody was subscribed for yet is
+  /// still picked up.
+  ///
+  /// A read that fails is recorded rather than dropped, and a dead socket ends
+  /// the wait rather than polling it: nothing will ever start on one, and the
+  /// close watcher owns recovery. When no isolate appears, the caller throws
+  /// the recorded fault instead of reporting a bare "never showed up" — a
+  /// protocol fault is not a missing isolate. No isolate and no fault is the
+  /// budget expiring (or [until] firing), which the caller reports as false.
+  ///
+  /// Bounded by [_now]: a frozen clock with a hanging read never expires, so
+  /// tests advance their fake clock on every read.
+  Future<({String? isolateId, Object? failure})> _waitForMainIsolate(
+    Duration budget,
+    Future<void>? until,
+  ) async {
+    final known = _mainIsolateId;
+    if (known != null) return (isolateId: known, failure: null);
+    final deadline = _now().add(budget);
+    Object? failure;
+    var warned = false;
+    var abandoned = false;
+    final abandon = until?.then((_) => abandoned = true);
+    try {
+      while (!abandoned &&
+          _mainIsolateId == null &&
+          _now().isBefore(deadline)) {
+        final svc = _service;
+        // A connection dropped mid-wait ends it: nothing starts on a dead
+        // socket, and the frame phase reconnects on its own reads from here.
+        if (svc == null) break;
+        try {
+          _adoptMainIsolate(await svc.getVM());
+        } on RPCError catch (e) {
+          // A dead socket grows no isolates; the close watcher owns recovery.
+          if (_isConnectionDisposed(e)) break;
+          failure ??= e;
+          if (!warned) {
+            warned = true;
+            _logger.warning({
+              'message': 'vm_service_isolate_wait_read_failed',
+              'text':
+                  'Reading the isolates while waiting for the main one '
+                  'failed: $e. Waiting on, and reporting this if none shows up.',
+              'error': '$e',
+            });
+          }
+        }
+        if (_mainIsolateId != null || abandoned) break;
+        await Future<void>.delayed(_isolateWaitPollInterval);
+      }
+    } finally {
+      abandon?.ignore();
+    }
+    if (abandoned) return (isolateId: null, failure: null);
+    return (isolateId: _mainIsolateId, failure: failure);
+  }
+
   /// Wait until the Flutter framework has rendered its first frame.
   ///
   /// Returns whether it did, within [timeout]. The answer doubles as "is this
@@ -1786,14 +1876,45 @@ class VmServiceClient {
   /// stopped needing an answer, and the budget above may be minutes. A run
   /// tearing down passes it, because the timer this would otherwise sit on
   /// keeps the process alive long after the thing it was waiting for stopped
-  /// mattering.
+  /// mattering. No known main isolate is a moment to wait through rather than
+  /// an answer: the isolate may still be on its way up (see
+  /// [_waitForMainIsolate]), so the wait spends its budget on one before it
+  /// asks about any frame.
+
   Future<bool> waitForFirstFrame({
     Duration timeout = const Duration(seconds: 15),
     Future<void>? until,
   }) async {
     final service = _service;
-    final isolateId = _mainIsolateId;
-    if (service == null || isolateId == null) return false;
+    if (service == null) return false;
+
+    // One budget for the whole question, spent by the isolate wait first and
+    // by the frame wait with whatever is left. The waitForServiceExtension
+    // shape, for the same reason: the caller asked one question and reports
+    // one wait, so the phases share rather than stack.
+    final spent = Stopwatch()..start();
+    Duration left() {
+      final remaining = timeout - spent.elapsed;
+      return remaining.isNegative ? Duration.zero : remaining;
+    }
+
+    // The socket can answer before the app's isolate exists, and the start
+    // that creates it can predate the `Isolate`-stream subscription that would
+    // have adopted it. The outer cap is the hanging read's, not the budget's:
+    // a `getVM` over a socket that went quiet without closing raises nothing,
+    // and without it one silent read holds the whole wait past its timeout.
+    final seen = await _waitForMainIsolate(
+      left(),
+      until,
+    ).timeout(left(), onTimeout: () => (isolateId: null, failure: null));
+    final isolateId = seen.isolateId;
+    if (isolateId == null) {
+      // A recorded fault is why, and a caller reading "had not rendered"
+      // needs the real fault instead — the queryFailure rule one phase down.
+      final failure = seen.failure;
+      if (failure != null) throw failure;
+      return false;
+    }
 
     final wait = _FirstFrameWait();
 
@@ -1811,7 +1932,7 @@ class VmServiceClient {
 
     try {
       final painted = await wait.rendered.future.timeout(
-        timeout,
+        left(),
         onTimeout: () => false,
       );
       final failure = wait.queryFailure;
