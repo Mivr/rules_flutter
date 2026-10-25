@@ -71,7 +71,7 @@ def _flutter_aot_target_impl(ctx):
 
     # Obfuscation forces `--strip` (see `flutter_aot_gen_snapshot_flags`):
     # unstripped DWARF would leak the original names.
-    extra_flags, extra_outputs, debug_info_output, strip = flutter_aot_gen_snapshot_flags(ctx, strip)
+    extra_flags, extra_outputs, debug_info_output, obfuscation_map_output, strip = flutter_aot_gen_snapshot_flags(ctx, strip)
 
     if is_ios or is_macos:
         output = ctx.actions.declare_file(ctx.label.name + ".dylib")
@@ -100,6 +100,8 @@ def _flutter_aot_target_impl(ctx):
     output_groups = {}
     if debug_info_output:
         output_groups["debug_info"] = depset([debug_info_output])
+    if obfuscation_map_output:
+        output_groups["obfuscation_map"] = depset([obfuscation_map_output])
 
     providers = [
         DefaultInfo(files = depset([output])),

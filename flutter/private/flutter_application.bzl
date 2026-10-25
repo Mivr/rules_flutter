@@ -157,8 +157,8 @@ def _compile_application_aot(ctx, flutter_sdk_info, is_debug, is_ios, is_macos, 
     `--strip`: unstripped DWARF would leak the original names.
     """
     if is_debug:
-        return None, None, strip
-    extra_flags, extra_outputs, debug_info_output, strip = flutter_aot_gen_snapshot_flags(ctx, strip)
+        return None, None, None, strip
+    extra_flags, extra_outputs, debug_info_output, obfuscation_map_output, strip = flutter_aot_gen_snapshot_flags(ctx, strip)
     if is_ios or is_macos:
         aot_output = ctx.actions.declare_file(ctx.label.name + ".dylib")
         flutter_aot_macho_action(
@@ -182,7 +182,7 @@ def _compile_application_aot(ctx, flutter_sdk_info, is_debug, is_ios, is_macos, 
             extra_flags = extra_flags,
             extra_outputs = extra_outputs,
         )
-    return aot_output, debug_info_output, strip
+    return aot_output, debug_info_output, obfuscation_map_output, strip
 
 def _collect_application_native_libs(ctx):
     """Collects native shared libraries from native_deps + transitive plugin deps."""
@@ -433,6 +433,8 @@ def _application_providers(flutter_sdk_info, is_debug, outputs, plugins):
     }
     if outputs.debug_info_output:
         output_groups["debug_info"] = depset([outputs.debug_info_output])
+    if outputs.obfuscation_map_output:
+        output_groups["obfuscation_map"] = depset([outputs.obfuscation_map_output])
     if outputs.link_hook_validation:
         # Every hook runs whenever the app builds, even one that emits no
         # asset, so its verdict on the program is never skipped.
@@ -443,6 +445,7 @@ def _application_providers(flutter_sdk_info, is_debug, outputs, plugins):
         FlutterApplicationInfo(
             aot_output = outputs.aot_output,
             aot_strip = outputs.aot_strip,
+            obfuscation_map = outputs.obfuscation_map_output,
             kernel_dill = outputs.kernel_dill if is_debug else None,
             flutter_assets = outputs.flutter_assets,
             icu_data = flutter_sdk_info.icu_data,
@@ -509,7 +512,7 @@ def _flutter_application_impl(ctx):
     package_config = compilation.package_config
 
     # Step 2: AOT compile — choose format based on target platform.
-    aot_output, debug_info_output, strip = _compile_application_aot(ctx, flutter_sdk_info, is_debug, platform.is_ios, platform.is_macos, kernel_dill, strip)
+    aot_output, debug_info_output, obfuscation_map_output, strip = _compile_application_aot(ctx, flutter_sdk_info, is_debug, platform.is_ios, platform.is_macos, kernel_dill, strip)
 
     native_libs = _collect_application_native_libs(ctx)
 
@@ -577,6 +580,7 @@ def _flutter_application_impl(ctx):
         aot_output = aot_output,
         aot_strip = strip,
         debug_info_output = debug_info_output,
+        obfuscation_map_output = obfuscation_map_output,
         link_hook_validation = link_hook_validation,
         flutter_assets = flutter_assets,
         native_libs = native_libs,

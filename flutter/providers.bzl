@@ -349,7 +349,8 @@ FlutterApplicationInfo, _new_flutter_application_info = provider(
 ran with `--strip`, else False (False when there is no AOT output).""",
     fields = {
         "aot_output": "File or None: The AOT compiled native code (.so, .dylib, or .S). None in debug mode.",
-        "aot_strip": "Required bool: whether gen_snapshot stripped this AOT output (`--strip`: `-c opt`, forced by `obfuscate` unless `--no-strip` in `extra_gen_snapshot_options` wins). Pass False when there is no AOT output. The Apple framework rules drop the snapshot's local and stab symbols from the shipped App binary exactly then, the way `flutter build` runs `strip -x` on the dylib.",
+        "aot_strip": "Required bool: whether gen_snapshot stripped this AOT output (`--strip`: `-c opt`, forced by `obfuscate`). `--no-strip` in `extra_gen_snapshot_options` disables stripping and reports False, and fails analysis with `obfuscate`. Pass False when there is no AOT output. The Apple framework rules drop the snapshot's local and stab symbols from the shipped App binary exactly then, the way `flutter build` runs `strip -x` on the dylib.",
+        "obfuscation_map": "File or None: The gen_snapshot obfuscation map (`--save-obfuscation-map`), written only when `obfuscate` is True in a non-debug build; fetch it with `--output_groups=obfuscation_map`. None otherwise.",
         "kernel_dill": "File or None: The kernel .dill file for JIT mode. None in release mode.",
         "flutter_assets": "File: The flutter_assets/ tree artifact.",
         "icu_data": "File: The icudtl.dat file.",
