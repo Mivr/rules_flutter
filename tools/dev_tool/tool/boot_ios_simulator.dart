@@ -381,12 +381,19 @@ Future<CommandResult> runSimctl(
 /// elapsed time, and the attempt that follows it. A call that answers —
 /// including a non-zero exit — returns (or fails, through
 /// [_requireSimctlSuccess]) at once: only silence is retried, never a refusal.
+///
+/// A retried `simctl boot` is the exception when [retryAcceptBooting] is set:
+/// a killed first attempt can still be working when the retry runs, and the
+/// retry then exits non-zero saying the device is already Booting or Booted.
+/// That refusal means the boot happened, so it is logged and returned as done
+/// for `bootstatus` to take over; any other non-zero exit still fails at once.
 Future<CommandResult> runSimctlWithRetries(
   CommandSpawner spawner,
   List<String> args, {
   required RetryBounds bounds,
   required void Function(String line) log,
   DateTime Function() now = DateTime.now,
+  bool retryAcceptBooting = false,
 }) async {
   final label = 'xcrun ${args.join(' ')}';
   final started = now();
@@ -399,7 +406,23 @@ Future<CommandResult> runSimctlWithRetries(
     attempt++;
     final bound = attemptBound < left ? attemptBound : left;
     final result = await _runSimctlAttempt(spawner, args, bound);
-    if (result != null) return result;
+    if (result != null) {
+      if (retryAcceptBooting &&
+          attempt > 1 &&
+          result.exitCode != 0 &&
+          _bootAlreadyUnderway.hasMatch(result.stderrText)) {
+        log(
+          '`$label` reports the device is already booting '
+          '(attempt $attempt); treating the boot as done',
+        );
+        return CommandResult(
+          exitCode: 0,
+          stdoutText: result.stdoutText,
+          stderrText: result.stderrText,
+        );
+      }
+      return result;
+    }
     elapsed = now().difference(started);
     // The overall bound expired with this overrun: fail without logging a
     // retry for an attempt that will never run.
@@ -421,6 +444,12 @@ Future<CommandResult> runSimctlWithRetries(
 String _formatElapsed(Duration elapsed) => elapsed >= const Duration(seconds: 1)
     ? '${elapsed.inSeconds}s'
     : '${elapsed.inMilliseconds}ms';
+
+/// A `simctl boot` refusal that means the boot already happened: the attempt
+/// this retry replaces was killed for slowness while still working.
+final _bootAlreadyUnderway = RegExp(
+  r'Unable to boot device in current state: Boot(?:ing|ed)',
+);
 
 /// One attempt at a `simctl` call: starts the child and waits up to [bound]
 /// for its exit, killing it past the bound.
@@ -501,6 +530,7 @@ Future<SimulatorChoice> bootSimulator(BootOptions options) async {
       bounds: options.bootBounds,
       log: options.log,
       now: options.now,
+      retryAcceptBooting: true,
     );
     _requireSimctlSuccess(boot, 'xcrun simctl boot ${device.udid}');
   }

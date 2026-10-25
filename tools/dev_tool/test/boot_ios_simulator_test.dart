@@ -746,6 +746,137 @@ void main() {
         );
       });
 
+      test(
+        'a retried boot refused as already-booting counts as done',
+        () async {
+          // The killed first attempt was still working: the retry finds the
+          // device Booting and hands over to bootstatus instead of failing.
+          final inner = listingSpawner(
+            {
+              ios265: [device('iPhone 17', 'udid-o')],
+            },
+            extra: {
+              'xcrun simctl boot udid-o': const CannedResult(
+                exitCode: 1,
+                stderrText: 'Unable to boot device in current state: Booting\n',
+              ),
+              'xcrun simctl bootstatus udid-o -b': const CannedResult(),
+            },
+          );
+          final spawner = SlowFirstCall('xcrun simctl boot udid-o', inner);
+          final log = <String>[];
+          var ticks = 0;
+          final epoch = DateTime(2026, 1, 1);
+          final udid = await bootAndReport(
+            BootOptions(
+              spawner: spawner,
+              bootstatusTimeout: const Duration(seconds: 10),
+              log: log.add,
+              bootBounds: const RetryBounds(
+                first: Duration(milliseconds: 50),
+                overall: Duration(seconds: 10),
+              ),
+              now: () => epoch.add(Duration(milliseconds: 150 * ticks++)),
+            ),
+            log.add,
+          );
+
+          expect(udid, 'udid-o');
+          expect(spawner.calls, 2, reason: 'one hang, then the refusal');
+          expect(
+            inner.started,
+            contains('xcrun simctl bootstatus udid-o -b'),
+            reason: 'the boot counts, so bootstatus takes over the wait',
+          );
+          final done = log.firstWhere(
+            (line) => line.contains('already booting'),
+          );
+          expect(done, contains('xcrun simctl boot udid-o'));
+          expect(done, contains('attempt 2'));
+        },
+      );
+
+      test('a first-attempt boot refusal fails at once', () async {
+        // Not a retry: nothing was killed, so the refusal stands as-is.
+        final spawner = listingSpawner(
+          {
+            ios265: [device('iPhone 17', 'udid-f')],
+          },
+          extra: {
+            'xcrun simctl boot udid-f': const CannedResult(
+              exitCode: 1,
+              stderrText: 'Unable to boot device in current state: Booting\n',
+            ),
+          },
+        );
+        final log = <String>[];
+        await expectLater(
+          bootAndReport(
+            BootOptions(
+              spawner: spawner,
+              bootstatusTimeout: const Duration(seconds: 10),
+              log: log.add,
+            ),
+            log.add,
+          ),
+          throwsA(
+            isA<BootFailure>().having(
+              (e) => e.reason,
+              'reason',
+              allOf(contains('exited 1'), contains('simctl boot udid-f')),
+            ),
+          ),
+        );
+        expect(
+          spawner.started.where((s) => s == 'xcrun simctl boot udid-f'),
+          hasLength(1),
+        );
+        expect(log.where((line) => line.contains('retrying')), isEmpty);
+        expect(log.where((line) => line.contains('already booting')), isEmpty);
+      });
+
+      test('another refusal on retry still fails at once', () async {
+        final inner = listingSpawner(
+          {
+            ios265: [device('iPhone 17', 'udid-x')],
+          },
+          extra: {
+            'xcrun simctl boot udid-x': const CannedResult(
+              exitCode: 1,
+              stderrText: 'Invalid device state - udid-x\n',
+            ),
+          },
+        );
+        final spawner = SlowFirstCall('xcrun simctl boot udid-x', inner);
+        final log = <String>[];
+        var ticks = 0;
+        final epoch = DateTime(2026, 1, 1);
+        await expectLater(
+          bootAndReport(
+            BootOptions(
+              spawner: spawner,
+              bootstatusTimeout: const Duration(seconds: 10),
+              log: log.add,
+              bootBounds: const RetryBounds(
+                first: Duration(milliseconds: 50),
+                overall: Duration(seconds: 10),
+              ),
+              now: () => epoch.add(Duration(milliseconds: 150 * ticks++)),
+            ),
+            log.add,
+          ),
+          throwsA(
+            isA<BootFailure>().having(
+              (e) => e.reason,
+              'reason',
+              allOf(contains('exited 1'), contains('simctl boot udid-x')),
+            ),
+          ),
+        );
+        expect(spawner.calls, 2, reason: 'one hang, then the refusal');
+        expect(log.where((line) => line.contains('already booting')), isEmpty);
+      });
+
       test('a refused list fails at once without retrying', () async {
         final spawner = FakeSpawner({
           listKey(): const CannedResult(
