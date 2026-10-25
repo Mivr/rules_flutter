@@ -35,6 +35,17 @@ class SessionHost {
   /// what exists so far rather than waiting for all of it.
   final List<DeviceSession> sessions = <DeviceSession>[];
 
+  /// The first-frame wait of every session this command launched, in launch
+  /// order.
+  ///
+  /// Kept rather than discarded: a native run that can reload starts its
+  /// hot-reload toolchain assembly only once every one of these has settled
+  /// (see `assembleNativeAfterFirstFrame`), so the toolchain's own `bazel
+  /// build` does not compete with the app it just launched for the machine.
+  /// A wait that never had a client completes at once, so a session without
+  /// one never holds this up.
+  final List<Future<void>> firstFrameWaits = <Future<void>>[];
+
   /// Serialized dispatch for every transport (stdin protocol, HTTP channel,
   /// keyboard, file watcher).
   late final CommandRunner commandRunner = CommandRunner(
@@ -122,6 +133,18 @@ class SessionHost {
     if (appId == null) return sessions;
     final session = findSession(appId);
     return session == null ? const [] : [session];
+  }
+
+  /// Wait until every launched session's first-frame wait has settled.
+  ///
+  /// Each entry is the future [DeviceSession.waitUntilDrivable] returned, so
+  /// this waits on nothing new: a rendered frame, a timed-out or failed wait,
+  /// and a run that ended all settle that same future. No second wait, no
+  /// polling, and no timer of its own.
+  Future<void> settleFirstFrameWaits() async {
+    for (final wait in firstFrameWaits) {
+      await wait;
+    }
   }
 
   /// Gracefully tear down everything the command owns, then signal the session

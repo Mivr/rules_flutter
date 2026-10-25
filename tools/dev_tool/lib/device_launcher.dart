@@ -105,7 +105,13 @@ class DeviceLauncher {
     // a physical device it will not for another minute. Commands wait on the
     // gate this settles; the run itself must not, or every launch would sit
     // out that minute before the session loop existed.
-    unawaited(deviceSession.waitUntilDrivable(host.protocol));
+    //
+    // Kept on the host rather than discarded. A native run that can reload
+    // starts its hot-reload toolchain assembly only once every launched
+    // session's first-frame wait has settled (see
+    // `assembleNativeAfterFirstFrame`), so the assembly's `bazel build` does
+    // not compete with the app it just launched.
+    host.firstFrameWaits.add(deviceSession.waitUntilDrivable(host.protocol));
 
     await host.teardown.add(() => deviceSession.shutdown(host.protocol));
     return deviceSession;
