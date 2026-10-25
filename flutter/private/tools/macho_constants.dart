@@ -87,10 +87,16 @@ const int lcDyldExportsTrie = 0x33 | lcReqDyld;
 const int lcDyldChainedFixups = 0x34 | lcReqDyld;
 const int lcFilesetEntry = 0x35 | lcReqDyld; // 0x80000035
 
-// `section_64` type mask and the zero-fill type: zero-fill sections occupy no
-// file bytes, so the strip's range accounting skips them.
+// `section_64` type mask and the zero-fill types: zero-fill sections occupy
+// no file bytes, so the strip's range accounting skips them.
 const int sectionTypeMask = 0xff;
 const int sectionTypeZerofill = 0x01;
+
+/// `S_GB_ZEROFILL`: a zero-fill section type occupying no file bytes.
+const int sectionTypeGbZerofill = 0x0c;
+
+/// `S_THREAD_LOCAL_ZEROFILL`: a zero-fill section type occupying no file bytes.
+const int sectionTypeThreadLocalZerofill = 0x12;
 
 // Platform constants for LC_BUILD_VERSION.
 const int platformMacos = 1;

@@ -2516,7 +2516,9 @@ void main() {
           vmaddr: 0,
           vmsize: fileSize,
           fileoff: 0,
-          filesize: fileSize,
+          // The tables live outside every segment: an in-place strip
+          // refuses a segment range meeting the bytes it rewrites.
+          filesize: symoff,
           maxprot: 5,
           initprot: 5,
           nsects: 0,
@@ -3326,6 +3328,288 @@ void main() {
         expectPastEnd(boobyTrapped, contains('__DATA'));
       });
     });
+  });
+
+  group('stripInPlaceSections (COV-24 follow-up, RT30-flutter 03)', () {
+    // The shared table layout below: two locals plus one global at 0x400.
+    const symoff = 0x400;
+    // Three 16-byte entries; strings are NUL + '_local_a\0' + '_local_b\0' +
+    // '_kept_global\0'.
+    const stroff = symoff + 3 * 16;
+    const strsize = 1 + 9 + 9 + 13;
+    const oldEnd = stroff + strsize;
+    // The strip keeps one 16-byte entry and a 14-byte string table
+    // (NUL + '_kept_global\0'), so the first zeroed byte is here.
+    const newTailStart = symoff + 16 + (1 + 12 + 1);
+
+    /// An 80-byte `section_64` record for [sectname] in [segname] naming the
+    /// file range [offset]/[size] with a regular (`S_REGULAR`) type.
+    Uint8List sectionRecord(
+      String sectname,
+      String segname,
+      int offset,
+      int size,
+    ) {
+      final buf = Uint8List(80);
+      final bd = ByteData.sublistView(buf);
+      final sectBytes = ascii.encode(sectname);
+      buf.setRange(0, sectBytes.length, sectBytes);
+      final segBytes = ascii.encode(segname);
+      buf.setRange(16, 16 + segBytes.length, segBytes);
+      bd.setUint64(32, 0x1000, Endian.little);
+      bd.setUint64(40, size, Endian.little);
+      bd.setUint32(48, offset, Endian.little);
+      bd.setUint32(52, 2, Endian.little);
+      return buf;
+    }
+
+    /// An `LC_SEGMENT_64` command for [segname] covering [fileoff]/[filesize]
+    /// with [sections] appended, `cmdsize` fixed up for the records.
+    Uint8List segmentWithSections(
+      String segname,
+      int fileoff,
+      int filesize,
+      List<Uint8List> sections,
+    ) {
+      final header = macho.buildLcSegment64((
+        segname: segname,
+        vmaddr: 0,
+        vmsize: filesize,
+        fileoff: fileoff,
+        filesize: filesize,
+        maxprot: 5,
+        initprot: 5,
+        nsects: sections.length,
+        flags: 0,
+      )).bytes;
+      final out = BytesBuilder(copy: false)..add(header);
+      for (final section in sections) {
+        out.add(section);
+      }
+      final bytes = out.toBytes();
+      ByteData.sublistView(bytes).setUint32(4, bytes.length, Endian.little);
+      return bytes;
+    }
+
+    /// Builds a small unsigned arm64 dylib with no `__LINKEDIT` segment: two
+    /// local symbols and one global at [symoff], an empty `LC_DYSYMTAB`, a
+    /// `__TEXT` segment covering [0, textSegEnd) with a `__text` section over
+    /// [textOff, textOff + textSize), and, when [dataSegEnd] is nonzero, a
+    /// `__DATA` segment covering [dataSegOff, dataSegEnd) carrying a `__data`
+    /// section over [dataOff, dataOff + dataSize) unless [dataSize] is zero,
+    /// which builds the segment with no sections. The file spans the tables
+    /// and both segments.
+    ({Uint8List bytes, int symoff, int stroff, int strsize, int oldEnd})
+    buildSectionDylib({
+      required int textSegEnd,
+      required int textOff,
+      required int textSize,
+      int dataSegOff = 0,
+      int dataSegEnd = 0,
+      int dataOff = 0,
+      int dataSize = 0,
+    }) {
+      final names = ['_local_a', '_local_b', '_kept_global'];
+      final types = [0x0e, 0x0e, 0x0f];
+      final strings = BytesBuilder(copy: false)..addByte(0);
+      final strx = <int>[];
+      for (final name in names) {
+        strx.add(strings.length);
+        strings.add(utf8.encode(name));
+        strings.addByte(0);
+      }
+      final strBytes = strings.toBytes();
+      final symBytes = BytesBuilder(copy: false);
+      for (var i = 0; i < names.length; i++) {
+        final entry = ByteData(16)
+          ..setUint32(0, strx[i], Endian.little)
+          ..setUint8(4, types[i])
+          ..setUint8(5, 1)
+          ..setUint16(6, 0, Endian.little)
+          ..setUint64(8, 0x1000 + i * 8, Endian.little);
+        symBytes.add(entry.buffer.asUint8List());
+      }
+      final symTab = symBytes.toBytes();
+      expect(symTab.length, 3 * 16);
+      expect(strBytes.length, strsize);
+
+      final commands = <Uint8List>[
+        segmentWithSections('__TEXT', 0, textSegEnd, [
+          sectionRecord('__text', '__TEXT', textOff, textSize),
+        ]),
+        macho
+            .buildLcSymtab(
+              symoff: symoff,
+              nsyms: names.length,
+              stroff: stroff,
+              strsize: strBytes.length,
+            )
+            .bytes,
+        macho.buildLcDysymtab().bytes,
+        macho.buildLcIdDylib('@rpath/Section.dylib').bytes,
+        if (dataSegEnd != 0)
+          segmentWithSections('__DATA', dataSegOff, dataSegEnd - dataSegOff, [
+            if (dataSize != 0)
+              sectionRecord('__data', '__DATA', dataOff, dataSize),
+          ]),
+        macho
+            .buildLcBuildVersion(
+              platform: 2,
+              minos: 0x000e0000,
+              sdk: 0x00110000,
+            )
+            .bytes,
+      ];
+      var fileSize = oldEnd;
+      for (final end in [textSegEnd, dataSegEnd]) {
+        if (end > fileSize) fileSize = end;
+      }
+      var sizeofcmds = 0;
+      for (final c in commands) {
+        sizeofcmds += c.length;
+      }
+      final buf = Uint8List(fileSize);
+      final bd = ByteData.sublistView(buf);
+      bd.setUint32(0, macho.mhMagic64, Endian.little);
+      bd.setUint32(4, macho.cpuTypeArm64, Endian.little);
+      bd.setUint32(8, macho.cpuSubtypeArm64All, Endian.little);
+      bd.setUint32(12, macho.mhDylib, Endian.little);
+      bd.setUint32(16, commands.length, Endian.little);
+      bd.setUint32(20, sizeofcmds, Endian.little);
+      bd.setUint32(24, macho.mhNoReexportedDylibs, Endian.little);
+      var off = macho.mhHeaderSize64;
+      for (final c in commands) {
+        buf.setRange(off, off + c.length, c);
+        off += c.length;
+      }
+      buf.setRange(symoff, symoff + symTab.length, symTab);
+      buf.setRange(stroff, stroff + strBytes.length, strBytes);
+      return (
+        bytes: buf,
+        symoff: symoff,
+        stroff: stroff,
+        strsize: strBytes.length,
+        oldEnd: oldEnd,
+      );
+    }
+
+    void expectStripRefusal(Uint8List bytes, Matcher message) {
+      expect(
+        () => macho.patchMachO(
+          bytes,
+          macho.PatchOptions(stripSymbols: true),
+        ),
+        throwsA(
+          isA<FormatException>().having(
+            (e) => e.message,
+            'message',
+            message,
+          ),
+        ),
+      );
+    }
+
+    test(
+      'strip refuses an in-place rewrite over a live __text section (RT30 03)',
+      () {
+        // The red-team layout: no `__LINKEDIT`, and the symbol and string
+        // tables [symoff, oldEnd) sit inside `__text` of `__TEXT`.
+        final input = buildSectionDylib(
+          textSegEnd: 0x1000,
+          textOff: 0x300,
+          textSize: 0x1000 - 0x300,
+        );
+        expect(input.oldEnd, oldEnd);
+        expectStripRefusal(
+          input.bytes,
+          allOf(
+            contains('__text'),
+            contains('__TEXT'),
+            contains('$symoff'),
+            contains('__LINKEDIT'),
+          ),
+        );
+      },
+    );
+
+    test(
+      'strip refuses a section covering only the zeroed string-table tail',
+      () {
+        // `__text` ends where the tables start, but a `__data` section of
+        // another segment covers only [newTailStart, oldEnd), bytes the
+        // rewrite zero-fills.
+        final input = buildSectionDylib(
+          textSegEnd: symoff,
+          textOff: symoff - 200,
+          textSize: 200,
+          dataSegOff: oldEnd,
+          dataSegEnd: oldEnd + 64,
+          dataOff: newTailStart,
+          dataSize: oldEnd - newTailStart,
+        );
+        expectStripRefusal(
+          input.bytes,
+          allOf(
+            contains('__data'),
+            contains('__DATA'),
+            contains('$newTailStart'),
+            contains('__LINKEDIT'),
+          ),
+        );
+      },
+    );
+
+    test(
+      'strip refuses a section-less segment covering the symbol table',
+      () {
+        // `__DATA` has no sections and its file range covers part of the
+        // symbol table; every section stays clear of the tables.
+        final input = buildSectionDylib(
+          textSegEnd: symoff,
+          textOff: symoff - 200,
+          textSize: 200,
+          dataSegOff: symoff + 8,
+          dataSegEnd: symoff + 40,
+        );
+        expectStripRefusal(
+          input.bytes,
+          allOf(
+            contains('__DATA'),
+            contains('0x19'),
+            contains('$symoff'),
+            contains('__LINKEDIT'),
+          ),
+        );
+      },
+    );
+
+    test(
+      'strip keeps a __text section ending where the tables start',
+      () {
+        // Adjacent is not overlapping: `__text` ends exactly where the
+        // symbol table starts, so the strip still succeeds and leaves the
+        // section bytes unchanged.
+        final input = buildSectionDylib(
+          textSegEnd: symoff,
+          textOff: symoff - 200,
+          textSize: 200,
+        );
+        final sectionBefore = input.bytes.sublist(symoff - 200, symoff);
+        final stripped = macho.patchMachO(
+          input.bytes,
+          macho.PatchOptions(stripSymbols: true),
+        );
+        expect(stripped.length, input.bytes.length);
+        expect(stripped.sublist(symoff - 200, symoff), equals(sectionBefore));
+        final symtab = macho
+            .parseLoadCommands(stripped)
+            .singleWhere((c) => c.cmd == macho.lcSymtab);
+        expect(
+          ByteData.sublistView(symtab.bytes).getUint32(12, Endian.little),
+          1,
+        );
+      },
+    );
   });
 
   group('CLI', () {

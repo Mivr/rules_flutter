@@ -207,6 +207,155 @@ List<CommandRange> _segmentRanges(LoadCommand lc) {
   return ranges;
 }
 
+/// Whether a `section_64` type byte (the low byte of its flags word) names a
+/// zero-fill section (`S_ZEROFILL`, `S_GB_ZEROFILL` or
+/// `S_THREAD_LOCAL_ZEROFILL`). Zero-fill sections occupy no file bytes, so the
+/// in-place strip's segment overlap check skips them.
+bool isZeroFillSectionType(int sectionType) {
+  return sectionType == sectionTypeZerofill ||
+      sectionType == sectionTypeGbZerofill ||
+      sectionType == sectionTypeThreadLocalZerofill;
+}
+
+/// One `section_64` record of an `LC_SEGMENT_64` command: its command-relative
+/// offset, name, type byte and file range, in command order.
+typedef SectionLayout = ({
+  int at,
+  String name,
+  int type,
+  int offset,
+  int size,
+});
+
+/// Every `section_64` record of [lc] (`LC_SEGMENT_64`) in command order.
+///
+/// Throws [FormatException] naming the segment when the command or a section
+/// is truncated.
+List<SectionLayout> sectionLayoutsOf(LoadCommand lc) {
+  if (lc.bytes.length < 72) {
+    throw FormatException(
+      'Cannot strip local symbols: truncated ${describeStripCommand(lc)}.',
+    );
+  }
+  final layouts = <SectionLayout>[];
+  final bd = ByteData.sublistView(lc.bytes);
+  final nsects = bd.getUint32(64, Endian.little);
+  for (var s = 0; s < nsects; s++) {
+    final at = 72 + s * 80;
+    if (at + 80 > lc.bytes.length) {
+      throw FormatException(
+        'Cannot strip local symbols: truncated ${describeStripCommand(lc)} '
+        'section ${s + 1}.',
+      );
+    }
+    layouts.add((
+      at: at,
+      name: ascii.decode(lc.bytes.sublist(at, at + 16)).split('\x00').first,
+      type: bd.getUint32(at + 68, Endian.little) & sectionTypeMask,
+      offset: bd.getUint32(at + 48, Endian.little),
+      size: bd.getUint64(at + 40, Endian.little),
+    ));
+  }
+  return layouts;
+}
+
+/// The file spans an in-place symbol-strip rewrite touches: the old
+/// symbol-table..string-table span it rewrites and zero-fills, plus the
+/// rewritten indirect-symbol table's span when the strip moves one. Grouped so
+/// the overlap check stays under the parameter limit.
+class InPlaceTouchedSpans {
+  const InPlaceTouchedSpans({
+    required this.tableOffset,
+    required this.tableSize,
+    required this.indirectOffset,
+    required this.indirectSize,
+  });
+
+  /// The old symbol-table..string-table span's file offset.
+  final int tableOffset;
+
+  /// The old symbol-table..string-table span's size in bytes.
+  final int tableSize;
+
+  /// The rewritten indirect-symbol table's file offset (0 when the strip
+  /// moves none).
+  final int indirectOffset;
+
+  /// The rewritten indirect-symbol table's size in bytes (0 when the strip
+  /// moves none).
+  final int indirectSize;
+
+  /// The touched span meeting (`offset`, `size`), or null when neither does. A
+  /// range ending exactly where a span starts, or starting exactly where one
+  /// ends, does not meet it.
+  (int, int)? meetingSpan(int offset, int size) {
+    if (rangesIntersect(offset, size, tableOffset, tableSize)) {
+      return (tableOffset, tableSize);
+    }
+    if (indirectSize > 0 &&
+        rangesIntersect(offset, size, indirectOffset, indirectSize)) {
+      return (indirectOffset, indirectSize);
+    }
+    return null;
+  }
+}
+
+/// Throws [FormatException] when the segment file range of [lc]
+/// (`LC_SEGMENT_64`) or any of its sections' file ranges meets [spans], a span
+/// the in-place rewrite writes or zero-fills: the rewrite would wipe bytes a
+/// live section command still describes. Sections are checked before the
+/// segment range so the refusal names the precise overlapping section;
+/// zero-fill sections ([isZeroFillSectionType]) and sections with file offset
+/// 0 occupy no file bytes and are skipped, as are empty ranges. Commands that
+/// are not `LC_SEGMENT_64` name no segment ranges and pass.
+void throwOnInPlaceSegmentOverlap(
+  LoadCommand lc,
+  InPlaceTouchedSpans spans,
+) {
+  if (lc.cmd != lcSegment64) return;
+  if (lc.bytes.length < 72) {
+    throw FormatException(
+      'Cannot strip local symbols: truncated ${describeStripCommand(lc)}.',
+    );
+  }
+  final segname = segmentNameOf(lc);
+  for (final section in sectionLayoutsOf(lc)) {
+    if (isZeroFillSectionType(section.type) || section.offset == 0) continue;
+    _throwOnTouchedSpan(
+      'section ${section.name} of segment $segname',
+      section.offset,
+      section.size,
+      spans,
+    );
+  }
+  final bd = ByteData.sublistView(lc.bytes);
+  _throwOnTouchedSpan(
+    describeStripCommand(lc),
+    bd.getUint64(40, Endian.little),
+    bd.getUint64(48, Endian.little),
+    spans,
+  );
+}
+
+/// Throws [FormatException] naming [label] when (`offset`, `size`) meets a span
+/// the in-place rewrite touches, telling the touched span it meets.
+/// Empty ranges occupy no bytes and pass.
+void _throwOnTouchedSpan(
+  String label,
+  int offset,
+  int size,
+  InPlaceTouchedSpans spans,
+) {
+  if (size == 0) return;
+  final hit = spans.meetingSpan(offset, size);
+  if (hit == null) return;
+  throw FormatException(
+    'Cannot strip local symbols: $label [$offset, ${offset + size}) names '
+    'bytes the stripped tables occupy [${hit.$1}, ${hit.$1 + hit.$2}); '
+    'refusing to strip without a __LINKEDIT segment.',
+  );
+}
+
 /// Both file ranges of [lc] (`LC_SYMTAB`): the symbol entries and the string
 /// table. Throws [FormatException] naming the command when it is truncated.
 List<CommandRange> _symtabRanges(LoadCommand lc) {

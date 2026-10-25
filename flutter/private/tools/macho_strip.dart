@@ -18,6 +18,7 @@ import 'macho_parse.dart'
         movedTableRanges;
 import 'macho_ranges.dart'
     show
+        InPlaceTouchedSpans,
         RewrittenLayout,
         accountedRangesOf,
         auditOutputRanges,
@@ -26,7 +27,8 @@ import 'macho_ranges.dart'
         rangeWithinFile,
         rangesIntersect,
         relocatedNoteCommand,
-        segmentNameOf;
+        segmentNameOf,
+        throwOnInPlaceSegmentOverlap;
 
 /// A decoded 16-byte `nlist_64` symbol-table entry.
 class _NlistEntry {
@@ -782,18 +784,31 @@ class _StripPlan {
   /// indirect-symbol tables names bytes the in-place rewrite touches: the
   /// compacted tables and their zeroed tail must belong to those tables
   /// alone, or the rewrite would wipe a resident payload the way the
-  /// compacting path refuses to. Segments and their sections ride an in-place
-  /// rewrite untouched (the file keeps its length, so their ranges stay
-  /// valid), and the indirect table can only live where the old tables were
-  /// not. The rewritten tables must also never overlap each other.
+  /// compacting path refuses to. Segments and their sections are checked by
+  /// [throwOnInPlaceSegmentOverlap]: the file keeps its length, so their
+  /// commands would survive the rewrite byte-identical while the bytes they
+  /// describe no longer hold what they promise, and only tables lying outside
+  /// every segment and section may strip in place. The indirect table can only
+  /// live where the old tables were not. The rewritten tables must also never
+  /// overlap each other.
   void _throwOnInPlaceOverlap(_RemappedDysymtab? remapped) {
     final oldEnd = table.stroff + table.strsize;
     final oldSize = oldEnd - table.symoff;
     final indirectLen = remapped?.indirectBytes?.length ?? 0;
     final indirectOff = remapped?.indirectOffset ?? 0;
+    final touched = InPlaceTouchedSpans(
+      tableOffset: table.symoff,
+      tableSize: oldSize,
+      indirectOffset: indirectOff,
+      indirectSize: indirectLen,
+    );
     for (var i = 0; i < commands.length; i++) {
       final lc = commands[i];
-      if (lc.cmd == lcSymtab || lc.cmd == lcSegment64 || i == dysymtabIndex) {
+      if (lc.cmd == lcSymtab || i == dysymtabIndex) {
+        continue;
+      }
+      if (lc.cmd == lcSegment64) {
+        throwOnInPlaceSegmentOverlap(lc, touched);
         continue;
       }
       for (final range in accountedRangesOf(lc)) {
