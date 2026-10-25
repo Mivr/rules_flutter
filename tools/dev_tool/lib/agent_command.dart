@@ -18,6 +18,7 @@ import 'package:vm_service/vm_service.dart';
 import 'command_failure.dart';
 import 'command_runner.dart';
 import 'device.dart';
+import 'device_ios.dart';
 import 'device_ios_sim.dart';
 import 'device_desktop.dart';
 import 'key_press.dart';

@@ -10,7 +10,7 @@ import 'dart:io';
 import 'package:path/path.dart' as p;
 
 import 'app_log.dart';
-import 'device.dart';
+import 'device_ios.dart';
 import 'logging.dart';
 import 'temp_dir.dart';
 import 'vm_service_discovery.dart';

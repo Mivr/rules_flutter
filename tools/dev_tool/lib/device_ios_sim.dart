@@ -12,6 +12,7 @@ import 'package:path/path.dart' as p;
 
 import 'app_log.dart';
 import 'device.dart';
+import 'device_ios.dart';
 import 'ios_sim_log_fallback.dart';
 import 'native_patch_delivery.dart';
 import 'vm_service_client.dart';
