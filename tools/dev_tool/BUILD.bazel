@@ -93,7 +93,10 @@ dart_binary(
 #   harness — the test includes test/e2e/dev_tool_e2e_harness.dart, for the
 #           same reason: the e2e files it serves are not Bazel targets (they
 #           invoke `bazel` themselves), so its own behaviour would otherwise be
-#           covered by nothing. Implies `lifetime`, which it imports.
+#           covered by nothing. Implies `lifetime`, which it imports. The
+#           per-process log recorder
+#           (test/e2e/dev_tool_e2e_log_recorder.dart) rides along: it is part
+#           of the harness's own behaviour, wired into `DevToolProcess`.
 #   zip_fixture — the test includes test/zip_fixture.dart, which builds zip
 #           fixtures in-process so the test needs no host `zip` binary.
 #   deps  — packages the test imports directly, beyond :lib and test.
@@ -134,6 +137,11 @@ _UNIT_TESTS = {
     "dependency_compiler_fake_test": {"fakes": True},
     "dev_tool_e2e_harness_test": {
         "fakes": True,
+        "harness": True,
+        "lifetime": True,
+        "deps": _PATH_DEP,
+    },
+    "dev_tool_e2e_log_test": {
         "harness": True,
         "lifetime": True,
         "deps": _PATH_DEP,
@@ -241,7 +249,7 @@ _UNIT_TESTS = {
            (["test/loopbacks.dart"] if cfg.get("loopbacks") else []) +
            (["test/test_lifetime.dart"] if cfg.get("lifetime") else []) +
            (["test/zip_fixture.dart"] if cfg.get("zip_fixture") else []) +
-           (["test/e2e/dev_tool_e2e_harness.dart"] if cfg.get("harness") else []),
+           (["test/e2e/dev_tool_e2e_harness.dart", "test/e2e/dev_tool_e2e_log_recorder.dart"] if cfg.get("harness") else []),
     data = cfg.get("data", []),
     main = "test/%s.dart" % name,
     deps = _TEST_DEPS +

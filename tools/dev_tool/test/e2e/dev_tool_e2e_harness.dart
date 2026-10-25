@@ -12,6 +12,7 @@ import 'package:path/path.dart' as p;
 import 'package:test/test.dart' show TestFailure;
 
 import '../test_lifetime.dart';
+import 'dev_tool_e2e_log_recorder.dart';
 
 // Re-exported because a test that spawns something of its own — the attach
 // tests launch the .app directly — needs the same binding the harness uses,
@@ -174,47 +175,70 @@ class DevToolProcess {
   /// a closed stdin nor waits on a run that is already over.
   bool _exited = false;
 
+  /// Per-process log of the lines read from this run, or null when
+  /// `DEV_TOOL_E2E_LOG_DIR` is unset or empty. Fed after the listeners below
+  /// have handled each line, so recording never changes what the waits
+  /// observe; see `dev_tool_e2e_log_recorder.dart`.
+  late final DevToolE2eLogRecorder? _processLog;
+
   DevToolProcess(this.process) {
-    unawaited(process.exitCode.then((_) => _exited = true));
+    _processLog = DevToolE2eLogRecorder.maybeStart(process.pid);
+    unawaited(
+      process.exitCode.then((code) {
+        _exited = true;
+        _processLog?.noteExit(code);
+      }),
+    );
     _stdoutSub = process.stdout
         .transform(utf8.decoder)
         .transform(const LineSplitter())
-        .listen((line) {
-          // Machine protocol wraps each message in [...].
-          //
-          // Anything on this stream that isn't an envelope is corruption an IDE
-          // would choke on, so it is recorded rather than silently skipped.
-          //
-          // A prefix is tolerated but still recorded. When the tool is launched
-          // via `dart run` (rather than the compiled binary), the Dart SDK can
-          // print "Running build hooks..." with no trailing newline, so the first
-          // envelope arrives glued to it. Discarding the whole line loses
-          // `daemon.connected` — the event every machine-protocol test waits for
-          // first — which reads as an unexplained timeout.
-          final start = line.indexOf('[{');
-          if (start >= 0 && line.endsWith('}]')) {
-            if (start > 0) nonProtocolStdoutLines.add(line.substring(0, start));
-            try {
-              final list = json.decode(line.substring(start)) as List;
-              for (final item in list) {
-                final msg = item as Map<String, dynamic>;
-                events.add(msg);
-                _eventController.add(msg);
+        .listen(
+          (line) {
+            // Machine protocol wraps each message in [...].
+            //
+            // Anything on this stream that isn't an envelope is corruption an IDE
+            // would choke on, so it is recorded rather than silently skipped.
+            //
+            // A prefix is tolerated but still recorded. When the tool is launched
+            // via `dart run` (rather than the compiled binary), the Dart SDK can
+            // print "Running build hooks..." with no trailing newline, so the first
+            // envelope arrives glued to it. Discarding the whole line loses
+            // `daemon.connected` — the event every machine-protocol test waits for
+            // first — which reads as an unexplained timeout.
+            final start = line.indexOf('[{');
+            if (start >= 0 && line.endsWith('}]')) {
+              if (start > 0)
+                nonProtocolStdoutLines.add(line.substring(0, start));
+              try {
+                final list = json.decode(line.substring(start)) as List;
+                for (final item in list) {
+                  final msg = item as Map<String, dynamic>;
+                  events.add(msg);
+                  _eventController.add(msg);
+                }
+              } catch (_) {
+                nonProtocolStdoutLines.add(line);
               }
-            } catch (_) {
+            } else if (line.isNotEmpty) {
               nonProtocolStdoutLines.add(line);
             }
-          } else if (line.isNotEmpty) {
-            nonProtocolStdoutLines.add(line);
-          }
-        });
+            // After the handling above, never before it, and synchronous: the
+            // line is on disk while the process is still running.
+            _processLog?.recordStdout(line);
+          },
+          onDone: () => _processLog?.noteStdoutDone(),
+        );
     _stderrSub = process.stderr
         .transform(utf8.decoder)
         .transform(const LineSplitter())
-        .listen((line) {
-          stderrLines.add(line);
-          _stderrController.add(line);
-        });
+        .listen(
+          (line) {
+            stderrLines.add(line);
+            _stderrController.add(line);
+            _processLog?.recordStderr(line);
+          },
+          onDone: () => _processLog?.noteStderrDone(),
+        );
   }
 
   /// The first value from [source], failing as soon as the run dies.
@@ -1008,6 +1032,10 @@ class DevToolProcess {
     final wedgeEvidence = endedOnItsOwn ? null : await _captureWedgeEvidence();
     await _stdoutSub.cancel();
     await _stderrSub.cancel();
+    // Ends the log from teardown's side when the run did not end on its own:
+    // `code=?` while the exit code is not yet known. A no-op once the `exit`
+    // record is written.
+    _processLog?.finishOnDispose();
     await _eventController.close();
     await _stderrController.close();
     if (!_exited) {
