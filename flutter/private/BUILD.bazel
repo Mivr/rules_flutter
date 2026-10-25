@@ -549,11 +549,26 @@ bzl_library(
         ":flutter_asset_bundle",
         ":flutter_info",
         ":flutter_integration_android_app",
+        ":flutter_integration_test_ios",
         ":flutter_integration_web_bundle",
         ":flutter_kernel_module",
         ":flutter_web_compile",
         ":plugin_registrant",
         ":validation",
+        "//flutter:providers",
+    ],
+)
+
+bzl_library(
+    name = "flutter_integration_test_ios",
+    srcs = ["flutter_integration_test_ios.bzl"],
+    visibility = ["//flutter:__subpackages__"],
+    deps = [
+        ":app_entrypoint",
+        ":common",
+        ":flutter_application",
+        ":ios_app",
+        ":ios_sim_debug",
         "//flutter:providers",
     ],
 )

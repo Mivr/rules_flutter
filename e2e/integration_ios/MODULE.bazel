@@ -1,0 +1,33 @@
+"E2e test: Flutter iOS simulator integration test (flutter_integration_test)"
+
+module(name = "rules_flutter_integration_ios")
+
+bazel_dep(name = "ai_rules_flutter", version = "0.0.0", repo_name = "rules_flutter")
+bazel_dep(name = "ai_rules_dart", version = "0.20.0", repo_name = "rules_dart")
+bazel_dep(name = "bazel_skylib", version = "1.9.2")
+bazel_dep(name = "apple_support", version = "2.9.1")
+bazel_dep(name = "rules_apple", version = "5.2.0")
+bazel_dep(name = "rules_cc", version = "0.2.26")
+bazel_dep(name = "rules_swift", version = "4.1.2")
+bazel_dep(name = "platforms", version = "1.1.0")
+
+local_path_override(
+    module_name = "ai_rules_flutter",
+    path = "../..",
+)
+
+git_override(
+    module_name = "ai_rules_dart",
+    commit = "4719b30a3c0286b3adfe97ee3d314fe16fe00cb0",
+    remote = "https://github.com/Mivr/rules_dart.git",
+)
+
+flutter = use_extension("@rules_flutter//flutter:extensions.bzl", "flutter")
+flutter.toolchain(flutter_version = "3.47.7")
+flutter.pub(
+    name = "deps",
+    lock = "//:pubspec.lock",
+)
+use_repo(flutter, "deps", "flutter_ios_engine", "flutter_toolchains")
+
+register_toolchains("@flutter_toolchains//:all")

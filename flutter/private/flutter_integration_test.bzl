@@ -56,8 +56,6 @@ load(
     "MODULAR_KERNEL_TOOLCHAINS",
     "collect_packages",
     "collect_transitive_srcs",
-    "dart_analyzable_info_with_package",
-    "dart_package_identity",
     "derive_lib_root",
     "runfiles_path",
 )
@@ -78,7 +76,6 @@ load(
     "app_scheme_location",
     "app_scheme_rel_path",
     "compile_kernel_package_config",
-    "package_lib_prefix",
     "resolve_wrapper_main_import",
     "synthesize_app_package",
 )
@@ -129,6 +126,16 @@ load(
     "ANDROID_APP_KWARG_KEYS",
     "make_android_integration_manifest_lines",
     "sanitize_android_package_segment",
+)
+load(
+    "//flutter/private:flutter_integration_test_ios.bzl",
+    "RESERVED_TAG_ENV_KEYS",
+    "assemble_ios_integration_test",
+    "build_analyzable_and_coverage_infos",
+    "exposes_package",
+    "make_linux_integration_bootstrap_content",
+    "resolve_main_and_srcs",
+    "test_tag_env",
 )
 load(
     "//flutter/private:flutter_integration_web_bundle.bzl",
@@ -182,42 +189,6 @@ load(
     "validate_web_compiler_renderer",
     "web_renderer",
 )
-
-def _exposes_package(deps, names):
-    """True if any dep transitively exposes one of `names`."""
-    for dep in deps:
-        if DartInfo not in dep:
-            continue
-        for pkg in dep[DartInfo].transitive_packages.to_list():
-            if pkg.package_name in names:
-                return True
-    return False
-
-def _test_tag_env(ctx, env):
-    """Forward `include_tags` / `exclude_tags` as the runner's tag env vars.
-
-    Forwarded under `_ATTR` keys: a `--test_env=FLUTTER_TEST_TAGS=...` (or
-    `FLUTTER_TEST_EXCLUDE_TAGS`) value at run time overrides the attribute,
-    and it can only do that when the rule leaves those keys alone — Bazel lets
-    a rule-set variable win over `--test_env` for the same key. Set only when
-    the attribute names tags. Called before the `env` merge so a colliding
-    `env` key is rejected like the rule's other keys.
-    """
-    if ctx.attr.include_tags:
-        env["FLUTTER_TEST_TAGS_ATTR"] = ",".join(ctx.attr.include_tags)
-    if ctx.attr.exclude_tags:
-        env["FLUTTER_TEST_EXCLUDE_TAGS_ATTR"] = ",".join(ctx.attr.exclude_tags)
-
-# Runner-contract tag keys the rule reserves for `--test_env` overrides (see
-# `_test_tag_env`): an `env` entry for any of these is rejected in the
-# implementations so the flag stays the one override channel.
-_RESERVED_TAG_ENV_KEYS = [
-    "FLUTTER_TEST_TAGS",
-    "FLUTTER_TEST_EXCLUDE_TAGS",
-    "FLUTTER_TEST_TAGS_ATTR",
-    "FLUTTER_TEST_EXCLUDE_TAGS_ATTR",
-    "FLUTTER_TEST_LIBRARY_TAGS",
-]
 
 def make_web_integration_bootstrap_content(test_import, has_integration_test = False):
     """Generate the per-target web integration test bootstrap Dart source.
@@ -495,239 +466,6 @@ Future<void> main() async {{
         binding_init = binding_init,
     )
 
-def make_linux_integration_bootstrap_content(test_import, has_integration_test = False):
-    """Generate the per-target Linux desktop integration test bootstrap Dart source.
-
-    Initializes the live integration test binding (`IntegrationTestWidgetsFlutterBinding`
-    when `package:integration_test` is in `deps`, or a built-in
-    `LiveTestWidgetsFlutterBinding` subclass otherwise), connects to the host
-    runner over the WebSocket URL in `FLUTTER_INTEGRATION_TEST_HARNESS_URL`,
-    forwards uncaught errors, and drives the suite via `RemoteListener`.
-
-    Args:
-        test_import: Import URI for the user's integration test entrypoint.
-        has_integration_test: Whether `deps` exposes `package:integration_test`.
-
-    Returns:
-        Dart source string.
-    """
-    if has_integration_test:
-        binding_import = "import 'package:integration_test/integration_test.dart';\n"
-        binding_decl = ""
-        binding_init = "IntegrationTestWidgetsFlutterBinding.ensureInitialized();"
-    else:
-        binding_import = ""
-        binding_decl = """
-class _IntegrationTestBinding extends LiveTestWidgetsFlutterBinding {
-  static _IntegrationTestBinding? _instance;
-
-  @override
-  void initInstances() {
-    super.initInstances();
-    _instance = this;
-  }
-
-  static _IntegrationTestBinding ensureInitialized() {
-    if (_instance == null) {
-      _IntegrationTestBinding();
-    }
-    return _instance!;
-  }
-
-  @override
-  bool get overrideHttpClient => false;
-
-  @override
-  bool get registerTestTextInput => false;
-
-  Size? _surfaceSize;
-
-  @override
-  Future<void> setSurfaceSize(Size? size) {
-    return TestAsyncUtils.guard<void>(() async {
-      assert(inTest);
-      if (_surfaceSize == size) {
-        return;
-      }
-      _surfaceSize = size;
-      handleMetricsChanged();
-    });
-  }
-
-  @override
-  ViewConfiguration createViewConfigurationFor(RenderView renderView) {
-    final FlutterView view = renderView.flutterView;
-    final Size? surfaceSize =
-        view == platformDispatcher.implicitView ? _surfaceSize : null;
-    return TestViewConfiguration.fromView(
-      size: surfaceSize ?? view.physicalSize / view.devicePixelRatio,
-      view: view,
-    );
-  }
-
-  @override
-  void setLabel(String value) {}
-
-  @override
-  void reportExceptionNoticed(FlutterErrorDetails exception) {}
-}
-"""
-        binding_init = "_IntegrationTestBinding.ensureInitialized();"
-
-    return """// GENERATED by flutter_integration_test — do not edit.
-// ignore_for_file: type=lint
-
-import 'dart:async';
-import 'dart:convert';
-import 'dart:io';
-import 'dart:isolate';
-import 'dart:ui';
-
-import 'package:flutter/foundation.dart';
-import 'package:flutter/rendering.dart';
-import 'package:flutter/widgets.dart';
-import 'package:flutter_test/flutter_test.dart';
-import 'package:test_api/backend.dart';
-{binding_import}import '{test_import}' as test_entrypoint;
-{binding_decl}
-bool _bindingInitialized = false;
-
-bool _isBindingInTest() {{
-  return _bindingInitialized && TestWidgetsFlutterBinding.instance.inTest;
-}}
-
-void _catchIsolateErrors(void Function(Object error, StackTrace? stack) onError) {{
-  final errorPort = ReceivePort();
-  Isolate.current.setErrorsFatal(false);
-  Isolate.current.addErrorListener(errorPort.sendPort);
-  errorPort.listen((dynamic message) {{
-    final list = message as List;
-    final error = IsolateSpawnException(list[0] as String);
-    final stack = list[1] == null
-        ? StackTrace.empty
-        : StackTrace.fromString(list[1] as String);
-    onError(error, stack);
-    Zone.current.handleUncaughtError(error, stack);
-  }});
-}}
-
-Future<void> _runTestMain() async {{
-  debugPrint = debugPrintSynchronously;
-  {binding_init}
-  final PointerDataPacketCallback? prevOnPointerDataPacket =
-      PlatformDispatcher.instance.onPointerDataPacket;
-  if (prevOnPointerDataPacket != null) {{
-    PlatformDispatcher.instance.onPointerDataPacket =
-        (PointerDataPacket packet) {{
-          final Iterable<RenderView> views =
-              WidgetsBinding.instance.renderViews;
-          if (views.isEmpty ||
-              packet.data.any(
-                (PointerData datum) => !views.any(
-                  (RenderView r) => r.flutterView.viewId == datum.viewId,
-                ),
-              )) {{
-            return;
-          }}
-          prevOnPointerDataPacket(packet);
-        }};
-  }}
-  debugPrint = debugPrintSynchronously;
-  reportTestException = (FlutterErrorDetails details, String testDescription) {{
-    debugPrint = debugPrintSynchronously;
-    FlutterError.dumpErrorToConsole(details, forceReport: true);
-    final String additional = testDescription.isNotEmpty
-        ? '\\nThe test description was: $testDescription'
-        : '';
-    registerException(
-      TestFailure('${{details.exceptionAsString()}}$additional'),
-      details.stack ?? StackTrace.current,
-    );
-  }};
-  _bindingInitialized = true;
-  await Future(test_entrypoint.main);
-}}
-
-Future<void> main() async {{
-  final wsUrl = Platform.environment['FLUTTER_INTEGRATION_TEST_HARNESS_URL'];
-  if (wsUrl == null || wsUrl.isEmpty) {{
-    stderr.writeln(
-      'flutter_integration_test bootstrap: '
-      'FLUTTER_INTEGRATION_TEST_HARNESS_URL not set',
-    );
-    exit(64);
-  }}
-
-  final ws = await WebSocket.connect(wsUrl);
-
-  void sendToHarness(Object? payload) {{
-    if (ws.readyState == WebSocket.open) {{
-      ws.add(json.encode(payload));
-    }}
-  }}
-
-  void reportUncaughtError(Object error, StackTrace? stack) {{
-    final effectiveStack = stack ?? StackTrace.current;
-    sendToHarness(<String, Object?>{{
-      'type': 'uncaughtError',
-      'message': error.toString(),
-      'stack': effectiveStack.toString(),
-    }});
-    if (_isBindingInTest()) {{
-      FlutterError.reportError(
-        FlutterErrorDetails(
-          exception: error,
-          stack: effectiveStack,
-          library: 'flutter_integration_test',
-          context: ErrorDescription('while running integration test'),
-        ),
-      );
-    }}
-  }}
-
-  PlatformDispatcher.instance.onError = (Object error, StackTrace stack) {{
-    reportUncaughtError(error, stack);
-    return true;
-  }};
-
-  final FlutterExceptionHandler? prevOnError = FlutterError.onError;
-  FlutterError.onError = (FlutterErrorDetails details) {{
-    prevOnError?.call(details);
-    if (!_isBindingInTest()) {{
-      sendToHarness(<String, Object?>{{
-        'type': 'uncaughtError',
-        'message': details.exceptionAsString(),
-        'stack': (details.stack ?? StackTrace.current).toString(),
-      }});
-    }}
-  }};
-
-  final testChannel = RemoteListener.start(() {{
-    _catchIsolateErrors(reportUncaughtError);
-    return _runTestMain;
-  }});
-
-  unawaited(
-    ws
-        .map<dynamic>((dynamic m) => json.decode(m as String))
-        .pipe(testChannel.sink),
-  );
-
-  await for (final dynamic message in testChannel.stream) {{
-    sendToHarness(message);
-  }}
-  try {{
-    await ws.close();
-  }} catch (_) {{}}
-  exit(0);
-}}
-""".format(
-        binding_import = binding_import,
-        test_import = test_import,
-        binding_decl = binding_decl,
-        binding_init = binding_init,
-    )
-
 def make_android_integration_bootstrap_content(test_import, has_integration_test = False):
     """Generate the per-target Android integration test bootstrap Dart source.
 
@@ -988,69 +726,6 @@ Future<void> main([List<String> args = const <String>[]]) async {{
         binding_init = binding_init,
     )
 
-def _resolve_main_and_srcs(ctx):
-    """Resolve the integration test entrypoint File and additional source Files."""
-    if ctx.file.main != None:
-        main_file = ctx.file.main
-        extra_srcs = [
-            f
-            for f in (ctx.files.srcs + ctx.files.app_srcs)
-            if f != main_file
-        ]
-        return main_file, extra_srcs
-
-    if len(ctx.files.srcs) == 1:
-        main_file = ctx.files.srcs[0]
-        extra_srcs = [f for f in ctx.files.app_srcs if f != main_file]
-        return main_file, extra_srcs
-
-    test_candidates = [
-        f
-        for f in ctx.files.srcs
-        if f.short_path.endswith("_test.dart")
-    ]
-    if len(test_candidates) == 1:
-        main_file = test_candidates[0]
-        extra_srcs = [
-            f
-            for f in (ctx.files.srcs + ctx.files.app_srcs)
-            if f != main_file
-        ]
-        return main_file, extra_srcs
-
-    fail(
-        "%s: specify `main` (or pass a single test file in `srcs`)." % ctx.label,
-    )
-
-def _build_analyzable_and_coverage_infos(ctx, package_name, lib_root, main_file, extra_srcs):
-    instrumented_files_info = coverage_common.instrumented_files_info(
-        ctx,
-        source_attributes = ["srcs", "app_srcs", "main"],
-        dependency_attributes = ["deps"],
-    )
-
-    prefix = package_lib_prefix(lib_root)
-    in_pkg_srcs = []
-    non_pkg_srcs = []
-    for f in [main_file] + extra_srcs:
-        if f.short_path.startswith(prefix):
-            in_pkg_srcs.append(f)
-        else:
-            non_pkg_srcs.append(f)
-
-    analyzable_info = dart_analyzable_info_with_package(
-        label = ctx.label,
-        package = dart_package_identity(
-            package_name = package_name,
-            lib_root = lib_root,
-            language_version = ctx.attr.language_version,
-        ),
-        deps = ctx.attr.deps + [ctx.attr._sky_engine],
-        srcs = non_pkg_srcs,
-        package_srcs = in_pkg_srcs,
-    )
-    return instrumented_files_info, analyzable_info
-
 def _web_sdk_file_list(ctx):
     """All files the web SDK target carries (renderer/template lookup)."""
     return ctx.attr._web_sdk.files.to_list() if ctx.attr._web_sdk else []
@@ -1064,13 +739,13 @@ def _flutter_integration_test_impl(ctx):
             ) + "(supported: \"web\", \"linux\", \"android\").",
         )
 
-    if not _exposes_package(ctx.attr.deps, ["flutter_test"]):
+    if not exposes_package(ctx.attr.deps, ["flutter_test"]):
         fail((
             "flutter_integration_test target {name} must depend on " +
             "package:flutter_test. Add `@<hub>//:flutter_test` to deps."
         ).format(name = ctx.label.name))
 
-    main_file, extra_srcs = _resolve_main_and_srcs(ctx)
+    main_file, extra_srcs = resolve_main_and_srcs(ctx)
 
     renderer = web_renderer(ctx.attr.compiler, ctx.attr.renderer)
     validate_web_compiler_renderer(ctx.attr.compiler, renderer)
@@ -1114,7 +789,7 @@ def _flutter_integration_test_impl(ctx):
         app_scheme_rel_path(main_file),
         bootstrap_depth,
     )
-    has_integration_test = _exposes_package(ctx.attr.deps, ["integration_test"])
+    has_integration_test = exposes_package(ctx.attr.deps, ["integration_test"])
     ctx.actions.write(
         bootstrap,
         make_web_integration_bootstrap_content(
@@ -1396,7 +1071,7 @@ def _flutter_integration_test_impl(ctx):
         "FLUTTER_INTEGRATION_TEST_PATH": main_file.short_path,
         "FLUTTER_INTEGRATION_TEST_DECLARED_ENV": json.encode(ctx.attr.env),
     }
-    _test_tag_env(ctx, env)
+    test_tag_env(ctx, env)
 
     # The entrypoint's own `@Tags`, extracted at build time (see
     # `extract_library_tags_action`): the runner injects them as the root
@@ -1404,7 +1079,7 @@ def _flutter_integration_test_impl(ctx):
     library_tags = extract_library_tags_action(ctx, main_file)
     env["FLUTTER_TEST_LIBRARY_TAGS"] = runfiles_path(library_tags, workspace_name)
     for key, value in ctx.attr.env.items():
-        if key in env or key in _RESERVED_TAG_ENV_KEYS:
+        if key in env or key in RESERVED_TAG_ENV_KEYS:
             fail((
                 "flutter_integration_test {name}: env key {key} is set by the " +
                 "rule itself and cannot be overridden."
@@ -1428,7 +1103,7 @@ def _flutter_integration_test_impl(ctx):
     for data_target in ctx.attr.data:
         runfiles = runfiles.merge(data_target[DefaultInfo].default_runfiles)
 
-    instrumented_files_info, analyzable_info = _build_analyzable_and_coverage_infos(
+    instrumented_files_info, analyzable_info = build_analyzable_and_coverage_infos(
         ctx,
         package_name,
         lib_root,
@@ -1455,7 +1130,7 @@ def _flutter_linux_integration_test_impl(ctx):
             ),
         )
 
-    if not _exposes_package(ctx.attr.deps, ["flutter_test"]):
+    if not exposes_package(ctx.attr.deps, ["flutter_test"]):
         fail((
             "flutter_integration_test target {name} must depend on " +
             "package:flutter_test. Add `@<hub>//:flutter_test` to deps."
@@ -1465,7 +1140,7 @@ def _flutter_linux_integration_test_impl(ctx):
     if hook_err != None:
         fail(hook_err)
 
-    main_file, extra_srcs = _resolve_main_and_srcs(ctx)
+    main_file, extra_srcs = resolve_main_and_srcs(ctx)
     flutter_sdk_info = resolve_flutter_sdk_info(ctx)
 
     mode = "profile" if ctx.attr.profile else flutter_build_mode(ctx)
@@ -1535,7 +1210,7 @@ def _flutter_linux_integration_test_impl(ctx):
 
     bootstrap = ctx.actions.declare_file(ctx.label.name + "_linux_bootstrap.dart")
     main_location = app_main_location(package_name, lib_root, main_file)
-    has_integration_test = _exposes_package(ctx.attr.deps, ["integration_test"])
+    has_integration_test = exposes_package(ctx.attr.deps, ["integration_test"])
     ctx.actions.write(
         bootstrap,
         make_linux_integration_bootstrap_content(
@@ -1772,7 +1447,7 @@ def _flutter_linux_integration_test_impl(ctx):
         "FLUTTER_INTEGRATION_TEST_PATH": main_file.short_path,
         "FLUTTER_INTEGRATION_TEST_DECLARED_ENV": json.encode(ctx.attr.env),
     }
-    _test_tag_env(ctx, env)
+    test_tag_env(ctx, env)
 
     # The entrypoint's own `@Tags`, extracted at build time (see
     # `extract_library_tags_action`): the runner injects them as the root
@@ -1780,7 +1455,7 @@ def _flutter_linux_integration_test_impl(ctx):
     library_tags = extract_library_tags_action(ctx, main_file)
     env["FLUTTER_TEST_LIBRARY_TAGS"] = runfiles_path(library_tags, workspace_name)
     for key, value in ctx.attr.env.items():
-        if key in env or key in _RESERVED_TAG_ENV_KEYS:
+        if key in env or key in RESERVED_TAG_ENV_KEYS:
             fail((
                 "flutter_integration_test {name}: env key {key} is set by the " +
                 "rule itself and cannot be overridden."
@@ -1804,7 +1479,7 @@ def _flutter_linux_integration_test_impl(ctx):
     for data_target in ctx.attr.data:
         runfiles = runfiles.merge(data_target[DefaultInfo].default_runfiles)
 
-    instrumented_files_info, analyzable_info = _build_analyzable_and_coverage_infos(
+    instrumented_files_info, analyzable_info = build_analyzable_and_coverage_infos(
         ctx,
         package_name,
         lib_root,
@@ -1823,7 +1498,7 @@ def _flutter_linux_integration_test_impl(ctx):
     ]
 
 def _flutter_android_integration_app_impl(ctx):
-    if not _exposes_package(ctx.attr.deps, ["flutter_test"]):
+    if not exposes_package(ctx.attr.deps, ["flutter_test"]):
         fail((
             "flutter_integration_test target {name} must depend on " +
             "package:flutter_test. Add `@<hub>//:flutter_test` to deps."
@@ -1833,7 +1508,7 @@ def _flutter_android_integration_app_impl(ctx):
     if hook_err != None:
         fail(hook_err)
 
-    main_file, extra_srcs = _resolve_main_and_srcs(ctx)
+    main_file, extra_srcs = resolve_main_and_srcs(ctx)
     flutter_sdk_info = resolve_flutter_sdk_info(ctx)
 
     mode = "profile" if ctx.attr.profile else flutter_build_mode(ctx)
@@ -1891,7 +1566,7 @@ def _flutter_android_integration_app_impl(ctx):
 
     bootstrap = ctx.actions.declare_file(ctx.label.name + "_android_bootstrap.dart")
     main_location = app_main_location(package_name, lib_root, main_file)
-    has_integration_test = _exposes_package(ctx.attr.deps, ["integration_test"])
+    has_integration_test = exposes_package(ctx.attr.deps, ["integration_test"])
     ctx.actions.write(
         bootstrap,
         make_android_integration_bootstrap_content(
@@ -2079,13 +1754,13 @@ def _flutter_android_integration_test_impl(ctx):
             ),
         )
 
-    if not _exposes_package(ctx.attr.deps, ["flutter_test"]):
+    if not exposes_package(ctx.attr.deps, ["flutter_test"]):
         fail((
             "flutter_integration_test target {name} must depend on " +
             "package:flutter_test. Add `@<hub>//:flutter_test` to deps."
         ).format(name = ctx.label.name))
 
-    main_file, extra_srcs = _resolve_main_and_srcs(ctx)
+    main_file, extra_srcs = resolve_main_and_srcs(ctx)
     package_name = ctx.attr.package_name or ctx.label.name
     lib_root = derive_lib_root(ctx.label.workspace_root, ctx.label.package)
 
@@ -2126,7 +1801,7 @@ def _flutter_android_integration_test_impl(ctx):
         "FLUTTER_INTEGRATION_TEST_PATH": main_file.short_path,
         "FLUTTER_INTEGRATION_TEST_DECLARED_ENV": json.encode(ctx.attr.env),
     }
-    _test_tag_env(ctx, env)
+    test_tag_env(ctx, env)
 
     # The entrypoint's own `@Tags`, extracted at build time (see
     # `extract_library_tags_action`): the runner injects them as the root
@@ -2134,7 +1809,7 @@ def _flutter_android_integration_test_impl(ctx):
     library_tags = extract_library_tags_action(ctx, main_file)
     env["FLUTTER_TEST_LIBRARY_TAGS"] = runfiles_path(library_tags, workspace_name)
     for key, value in ctx.attr.env.items():
-        if key in env or key in _RESERVED_TAG_ENV_KEYS:
+        if key in env or key in RESERVED_TAG_ENV_KEYS:
             fail((
                 "flutter_integration_test {name}: env key {key} is set by the " +
                 "rule itself and cannot be overridden."
@@ -2157,7 +1832,7 @@ def _flutter_android_integration_test_impl(ctx):
     for data_target in ctx.attr.data:
         runfiles = runfiles.merge(data_target[DefaultInfo].default_runfiles)
 
-    instrumented_files_info, analyzable_info = _build_analyzable_and_coverage_infos(
+    instrumented_files_info, analyzable_info = build_analyzable_and_coverage_infos(
         ctx,
         package_name,
         lib_root,
@@ -2209,9 +1884,9 @@ _COMMON_INTEGRATION_TEST_ATTRS["tree_shake_icons"] = attr.bool(
     default = False,
 )
 _COMMON_INTEGRATION_TEST_ATTRS["platform"] = attr.string(
-    doc = "Target platform to run the integration test on ('web', 'linux', or 'android').",
+    doc = "Target platform to run the integration test on ('web', 'linux', 'android', or 'ios').",
     default = "web",
-    values = ["web", "linux", "android"],
+    values = ["web", "linux", "android", "ios"],
 )
 _COMMON_INTEGRATION_TEST_ATTRS["profile"] = attr.bool(
     doc = "Whether to compile in profile mode.",
@@ -2550,6 +2225,9 @@ def flutter_integration_test(
         android_package = "",
         android_deps = [],
         pub_hub_name = None,
+        ios_bundle_id = "",
+        ios_runner_srcs = None,
+        ios_info_plist = None,
         **kwargs):
     """Builds and runs an end-to-end Flutter integration test on a real platform.
 
@@ -2560,7 +2238,10 @@ def flutter_integration_test(
     bundle is executed inside a hermetic, pinned `Xvfb` virtual display with
     pinned GTK3 and Mesa software OpenGL/EGL libraries. On `android`, the built
     Android APK is installed and executed inside a hermetic, pinned headless
-    Android `x86_64` emulator accelerated with KVM.
+    Android `x86_64` emulator accelerated with KVM. On `ios`, the built
+    simulator-debug app is installed and executed on an iOS simulator from the
+    macOS host (needs a macOS host with Xcode, a simulator runtime, and the
+    package's `ios/Runner` sources).
 
     Args:
         name: Target name.
@@ -2568,7 +2249,7 @@ def flutter_integration_test(
         deps: Dependencies (`dart_library` / `flutter_library`) for the test and app.
         app_deps: Optional additional dependencies for the app, merged with `deps`.
         app: Optional library target for the app under test, merged with `deps`.
-        platform: Target platform (`"web"`, `"linux"`, or `"android"`, defaults to `"web"`).
+        platform: Target platform (`"web"`, `"linux"`, `"android"`, or `"ios"`, defaults to `"web"`).
         android_package: Optional Android application ID when `platform = "android"`.
             Defaults to `"com.example.<package_name>"`.
         android_deps: Optional additional Android library targets (`kt_android_library`,
@@ -2578,6 +2259,15 @@ def flutter_integration_test(
         pub_hub_name: Optional `flutter.pub` hub name (e.g. `"deps"`) whose
             `@<pub_hub_name>//android:all_android_plugin_libs` aggregator should
             be linked when `platform = "android"`.
+        ios_bundle_id: Optional iOS bundle ID when `platform = "ios"`.
+            Defaults to `"com.example.<package_name>.<name>"`, so two tests
+            never share an id.
+        ios_runner_srcs: Optional Runner Swift sources when `platform = "ios"`.
+            Defaults to `None`, which discovers the package's
+            `ios/Runner/*.swift`.
+        ios_info_plist: Optional `Info.plist` override when `platform = "ios"`.
+            Defaults to `None`, which preprocesses the package's
+            `ios/Runner/Info.plist`.
         **kwargs: Additional attributes forwarded to the rule (`main`, `srcs`,
             `app_srcs`, `assets`, `shaders`, `compiler`, `renderer`,
             `native_deps`, `defines`, `data`, `env`, etc.).
@@ -2738,6 +2428,17 @@ def flutter_integration_test(
             deps = merged_deps,
             platform = platform,
             **test_kwargs
+        )
+    elif platform == "ios":
+        assemble_ios_integration_test(
+            name = name,
+            package_name = resolved_package_name,
+            deps = merged_deps,
+            ios_bundle_id = ios_bundle_id,
+            ios_runner_srcs = ios_runner_srcs,
+            ios_info_plist = ios_info_plist,
+            platform = platform,
+            **kwargs
         )
     elif platform == "linux":
         _flutter_linux_integration_test(

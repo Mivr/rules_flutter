@@ -1,0 +1,77 @@
+load("@bazel_skylib//rules:build_test.bzl", "build_test")
+load("@rules_dart//dart:defs.bzl", "dart_analysis_config", "dart_analysis_options", "dart_analysis_test")
+load("@rules_flutter//flutter:defs.bzl", "flutter_integration_test")
+
+exports_files(["pubspec.lock"])
+
+flutter_integration_test(
+    name = "app_test",
+    package_name = "integration_ios",
+    srcs = ["integration_test/app_test.dart"],
+    app_srcs = ["lib/main.dart"],
+    assets = ["assets/logo.png"],
+    platform = "ios",
+    deps = [
+        "//ios_greeting_plugin",
+        "@deps//:flutter",
+        "@deps//:flutter_test",
+        "@deps//:integration_test",
+        "@rules_flutter//flutter:material_icons",
+    ],
+)
+
+# Red twin of `:app_test`: its expectation is wrong on purpose (see
+# integration_test/red_test.dart). `manual` so `bazel test //...` stays green;
+# the full-matrix workflow runs it by name and asserts the run FAILS, proving
+# the simulator harness reports assertion failures loudly.
+flutter_integration_test(
+    name = "red_test",
+    package_name = "integration_ios",
+    srcs = ["integration_test/red_test.dart"],
+    app_srcs = ["lib/main.dart"],
+    assets = ["assets/logo.png"],
+    platform = "ios",
+    tags = ["manual"],
+    deps = [
+        "//ios_greeting_plugin",
+        "@deps//:flutter",
+        "@deps//:flutter_test",
+        "@deps//:integration_test",
+        "@rules_flutter//flutter:material_icons",
+    ],
+)
+
+# Linux-runnable proof that the workspace loads and its Dart side compiles:
+# the bootstrap and the kernel application are portable, while the
+# Apple-toolchain targets (and the test targets above) skip off macOS via
+# `target_compatible_with`. `bazel test //...` runs this on every OS.
+build_test(
+    name = "ios_dart_side_build_test",
+    targets = [
+        ":__app_test_bootstrap",
+        ":__app_test_app",
+    ],
+)
+
+# `manual`, so `bazel test //...` never gives it to the analysis aspect; this
+# checks it anyway.
+dart_analysis_test(
+    name = "red_test_analysis",
+    target_compatible_with = ["@platforms//os:macos"],
+    targets = [":red_test"],
+)
+
+# The workspace's lint ruleset, bundled with the pub package whose YAML its
+# `include:` resolves against. Named here rather than in a library's `deps`: a
+# lint ruleset is not a dependency of the code it lints, and listing it there
+# carries it into the `DartInfo` of every binary and test downstream.
+dart_analysis_options(
+    name = "options",
+    src = "analysis_options.yaml",
+    deps = ["@deps//:very_good_analysis"],
+)
+
+dart_analysis_config(
+    name = "analysis_config",
+    options = [":options"],
+)
