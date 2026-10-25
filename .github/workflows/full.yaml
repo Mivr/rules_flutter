@@ -310,7 +310,17 @@ jobs:
       - name: Boot an iOS simulator
         run: dart run tools/dev_tool/tool/boot_ios_simulator.dart
       - name: Dev tool iOS simulator e2e
+        env:
+          DEV_TOOL_E2E_LOG_DIR: ${{ runner.temp }}/dev-tool-ios-logs
         run: dart run tools/dev_tool/tool/e2e.dart --require-ran=iOS --name=iOS test/e2e/ios_simulator_e2e_test.dart test/e2e/asset_reload_e2e_test.dart test/e2e/plugin_example_e2e_test.dart
+      - name: Upload dev tool iOS logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dev-tool-ios-logs
+          path: ${{ runner.temp }}/dev-tool-ios-logs
+          retention-days: 3
+          if-no-files-found: warn
   conclusion:
     name: Conclusion
     needs: [e2e-macos, e2e-linux-nightly, dev-tool-ios]
