@@ -17,6 +17,7 @@ import 'package:args/args.dart';
 import 'bazel.dart';
 import 'dev_tool_exception.dart';
 import 'device.dart';
+import 'device_ios_sim.dart';
 import 'device_android.dart';
 import 'device_id.dart';
 import 'logging.dart';

@@ -4,6 +4,7 @@ import 'dart:io';
 
 import 'package:flutter_bazel_dev_tool/dev_tool_exception.dart';
 import 'package:flutter_bazel_dev_tool/device.dart';
+import 'package:flutter_bazel_dev_tool/device_ios_sim.dart';
 import 'package:flutter_bazel_dev_tool/device_android.dart';
 import 'package:flutter_bazel_dev_tool/device_desktop.dart';
 import 'package:flutter_bazel_dev_tool/device_id.dart';
