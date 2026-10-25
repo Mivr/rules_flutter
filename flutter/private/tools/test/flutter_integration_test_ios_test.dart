@@ -127,6 +127,20 @@ Uint8List fixtureIpaBytes() => encodeDeterministicZip([
   ),
 ]);
 
+/// A minimal `.ipa` holding `Payload/TestApp.app/` plus one extra file
+/// member at [extraPath], for the unsafe-path refusal tests.
+Uint8List fixtureIpaWithExtra(String extraPath) => encodeDeterministicZip([
+  ZipEntry(
+    path: 'Payload/TestApp.app/',
+    data: Uint8List(0),
+    isDirectory: true,
+  ),
+  ZipEntry(
+    path: extraPath,
+    data: Uint8List.fromList(utf8.encode('evil')),
+  ),
+]);
+
 /// A launch starter capturing its arguments and environment, returning a
 /// process that exits on its own.
 Future<Process> captureLaunch(
@@ -532,6 +546,119 @@ void main() {
       expect(binary.readAsStringSync(), contains('exit 0'));
       expect(File('$appDir/Info.plist').existsSync(), isTrue);
       expect(Link('$appDir/Frameworks/Link').targetSync(), 'Target');
+    });
+
+    test('extracts rules_apple-style directory entries', () {
+      const appPrefix = 'Payload/TestApp.app/';
+      final dest = Directory('${tmp.path}/rules_apple')..createSync();
+      final ipa = encodeDeterministicZip([
+        ZipEntry(
+          path: 'Payload/',
+          data: Uint8List(0),
+          isDirectory: true,
+        ),
+        ZipEntry(
+          path: appPrefix,
+          data: Uint8List(0),
+          isDirectory: true,
+        ),
+        ZipEntry(
+          path: '${appPrefix}Base.lproj/LaunchScreen.storyboardc/',
+          data: Uint8List(0),
+          isDirectory: true,
+        ),
+        ZipEntry(
+          path: '${appPrefix}Base.lproj/LaunchScreen.storyboardc/Info.plist',
+          data: Uint8List.fromList(utf8.encode('<plist/>')),
+        ),
+        ZipEntry(
+          path: '${appPrefix}TestApp',
+          data: Uint8List.fromList(utf8.encode('#!/bin/sh\nexit 0\n')),
+          isExecutable: true,
+        ),
+      ]);
+      final appDir = ios.extractIpaApp(ipaBytes: ipa, destDir: dest);
+
+      expect(appDir, '${dest.path}/TestApp.app');
+      expect(
+        Directory('$appDir/Base.lproj/LaunchScreen.storyboardc').existsSync(),
+        isTrue,
+        reason: 'nested directory entries extract as directories',
+      );
+      expect(
+        File('$appDir/Base.lproj/LaunchScreen.storyboardc/Info.plist')
+            .readAsStringSync(),
+        '<plist/>',
+      );
+      expect(File('$appDir/TestApp').existsSync(), isTrue);
+    });
+
+    test('refuses an empty segment inside the path', () {
+      final dest = Directory('${tmp.path}/empty_segment')..createSync();
+      expect(
+        () => ios.extractIpaApp(
+          ipaBytes: fixtureIpaWithExtra('Payload/TestApp.app/a//b'),
+          destDir: dest,
+        ),
+        throwsA(
+          isA<FormatException>().having(
+            (e) => e.message,
+            'message',
+            contains('Refusing to extract unsafe .ipa entry'),
+          ),
+        ),
+      );
+    });
+
+    test('refuses a dot segment', () {
+      final dest = Directory('${tmp.path}/dot_segment')..createSync();
+      expect(
+        () => ios.extractIpaApp(
+          ipaBytes: fixtureIpaWithExtra('Payload/TestApp.app/a/./b'),
+          destDir: dest,
+        ),
+        throwsA(
+          isA<FormatException>().having(
+            (e) => e.message,
+            'message',
+            contains('Refusing to extract unsafe .ipa entry'),
+          ),
+        ),
+      );
+    });
+
+    test('refuses a dot-dot segment', () {
+      final dest = Directory('${tmp.path}/dotdot_segment')..createSync();
+      expect(
+        () => ios.extractIpaApp(
+          ipaBytes: fixtureIpaWithExtra('Payload/TestApp.app/a/../b'),
+          destDir: dest,
+        ),
+        throwsA(
+          isA<FormatException>().having(
+            (e) => e.message,
+            'message',
+            contains('Refusing to extract unsafe .ipa entry'),
+          ),
+        ),
+      );
+    });
+
+    test('refuses an absolute path', () {
+      final dest = Directory('${tmp.path}/absolute_path')..createSync();
+      expect(
+        () => ios.extractIpaApp(
+          ipaBytes: fixtureIpaWithExtra('Payload/TestApp.app//absolute'),
+          destDir: dest,
+        ),
+        throwsA(
+          isA<FormatException>().having(
+            (e) => e.message,
+            'message',
+            contains('Refusing to extract unsafe .ipa entry'),
+          ),
+        ),
+      );
     });
 
     test('refuses an archive with no app', () {

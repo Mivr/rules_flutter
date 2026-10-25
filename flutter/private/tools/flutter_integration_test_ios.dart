@@ -155,7 +155,15 @@ void _writeIpaEntry(
   String rel,
   ZipEntry entry,
 ) {
-  if (rel.split('/').any((s) => s.isEmpty || s == '.' || s == '..')) {
+  // rules_apple writes explicit directory entries, which end in `/`. The
+  // empty segment after that slash is the directory marker itself; an empty
+  // segment anywhere else (`a//b`, a leading `/`), or a `.`/`..` segment,
+  // is still refused below.
+  final segments = rel.split('/');
+  final names = rel.endsWith('/')
+      ? segments.sublist(0, segments.length - 1)
+      : segments;
+  if (names.any((s) => s.isEmpty || s == '.' || s == '..')) {
     throw FormatException(
       'Refusing to extract unsafe .ipa entry: ${entry.path}.',
     );
