@@ -11,6 +11,7 @@ import '../macho_framework.dart' as macho;
 import '../macho_parse.dart' as macho;
 import '../macho_patch.dart' as macho;
 import '../macho_ranges.dart' as macho;
+import '../macho_strip.dart' as macho;
 import '../macho_stub.dart' as macho;
 
 String _hex(Uint8List bytes) =>
@@ -2949,6 +2950,212 @@ void main() {
             macho.RewrittenLayout(linkeditOff: 0x3000, fileLength: 0x5000),
           ),
           returnsNormally,
+        );
+      });
+    });
+
+    group('stripInputRanges (round 2)', () {
+      /// A 16-byte `LC_TWOLEVEL_HINTS` command naming [offset]/[size]: hints
+      /// ride a strip untouched, so any past-the-end range they name must be
+      /// refused by the input-side check, not laundered by the output audit.
+      Uint8List hintsCommand(int offset, int size) {
+        final buf = Uint8List(16);
+        ByteData.sublistView(buf)
+          ..setUint32(0, macho.lcTwolevelHints, Endian.little)
+          ..setUint32(4, 16, Endian.little)
+          ..setUint32(8, offset, Endian.little)
+          ..setUint32(12, size ~/ 4, Endian.little);
+        return buf;
+      }
+
+      test(
+        'strip refuses a range ending past the input on the compacting path',
+        () {
+          final input = _buildStripIntegrityDylib(dyldInfoOnly: false);
+          final boobyTrapped = _withAppendedCommand(
+            input.bytes,
+            hintsCommand(input.bytes.length - 2, 4),
+          );
+          expect(
+            () => macho.patchMachO(
+              boobyTrapped,
+              macho.PatchOptions(stripSymbols: true),
+            ),
+            throwsA(
+              isA<FormatException>().having(
+                (e) => e.message,
+                'message',
+                allOf(contains('0x16'), contains('past the end')),
+              ),
+            ),
+          );
+        },
+      );
+
+      test('strip refuses a range starting past the input on the compacting '
+          'path', () {
+        final input = _buildStripIntegrityDylib(dyldInfoOnly: false);
+        final boobyTrapped = _withAppendedCommand(
+          input.bytes,
+          hintsCommand(input.bytes.length + 8, 8),
+        );
+        expect(
+          () => macho.patchMachO(
+            boobyTrapped,
+            macho.PatchOptions(stripSymbols: true),
+          ),
+          throwsA(
+            isA<FormatException>().having(
+              (e) => e.message,
+              'message',
+              allOf(contains('0x16'), contains('past the end')),
+            ),
+          ),
+        );
+      });
+
+      test('strip refuses a range past the input on the in-place path', () {
+        final input = _buildNoLinkeditDylib(bindInGap: false);
+        final boobyTrapped = _withAppendedCommand(
+          input.bytes,
+          hintsCommand(input.bytes.length + 8, 8),
+        );
+        expect(
+          () => macho.patchMachO(
+            boobyTrapped,
+            macho.PatchOptions(stripSymbols: true),
+          ),
+          throwsA(
+            isA<FormatException>().having(
+              (e) => e.message,
+              'message',
+              allOf(contains('0x16'), contains('past the end')),
+            ),
+          ),
+        );
+      });
+
+      /// Builds a small unsigned arm64 dylib with `__LINKEDIT` whose stripped
+      /// output is LONGER than its input: a single global symbol means
+      /// nothing is removed, and the signature-alignment padding adds two
+      /// bytes. With [badHints], an `LC_TWOLEVEL_HINTS` names a range ending
+      /// past the input but inside that longer output, so only the
+      /// input-side check can refuse it.
+      ({Uint8List bytes, int fileLength}) _buildGrowingDylib({
+        required bool badHints,
+      }) {
+        const linkeditOff = 0x3000;
+        const name = '_global12345';
+        final strBytes = Uint8List.fromList([0, ...ascii.encode(name), 0]);
+        final symTab =
+            (ByteData(16)
+                  ..setUint32(0, 1, Endian.little)
+                  ..setUint8(4, 0x0f)
+                  ..setUint8(5, 1)
+                  ..setUint16(6, 0, Endian.little)
+                  ..setUint64(8, 0x1000, Endian.little))
+                .buffer
+                .asUint8List();
+        // Payloads packed with no gaps: the only size change at strip time
+        // is the signature padding below.
+        final sigOff = linkeditOff + symTab.length + strBytes.length;
+        final sigBlob = _patternBytes(55, 40);
+        final fileLength = sigOff + sigBlob.length;
+        final sigCmd = Uint8List(16);
+        ByteData.sublistView(sigCmd)
+          ..setUint32(0, macho.lcCodeSignature, Endian.little)
+          ..setUint32(4, 16, Endian.little)
+          ..setUint32(8, sigOff, Endian.little)
+          ..setUint32(12, sigBlob.length, Endian.little);
+        final commands = <Uint8List>[
+          macho.buildLcSegment64((
+            segname: '__TEXT',
+            vmaddr: 0,
+            vmsize: linkeditOff,
+            fileoff: 0,
+            filesize: linkeditOff,
+            maxprot: 5,
+            initprot: 5,
+            nsects: 0,
+            flags: 0,
+          )).bytes,
+          macho.buildLcSegment64((
+            segname: '__LINKEDIT',
+            vmaddr: 0x4000,
+            vmsize: fileLength - linkeditOff,
+            fileoff: linkeditOff,
+            filesize: fileLength - linkeditOff,
+            maxprot: 1,
+            initprot: 1,
+            nsects: 0,
+            flags: 0,
+          )).bytes,
+          macho
+              .buildLcSymtab(
+                symoff: linkeditOff,
+                nsyms: 1,
+                stroff: linkeditOff + symTab.length,
+                strsize: strBytes.length,
+              )
+              .bytes,
+          sigCmd,
+          if (badHints) hintsCommand(fileLength - 2, 4),
+          macho.buildLcUuid(_patternBytes(7, 16)).bytes,
+          macho.buildLcIdDylib('@rpath/Grow.dylib').bytes,
+        ];
+        var sizeofcmds = 0;
+        for (final c in commands) {
+          sizeofcmds += c.length;
+        }
+        final buf = Uint8List(fileLength);
+        final bd = ByteData.sublistView(buf);
+        bd.setUint32(0, macho.mhMagic64, Endian.little);
+        bd.setUint32(4, macho.cpuTypeArm64, Endian.little);
+        bd.setUint32(8, macho.cpuSubtypeArm64All, Endian.little);
+        bd.setUint32(12, macho.mhDylib, Endian.little);
+        bd.setUint32(16, commands.length, Endian.little);
+        bd.setUint32(20, sizeofcmds, Endian.little);
+        bd.setUint32(24, macho.mhNoReexportedDylibs, Endian.little);
+        var off = macho.mhHeaderSize64;
+        for (final c in commands) {
+          buf.setRange(off, off + c.length, c);
+          off += c.length;
+        }
+        buf.setRange(linkeditOff, linkeditOff + symTab.length, symTab);
+        buf.setRange(
+          linkeditOff + symTab.length,
+          linkeditOff + symTab.length + strBytes.length,
+          strBytes,
+        );
+        buf.setRange(sigOff, sigOff + sigBlob.length, sigBlob);
+        return (bytes: buf, fileLength: fileLength);
+      }
+
+      test('a clean strip can emit an output longer than its input', () {
+        final input = _buildGrowingDylib(badHints: false);
+        final stripped = macho.stripLocalSymbols(
+          input.bytes,
+          macho.parseLoadCommands(input.bytes),
+        );
+        // Nothing is removed, but the signature padding adds two bytes: an
+        // output-side audit alone could never refuse a range in those bytes.
+        expect(stripped.bytes.length, input.fileLength + 2);
+      });
+
+      test('strip refuses a range the longer output would launder', () {
+        final input = _buildGrowingDylib(badHints: true);
+        expect(
+          () => macho.stripLocalSymbols(
+            input.bytes,
+            macho.parseLoadCommands(input.bytes),
+          ),
+          throwsA(
+            isA<FormatException>().having(
+              (e) => e.message,
+              'message',
+              allOf(contains('0x16'), contains('past the end')),
+            ),
+          ),
         );
       });
     });

@@ -530,7 +530,6 @@ void _alignSignaturePayload(
 void _throwOnUnmovedLinkeditRanges(
   List<LoadCommand> commands,
   int linkeditOff,
-  int fileLength,
 ) {
   for (final lc in commands) {
     switch (lc.cmd) {
@@ -544,7 +543,7 @@ void _throwOnUnmovedLinkeditRanges(
     }
     if (isSingleRangeLinkeditCommand(lc.cmd)) continue;
     for (final range in accountedRangesOf(lc)) {
-      if (range.size == 0 || range.offset + range.size > fileLength) continue;
+      if (range.size == 0) continue;
       if (range.offset + range.size > linkeditOff) {
         throw FormatException(
           'Cannot strip local symbols: ${describeStripCommand(lc)} points '
@@ -561,7 +560,6 @@ void _throwOnUnmovedLinkeditRanges(
 /// segment named `__LINKEDIT` is refused outright: only [linkedit], the
 /// segment the rewrite resizes, may carry that name.
 void _checkNoPayloadPastLinkedit(
-  Uint8List inputBytes,
   List<LoadCommand> commands,
   LoadCommand linkedit,
   int linkeditOff,
@@ -578,7 +576,6 @@ void _checkNoPayloadPastLinkedit(
       );
     }
     _checkRangeOutsideLinkedit(
-      inputBytes.length,
       linkeditOff,
       bd.getUint64(40, Endian.little),
       bd.getUint64(48, Endian.little),
@@ -594,7 +591,6 @@ void _checkNoPayloadPastLinkedit(
         continue;
       }
       _checkRangeOutsideLinkedit(
-        inputBytes.length,
         linkeditOff,
         sectBd.getUint32(48, Endian.little),
         sectBd.getUint64(40, Endian.little),
@@ -604,16 +600,17 @@ void _checkNoPayloadPastLinkedit(
   }
 }
 
-/// Throws when the file range [offset]/[size] overlaps [linkeditOff].
+/// Throws when the file range [offset]/[size] overlaps [linkeditOff]. Every
+/// range reaching here is inside the input already (the input-side check in
+/// [emit] refused the rest), so there is no past-the-end case left to skip.
 void _checkRangeOutsideLinkedit(
-  int fileLength,
   int linkeditOff,
   int offset,
   int size,
   String what,
 ) {
-  if (size == 0 || offset >= fileLength) return;
-  if (offset + size > linkeditOff && offset < fileLength) {
+  if (size == 0) return;
+  if (offset + size > linkeditOff) {
     throw FormatException(
       'Cannot strip local symbols: $what reaches into __LINKEDIT.',
     );
@@ -692,6 +689,7 @@ class _StripPlan {
   /// Emits the stripped image: rebuilt from `__LINKEDIT` when the binary
   /// has one, patched in place otherwise.
   StrippedSymbols emit() {
+    _throwOnInputRangesPastEnd();
     _RemappedDysymtab? remapped;
     if (dysymtabIndex >= 0) {
       remapped = _remapDysymtab(
@@ -705,6 +703,27 @@ class _StripPlan {
     final linkedit = _findLinkeditSegment(commands);
     if (linkedit == null) return _layInPlace(remapped);
     return _layCompacting(linkedit, remapped);
+  }
+
+  /// Throws when any load command names a file range past the end of the
+  /// input: a range the input never had is a range the rewrite cannot account
+  /// for, on either path, so the strip fails loudly naming the command. This
+  /// runs before either layout because the compacting rewrite can emit an
+  /// output longer than its input (signature alignment padding), which would
+  /// otherwise launder a past-the-end input range into looking valid to the
+  /// output audit.
+  void _throwOnInputRangesPastEnd() {
+    for (final lc in commands) {
+      for (final range in accountedRangesOf(lc)) {
+        if (range.size == 0) continue;
+        if (range.offset + range.size > input.length) {
+          throw FormatException(
+            'Cannot strip local symbols: ${describeStripCommand(lc)} points '
+            'past the end of the file.',
+          );
+        }
+      }
+    }
   }
 
   /// Rewrites the symbol tables in place (no `__LINKEDIT` segment to
@@ -827,7 +846,7 @@ class _StripPlan {
   ) {
     final linkeditBd = ByteData.sublistView(linkedit.bytes);
     final linkeditOff = linkeditBd.getUint64(40, Endian.little).toInt();
-    _checkNoPayloadPastLinkedit(input, commands, linkedit, linkeditOff);
+    _checkNoPayloadPastLinkedit(commands, linkedit, linkeditOff);
     final symPayload = _LinkeditPayload(
       oldOffset: table.symoff,
       oldSize: table.nsyms * 16,
@@ -850,7 +869,7 @@ class _StripPlan {
     }
     _collectTablePayloads(input, commands, payloads, linkeditOff);
     _alignSignaturePayload(commands, payloads);
-    _throwOnUnmovedLinkeditRanges(commands, linkeditOff, input.length);
+    _throwOnUnmovedLinkeditRanges(commands, linkeditOff);
     final newLinkeditSize = _layoutLinkeditPayloads(
       payloads,
       linkeditOff,
