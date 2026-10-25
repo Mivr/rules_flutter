@@ -1,0 +1,11 @@
+load("@rules_dart//dart:defs.bzl", "dart_library")
+
+# Stub dep exposing Dart package `flutter_test` for the iOS integration-test
+# analysis fixtures in `//flutter/tests`. Its own Bazel package (and `lib/`)
+# gives it a package root distinct from the test target's own.
+dart_library(
+    name = "flutter_test_dep",
+    package_name = "flutter_test",
+    srcs = ["lib/stub.dart"],
+    visibility = ["//flutter/tests:__pkg__"],
+)

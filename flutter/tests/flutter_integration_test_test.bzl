@@ -25,8 +25,11 @@ load(
 load(
     "//flutter/private:flutter_integration_test.bzl",
     "make_android_integration_bootstrap_content",
-    "make_linux_integration_bootstrap_content",
     "make_web_integration_bootstrap_content",
+)
+load(
+    "//flutter/private:flutter_integration_test_ios.bzl",
+    "make_linux_integration_bootstrap_content",
 )
 load(
     "//flutter/private:linux_headless_runtime_repo.bzl",

@@ -1,0 +1,24 @@
+load("@rules_flutter//flutter:defs.bzl", "flutter_plugin")
+load("@rules_flutter//flutter:macos.bzl", "flutter_apple_plugin_library")
+
+flutter_apple_plugin_library(
+    name = "ios_greeting_plugin_apple_ios",
+    srcs = ["ios/Classes/IosGreetingPlugin.swift"],
+    module_name = "ios_greeting_plugin",
+    platform = "ios",
+    visibility = ["//visibility:public"],
+)
+
+flutter_plugin(
+    name = "ios_greeting_plugin",
+    package_name = "ios_greeting_plugin",
+    srcs = ["lib/ios_greeting_plugin.dart"],
+    apple_libs = select({
+        "@platforms//os:ios": [":ios_greeting_plugin_apple_ios"],
+        "//conditions:default": [],
+    }),
+    platforms = ["ios"],
+    plugin_class = "IosGreetingPlugin",
+    visibility = ["//visibility:public"],
+    deps = ["@deps//:flutter"],
+)

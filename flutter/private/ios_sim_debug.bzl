@@ -6,14 +6,14 @@ engine is device-only — so a runtime simulator test must build the app with
 the app keeps the surrounding test runner in the default configuration.
 """
 
-def _ios_sim_debug_transition_impl(_settings, _attr):
+def ios_sim_debug_transition_impl(_settings, _attr):
     return {
         "//command_line_option:compilation_mode": "dbg",
         "//command_line_option:ios_multi_cpus": ["sim_arm64"],
     }
 
 _ios_sim_debug_transition = transition(
-    implementation = _ios_sim_debug_transition_impl,
+    implementation = ios_sim_debug_transition_impl,
     inputs = [],
     outputs = [
         "//command_line_option:compilation_mode",
