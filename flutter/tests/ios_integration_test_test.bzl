@@ -18,13 +18,16 @@ load("@bazel_skylib//rules:write_file.bzl", "write_file")
 load("//flutter:defs.bzl", "flutter_integration_test")
 load("//flutter:providers.bzl", "FlutterApplicationInfo")
 load(
+    "//flutter/private:flutter_integration_test.bzl",
+    "flutter_ios_integration_bootstrap",
+    "make_linux_integration_bootstrap_content",
+)
+load(
     "//flutter/private:flutter_integration_test_ios.bzl",
     "IOS_APP_KWARG_KEYS",
     "default_ios_bundle_id",
-    "flutter_ios_integration_bootstrap",
     "flutter_ios_integration_test",
     "ios_integration_test_env",
-    "make_ios_integration_bootstrap_content",
     "sanitize_ios_bundle_id_segment",
 )
 load("//flutter/private:ios_sim_debug.bzl", "ios_sim_debug_transition_impl")
@@ -89,7 +92,7 @@ def _app_kwarg_keys_test_impl(ctx):
 
 def _ios_bootstrap_with_integration_test_pkg_test_impl(ctx):
     env = unittest.begin(ctx)
-    src = make_ios_integration_bootstrap_content(
+    src = make_linux_integration_bootstrap_content(
         _TEST_IMPORT,
         has_integration_test = True,
     )
@@ -112,7 +115,7 @@ def _ios_bootstrap_with_integration_test_pkg_test_impl(ctx):
 
 def _ios_bootstrap_without_integration_test_pkg_test_impl(ctx):
     env = unittest.begin(ctx)
-    src = make_ios_integration_bootstrap_content(
+    src = make_linux_integration_bootstrap_content(
         _TEST_IMPORT,
         has_integration_test = False,
     )
