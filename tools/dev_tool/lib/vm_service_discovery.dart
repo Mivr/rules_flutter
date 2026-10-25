@@ -56,7 +56,6 @@
 library;
 
 import 'dart:async';
-import 'dart:io';
 
 import 'app_log.dart';
 import 'logging.dart';
@@ -317,44 +316,6 @@ Future<VmServiceDiscovery> waitForVmServiceUri({
     abandoned: abandoned,
   );
   return wait.run();
-}
-
-/// Watch a log-emitting helper process for the announcement while the app is
-/// alive.
-///
-/// For sources where the helper exists *only* to find the URI (the iOS
-/// simulator's discovery stream); app output comes from a separate stream.
-/// Owns only its own subscription, like [waitForVmServiceUri] itself.
-/// Completing [abandoned] ends the wait at once, as in [waitForVmServiceUri];
-/// the relaunch path shuts the tool down through here, so a wait stranded
-/// inside a restart's relaunch must not hold the process open either.
-Future<VmServiceDiscovery> waitForVmServiceUriFromProcess(
-  Process log, {
-  required String deviceName,
-  Future<int?>? appExit,
-  required VmDiscoveryConfig config,
-  Logger? logger,
-  Future<void>? abandoned,
-}) async {
-  final logs = AppLogStream();
-  final pump = pumpProcessLines(log, logs);
-  // The helper is this stream's only source, so a helper that dies takes the
-  // stream with it and the wait ends at once instead of sitting out its bound
-  // on a process that will never say anything again.
-  logs.closeWhen([pump.done]);
-  try {
-    return await waitForVmServiceUri(
-      logs: logs,
-      deviceName: deviceName,
-      appExit: appExit,
-      config: config,
-      logger: logger,
-      abandoned: abandoned,
-    );
-  } finally {
-    await pump.dispose();
-    await logs.close();
-  }
 }
 
 /// One wait's three ways to wake up.

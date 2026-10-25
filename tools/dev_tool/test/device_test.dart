@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter_bazel_dev_tool/device.dart';
+import 'package:flutter_bazel_dev_tool/ios_sim_log_fallback.dart';
 import 'package:flutter_bazel_dev_tool/key_press.dart';
 import 'package:flutter_bazel_dev_tool/toolchain_info.dart';
 import 'package:flutter_bazel_dev_tool/web_module_server.dart';
@@ -18,6 +19,25 @@ import 'fakes.dart';
 /// The announcement every desktop launch waits for.
 const _vmServiceLine =
     'The Dart VM service is listening on http://127.0.0.1:12345/test=/';
+
+/// One `log show --style json` entry for [pid] at [timestamp] announcing [uri].
+String _simLogShowEntry({
+  required int pid,
+  required DateTime timestamp,
+  required String uri,
+}) =>
+    '{\n'
+    '  "timestamp" : "${timestamp.toUtc().toIso8601String()}",\n'
+    '  "processIdentifier" : $pid,\n'
+    '  "eventMessage" : "The Dart VM service is listening on $uri"\n'
+    '}';
+
+/// The structured `message` of a log record, or null for plain-text records.
+String? _logMessageOf(LogRecord record) {
+  final object = record.object;
+  if (object is Map) return object['message'] as String?;
+  return null;
+}
 
 /// What `devicectl list devices` reports for one paired device.
 String devicesJson(String transportType) => json.encode({
@@ -2948,6 +2968,400 @@ Filesystem       1K-blocks    Used Available Use% Mounted on
       for (final aux in instance.auxiliaryProcesses) {
         await expectLater(aux.exitCode, completes);
       }
+    });
+
+    test(
+      'finds the announcement in the persisted log when the stream attaches '
+      'late',
+      () async {
+        final showCalls = <List<String>>[];
+        final device =
+            IOSSimulatorDevice(
+                udid: 'TEST-UDID',
+                bundleId: 'com.example.test',
+                runProcess: (exe, args) async {
+                  if (args.contains('show')) {
+                    showCalls.add(args);
+                    // Logged now, so at or after the launch instant the device
+                    // captured before `simctl launch` ran.
+                    return ProcessResult(
+                      0,
+                      0,
+                      _simLogShowEntry(
+                        pid: 4242,
+                        timestamp: DateTime.now(),
+                        uri: 'http://127.0.0.1:9999/xyz=/',
+                      ),
+                      '',
+                    );
+                  }
+                  if (args.contains('launch')) {
+                    return ProcessResult(0, 0, 'com.example.test: 4242', '');
+                  }
+                  return ProcessResult(0, 0, '', '');
+                },
+                startProcess: (exe, args) async {
+                  final p = FakeProcess();
+                  if (!args.contains('--style')) {
+                    // The late stream: its header, which proves nothing, and never
+                    // the announcement the app already printed.
+                    unawaited(
+                      p.outputAttached.then(
+                        (_) => p.emitStdout(
+                          'Filtering the log data using "eventMessage CONTAINS ..."',
+                        ),
+                      ),
+                    );
+                  }
+                  return p;
+                },
+              )
+              ..vmServiceTimeout = const Duration(seconds: 30)
+              ..simLogFallbackPollInterval = const Duration(milliseconds: 10);
+
+        final elapsed = Stopwatch()..start();
+        final instance = await device.launch('/path/to/MyApp.app');
+        elapsed.stop();
+
+        expect(
+          instance.vmServiceUri.toString(),
+          'http://127.0.0.1:9999/xyz=/',
+        );
+        expect(
+          showCalls,
+          isNotEmpty,
+          reason:
+              'the persisted log had to be read: the stream never announced',
+        );
+        expect(
+          elapsed.elapsed,
+          lessThan(const Duration(seconds: 10)),
+          reason:
+              'the fallback answers on its first poll, well before the bound',
+        );
+      },
+    );
+
+    test(
+      'takes only this launch announcement from the persisted log',
+      () async {
+        var polls = 0;
+        String showAnswer() {
+          polls++;
+          if (polls == 1) {
+            // Stale first: another pid's fresh announcement, then this pid's
+            // pre-launch one. Neither may be taken.
+            return [
+              _simLogShowEntry(
+                pid: 9999,
+                timestamp: DateTime.now(),
+                uri: 'http://127.0.0.1:1111/stale-other=/',
+              ),
+              _simLogShowEntry(
+                pid: 4242,
+                timestamp: DateTime.now().subtract(
+                  const Duration(hours: 1),
+                ),
+                uri: 'http://127.0.0.1:2222/stale-old=/',
+              ),
+            ].join('\n');
+          }
+          return _simLogShowEntry(
+            pid: 4242,
+            timestamp: DateTime.now(),
+            uri: 'http://127.0.0.1:7777/fresh=/',
+          );
+        }
+
+        final device =
+            IOSSimulatorDevice(
+                udid: 'TEST-UDID',
+                bundleId: 'com.example.test',
+                runProcess: (exe, args) async {
+                  if (args.contains('show')) {
+                    return ProcessResult(0, 0, showAnswer(), '');
+                  }
+                  if (args.contains('launch')) {
+                    return ProcessResult(0, 0, 'com.example.test: 4242', '');
+                  }
+                  return ProcessResult(0, 0, '', '');
+                },
+                startProcess: (exe, args) async {
+                  final p = FakeProcess();
+                  if (!args.contains('--style')) {
+                    unawaited(
+                      p.outputAttached.then(
+                        (_) => p.emitStdout('Filtering the log data using ""'),
+                      ),
+                    );
+                  }
+                  return p;
+                },
+              )
+              ..vmServiceTimeout = const Duration(seconds: 30)
+              ..simLogFallbackPollInterval = const Duration(milliseconds: 10);
+
+        final instance = await device.launch('/path/to/MyApp.app');
+
+        expect(polls, greaterThan(1));
+        expect(
+          instance.vmServiceUri.toString(),
+          'http://127.0.0.1:7777/fresh=/',
+          reason:
+              'the stale announcements must be skipped, never taken: a '
+              'reused pid or an earlier launch must not hand back its URI',
+        );
+      },
+    );
+
+    test('no pid means no fallback, and says so', () async {
+      final runs = <(String, List<String>)>[];
+      final records = <LogRecord>[];
+      final sub = Logger.root.onRecord.listen(records.add);
+      try {
+        final device = IOSSimulatorDevice(
+          udid: 'TEST-UDID',
+          bundleId: 'com.example.test',
+          runProcess: (exe, args) async {
+            runs.add((exe, args));
+            // No pid in the launch output: an unknown `simctl` format.
+            return ProcessResult(0, 0, '', '');
+          },
+          startProcess: (exe, args) async {
+            final p = FakeProcess();
+            if (!args.contains('--style')) {
+              unawaited(
+                p.outputAttached.then(
+                  (_) => p.emitStdout(
+                    'The Dart VM service is listening on '
+                    'http://127.0.0.1:54321/abc=/',
+                  ),
+                ),
+              );
+            }
+            return p;
+          },
+        )..vmServiceTimeout = const Duration(seconds: 30);
+
+        final instance = await device.launch('/path/to/MyApp.app');
+        expect(
+          instance.vmServiceUri.toString(),
+          'http://127.0.0.1:54321/abc=/',
+        );
+      } finally {
+        await sub.cancel();
+      }
+
+      expect(
+        runs.any((c) => c.$2.contains('show')),
+        isFalse,
+        reason: 'without a pid there is nothing to hunt the persisted log for',
+      );
+      expect(
+        records.any((r) => _logMessageOf(r) == 'sim_log_fallback_off'),
+        isTrue,
+        reason: 'discovery must say the fallback is off, and why',
+      );
+    });
+
+    test(
+      'a failing log show is logged once and the stream still wins',
+      () async {
+        var shows = 0;
+        final records = <LogRecord>[];
+        final sub = Logger.root.onRecord.listen(records.add);
+        try {
+          final device =
+              IOSSimulatorDevice(
+                  udid: 'TEST-UDID',
+                  bundleId: 'com.example.test',
+                  runProcess: (exe, args) async {
+                    if (args.contains('show')) {
+                      shows++;
+                      return ProcessResult(
+                        0,
+                        1,
+                        '',
+                        'simulated log show refusal',
+                      );
+                    }
+                    if (args.contains('launch')) {
+                      return ProcessResult(0, 0, 'com.example.test: 4242', '');
+                    }
+                    return ProcessResult(0, 0, '', '');
+                  },
+                  startProcess: (exe, args) async {
+                    final p = FakeProcess();
+                    if (!args.contains('--style')) {
+                      // The stream wins, a beat after the fallback's failing polls.
+                      unawaited(
+                        p.outputAttached.then((_) async {
+                          await Future<void>.delayed(
+                            const Duration(milliseconds: 100),
+                          );
+                          p.emitStdout(
+                            'The Dart VM service is listening on '
+                            'http://127.0.0.1:54321/abc=/',
+                          );
+                        }),
+                      );
+                    }
+                    return p;
+                  },
+                )
+                ..vmServiceTimeout = const Duration(seconds: 30)
+                ..simLogFallbackPollInterval = const Duration(milliseconds: 10);
+
+          final instance = await device.launch('/path/to/MyApp.app');
+          expect(
+            instance.vmServiceUri.toString(),
+            'http://127.0.0.1:54321/abc=/',
+          );
+        } finally {
+          await sub.cancel();
+        }
+
+        expect(
+          shows,
+          greaterThan(1),
+          reason: 'several polls had to fail while the stream was quiet',
+        );
+        expect(
+          records
+              .where((r) => _logMessageOf(r) == 'sim_log_fallback_poll_failed')
+              .length,
+          1,
+          reason:
+              'one line for the refusal, not one per poll — and discovery '
+              'still succeeded through the stream',
+        );
+      },
+    );
+  });
+
+  group('findSimLogVmServiceUri', () {
+    final since = DateTime.utc(2026, 10, 25, 12);
+    const uri = 'http://127.0.0.1:9999/xyz=/';
+
+    String entry({
+      int pid = 4242,
+      DateTime? timestamp,
+      String message =
+          'The Dart VM service is listening on http://127.0.0.1:9999/xyz=/',
+    }) =>
+        '{\n'
+        '  "timestamp" : "${(timestamp ?? since).toIso8601String()}",\n'
+        '  "processIdentifier" : $pid,\n'
+        '  "eventMessage" : "$message"\n'
+        '}';
+
+    test('finds a pretty-printed entry whatever the key order', () {
+      // The message first: field order is the entry's, not the reader's.
+      const output =
+          '{\n'
+          '  "eventMessage" : "The Dart VM service is listening on '
+          'http://127.0.0.1:9999/xyz=/",\n'
+          '  "processIdentifier" : 4242,\n'
+          '  "timestamp" : "2026-10-25T12:00:01.000Z"\n'
+          '}';
+      expect(
+        findSimLogVmServiceUri(output, pid: 4242, since: since),
+        Uri.parse(uri),
+      );
+    });
+
+    test('finds a compact single-line entry', () {
+      final output =
+          '{"timestamp":"2026-10-25T12:00:01.000Z","processIdentifier":4242,'
+          '"eventMessage":"The Dart VM service is listening on $uri"}';
+      expect(
+        findSimLogVmServiceUri(output, pid: 4242, since: since),
+        Uri.parse(uri),
+      );
+    });
+
+    test('reads the Apple timestamp shape', () {
+      final output = entry().replaceFirst(
+        (since).toIso8601String(),
+        '2026-10-25 12:00:01.123456+0000',
+      );
+      expect(
+        findSimLogVmServiceUri(output, pid: 4242, since: since),
+        Uri.parse(uri),
+      );
+    });
+
+    test('rejects another pid, an older timestamp, and a missing pid', () {
+      expect(
+        findSimLogVmServiceUri(
+          entry(pid: 9999),
+          pid: 4242,
+          since: since,
+        ),
+        isNull,
+        reason: 'another process announcing proves nothing about this launch',
+      );
+      expect(
+        findSimLogVmServiceUri(
+          entry(timestamp: since.subtract(const Duration(seconds: 1))),
+          pid: 4242,
+          since: since,
+        ),
+        isNull,
+        reason: 'an entry from before the launch is a stale announcement',
+      );
+      expect(
+        findSimLogVmServiceUri(
+          entry().replaceAll('"processIdentifier" : 4242,\n', ''),
+          pid: 4242,
+          since: since,
+        ),
+        isNull,
+        reason: 'without a pid the entry cannot prove it is this launch',
+      );
+      expect(
+        findSimLogVmServiceUri(
+          entry(message: 'Filtering the log data using ""'),
+          pid: 4242,
+          since: since,
+        ),
+        isNull,
+        reason: 'a header line is not an announcement',
+      );
+    });
+
+    test('blank output is quiet; garbage output is an error, not quiet', () {
+      expect(findSimLogVmServiceUri('', pid: 4242, since: since), isNull);
+      expect(
+        () => findSimLogVmServiceUri(
+          'not log output at all',
+          pid: 4242,
+          since: since,
+        ),
+        throwsA(isA<FormatException>()),
+      );
+    });
+  });
+
+  group('SimLogFallback.logShowArgs', () {
+    test('scopes the read to this launch pid', () {
+      final fallback = SimLogFallback(
+        query: (
+          udid: 'TEST-UDID',
+          pid: 4242,
+          since: DateTime.utc(2026, 10, 25, 12),
+        ),
+        runProcess: (exe, args) async => ProcessResult(0, 0, '', ''),
+      );
+      final args = fallback.logShowArgs;
+      expect(
+        args,
+        containsAllInOrder(['simctl', 'spawn', 'TEST-UDID', 'log', 'show']),
+      );
+      expect(args, contains('--style'));
+      final predicate = args[args.indexOf('--predicate') + 1];
+      expect(predicate, contains('processIdentifier == 4242'));
+      expect(predicate, contains('Dart VM service'));
     });
   });
 

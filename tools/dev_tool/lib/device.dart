@@ -51,6 +51,7 @@ import 'build_mode.dart';
 import 'cdp_console.dart';
 import 'compiler_config.dart';
 import 'host_tools.dart';
+import 'ios_sim_log_fallback.dart';
 import 'key_press.dart';
 import 'logging.dart';
 import 'mdns_vm_service_discovery.dart';
@@ -2360,6 +2361,12 @@ class IOSSimulatorDevice extends Device {
   /// window terminates the app it started, so no shutdown leaves one running.
   bool _inFlightOwnsApp = false;
 
+  /// How often the persisted-log fallback re-reads `log show` while discovery
+  /// waits.
+  ///
+  /// Settable so tests can drive the fallback without real-time sleeps.
+  Duration simLogFallbackPollInterval = defaultSimLogFallbackPollInterval;
+
   @override
   Future<AppInstance> launch(String appPath, {AppLogListener? onLog}) =>
       _trackedLaunch(() => _launch(appPath, onLog: onLog));
@@ -2409,16 +2416,52 @@ class IOSSimulatorDevice extends Device {
   /// launch` reports is the liveness signal: while it lives, the wait keeps
   /// going. No pid (an unparsed format) means no signal, and the wait then
   /// relies on the bound alone, as on Android.
+  ///
+  /// The live stream is the fast path, but not the only one: it can attach
+  /// after the app has already announced, so the persisted log is polled for
+  /// this launch's pid beside it ([SimLogFallback]) and whichever source sees
+  /// the announcement first wins. Both feed one [AppLogStream] read by one
+  /// [waitForVmServiceUri], so the progress lines, the fail-at-once on app
+  /// exit, and the bound note behave exactly as with the stream alone. No pid
+  /// means no fallback — and a log line saying so — because there is nothing
+  /// to hunt the persisted log for.
   Future<VmServiceDiscovery> _discoverSimVmService(
     Process discoveryLog,
-    String launchStdout,
-  ) async {
+    String launchStdout, {
+    required DateTime launchStarted,
+  }) async {
     final config = _discoveryConfig();
     final stopWatch = Completer<void>();
+    final logs = AppLogStream();
+    final pump = pumpProcessLines(discoveryLog, logs);
+    final simPid = parseSimctlLaunchPid(launchStdout);
+    final fallback = simPid == null
+        ? null
+        : SimLogFallback(
+            query: (udid: udid, pid: simPid, since: launchStarted),
+            runProcess: _runProcess,
+            pollInterval: simLogFallbackPollInterval,
+            clock: config.clock,
+            logger: _discoveryLogger(),
+          );
+    if (fallback == null) {
+      _discoveryLogger().warning({
+        'message': 'sim_log_fallback_off',
+        'text':
+            'The iOS simulator persisted-log fallback is off: `simctl '
+            'launch` reported no pid, so discovery reads the live stream '
+            'alone. Launch output was: "$launchStdout".',
+        'launch_stdout': launchStdout,
+      });
+    }
+    final feeding = fallback?.feedAnnouncements(logs, stop: stopWatch.future);
+    // The helper is this stream's live source, so a helper that dies takes
+    // the stream with it; the fallback ends with the wait either way, so it
+    // joins the close set rather than holding the stream open past discovery.
+    logs.closeWhen([pump.done, if (feeding != null) feeding]);
     try {
-      final simPid = parseSimctlLaunchPid(launchStdout);
-      return await waitForVmServiceUriFromProcess(
-        discoveryLog,
+      return await waitForVmServiceUri(
+        logs: logs,
         deviceName: name,
         appExit: simPid == null
             ? null
@@ -2433,8 +2476,12 @@ class IOSSimulatorDevice extends Device {
         abandoned: _launchAbortSignal,
       );
     } finally {
-      // The wait is over, whatever it concluded: end the `ps` polling.
+      // The wait is over, whatever it concluded: end the `ps` polling and the
+      // fallback's `log show` polling, then release the stream.
       stopWatch.complete();
+      if (feeding != null) await feeding;
+      await pump.dispose();
+      await logs.close();
     }
   }
 
@@ -2511,6 +2558,9 @@ class IOSSimulatorDevice extends Device {
     // Refuse before `simctl launch` puts an app on the simulator that nobody
     // will stop, rather than starting one only to terminate it below.
     _throwIfLaunchAbandoned();
+    // The persisted-log fallback hunts only entries logged at or after this
+    // instant, so it is captured before the launch it bounds.
+    final launchStarted = DateTime.now();
     final launchResult = await _runProcess('xcrun', [
       'simctl', 'launch', udid, bundleId,
       // Anything after the bundle id is passed to the app as argv, which is
@@ -2522,13 +2572,14 @@ class IOSSimulatorDevice extends Device {
     }
     _inFlightOwnsApp = true;
 
-    // Discover VM service URI from the dedicated discovery stream. A release
-    // build serves none, so there is nothing to wait for — and no pid watch
-    // to start.
+    // Discover VM service URI from the dedicated discovery stream, with the
+    // persisted log as fallback. A release build serves none, so there is
+    // nothing to wait for — and no pid watch to start.
     final discovery = buildMode.servesVmService
         ? await _discoverSimVmService(
             discoveryLog,
             launchResult.stdout as String,
+            launchStarted: launchStarted,
           )
         : (uri: null, gaveUpNote: null);
 
