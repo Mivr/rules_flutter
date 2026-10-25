@@ -25,7 +25,7 @@ flutter_integration_test(
 # the full-matrix workflow runs it by name and asserts the run FAILS, proving
 # the simulator harness reports assertion failures loudly.
 flutter_integration_test(
-    name = "red_test",
+    name = "app_test_red",
     package_name = "integration_ios",
     srcs = ["integration_test/red_test.dart"],
     app_srcs = ["lib/main.dart"],
@@ -56,9 +56,9 @@ build_test(
 # `manual`, so `bazel test //...` never gives it to the analysis aspect; this
 # checks it anyway.
 dart_analysis_test(
-    name = "red_test_analysis",
+    name = "app_test_red_analysis",
     target_compatible_with = ["@platforms//os:macos"],
-    targets = [":red_test"],
+    targets = [":app_test_red"],
 )
 
 # The workspace's lint ruleset, bundled with the pub package whose YAML its

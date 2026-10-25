@@ -25,7 +25,7 @@ class CounterApp extends StatelessWidget {
   }
 }
 
-/// Counter screen displaying the tap count, bundled asset, and Swift greeting.
+/// Counter screen displaying the tap count, bundled asset, and Swift-reported bundle id.
 class CounterHomePage extends StatefulWidget {
   /// Creates the counter home page.
   const CounterHomePage({super.key});
@@ -36,21 +36,21 @@ class CounterHomePage extends StatefulWidget {
 
 class _CounterHomePageState extends State<CounterHomePage> {
   int _counter = 0;
-  String _greeting = 'Loading...';
+  String _bundleId = 'Loading...';
 
   @override
   void initState() {
     super.initState();
-    unawaited(_loadGreeting());
+    unawaited(_loadBundleId());
   }
 
-  Future<void> _loadGreeting() async {
-    final greeting = await const IosGreetingPlugin().getGreeting();
+  Future<void> _loadBundleId() async {
+    final bundleId = await const IosGreetingPlugin().getAppBundleId();
     if (!mounted) {
       return;
     }
     setState(() {
-      _greeting = greeting ?? 'Unknown greeting';
+      _bundleId = bundleId ?? 'Unknown bundle id';
     });
   }
 
@@ -73,8 +73,8 @@ class _CounterHomePageState extends State<CounterHomePage> {
               key: const ValueKey<String>('app_logo'),
             ),
             Text(
-              _greeting,
-              key: const ValueKey<String>('plugin_greeting'),
+              _bundleId,
+              key: const ValueKey<String>('plugin_bundle_id'),
             ),
             const Text('You have pushed the button this many times:'),
             Text(
