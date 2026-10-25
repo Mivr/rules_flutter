@@ -124,10 +124,14 @@ String? _firstString(Map<Object?, Object?> entry, List<String> keys) {
   return null;
 }
 
-/// The entry's pid: the key spelled the way Apple's `log` spells it, plus the
-/// shortenings a fixture or a future format may use, tolerating a string
-/// encoding.
-int? _entryPid(Map<Object?, Object?> entry) {
+/// The pid a decoded `log` JSON entry was written by.
+///
+/// The key spelled the way Apple's `log` spells it, plus the shortenings a
+/// fixture or a future format may use, tolerating a string encoding. Shared
+/// with the live discovery stream, which judges entries the same way this
+/// fallback does. Null when the entry carries no pid, in which case the entry
+/// cannot prove it is this launch's and does not count.
+int? simLogEntryPid(Map<Object?, Object?> entry) {
   for (final key in const [
     'processIdentifier',
     'processID',
@@ -141,6 +145,24 @@ int? _entryPid(Map<Object?, Object?> entry) {
   return null;
 }
 
+/// The message text of a decoded `log` JSON entry, or null when it has none.
+///
+/// Shared with the live discovery stream, which reads the same entries out of
+/// `log stream` instead of `log show`.
+String? simLogEntryMessage(Map<Object?, Object?> entry) =>
+    _firstString(entry, const ['eventMessage', 'message']);
+
+/// The VM-service URI [message] announces, or null when it announces none.
+///
+/// The engine's `The Dart VM service is listening on ...` line — the same
+/// pattern every log-based discovery wait reads — shared with the live
+/// discovery stream so both sources take the same announcement.
+Uri? simLogAnnouncementUri(String message) {
+  final match = vmServiceUriPattern.firstMatch(message);
+  if (match == null) return null;
+  return Uri.parse(match.group(1)!);
+}
+
 /// Judge one decoded entry: this launch's announcement, or null.
 ///
 /// Null covers every way an entry does not count — no message, another
@@ -152,9 +174,9 @@ Uri? _judgeJsonEntry(
   required int pid,
   required DateTime since,
 }) {
-  final message = _firstString(entry, const ['eventMessage', 'message']);
+  final message = simLogEntryMessage(entry);
   if (message == null) return null;
-  if (_entryPid(entry) != pid) return null;
+  if (simLogEntryPid(entry) != pid) return null;
   final rawTimestamp = _firstString(entry, const ['timestamp', 'time']);
   final timestamp = rawTimestamp == null
       ? null
@@ -162,9 +184,7 @@ Uri? _judgeJsonEntry(
           rawTimestamp,
         );
   if (timestamp == null || timestamp.isBefore(since)) return null;
-  final match = vmServiceUriPattern.firstMatch(message);
-  if (match == null) return null;
-  return Uri.parse(match.group(1)!);
+  return simLogAnnouncementUri(message);
 }
 
 /// The JSON document inside one `log show` call's stdout.

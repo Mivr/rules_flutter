@@ -42,6 +42,19 @@ String _simLogShowEntry({
 String _simLogShowDoc(List<String> entries) =>
     '[{\n${entries.join('\n},{\n')}\n}]';
 
+/// Lines of one `log stream --style json` entry announcing [uri] from [pid]:
+/// `"key" : value` fields closed by the `},{` delimiter Apple joins entries
+/// with. The discovery stream judges entries by pid, so a stream fake
+/// announces with these rather than a bare line.
+List<String> _simStreamAnnouncement({
+  required int pid,
+  required String uri,
+}) => [
+  '  "eventMessage" : ${json.encode('The Dart VM service is listening on $uri')},',
+  '  "processID" : $pid,',
+  '},{',
+];
+
 /// The structured `message` of a log record, or null for plain-text records.
 String? _logMessageOf(LogRecord record) {
   final object = record.object;
@@ -470,28 +483,30 @@ void main() {
     );
 
     test('discovers VM service URI from log stream', () async {
-      // launch() starts two `log stream` processes: a discovery stream
-      // matching only the VM-service announcement, then the app's own output
-      // stream (`--style json`). They need separate fakes. The announcement
-      // has to be written once the *discovery* pump is reading — a single
-      // shared fake signals "attached" when the output-log pump subscribes,
-      // which happens first, and FakeProcess's controllers are broadcast, so
-      // the line would be delivered to the log drain and dropped for
-      // discovery.
+      // launch() starts two `log stream` processes: a pid-judged discovery
+      // stream matching the VM-service announcement, then the app's own
+      // output stream with the process-scoped predicate. They need separate
+      // fakes. The announcement has to be written once the *discovery* pump
+      // is reading — a single shared fake signals "attached" when the
+      // output-log pump subscribes, which happens first, and FakeProcess's
+      // controllers are broadcast, so the lines would be delivered to the
+      // log drain and dropped for discovery.
       final device = IOSSimulatorDevice(
         udid: 'TEST-UDID',
         bundleId: 'com.example.test',
         runProcess: (exe, args) async => ProcessResult(0, 0, '', ''),
         startProcess: (exe, args) async {
           final p = FakeProcess();
-          if (!args.contains('--style')) {
+          if (args.any((a) => a.contains('Dart VM service'))) {
             unawaited(
-              p.outputAttached.then(
-                (_) => p.emitStdout(
-                  'The Dart VM service is listening on '
-                  'http://127.0.0.1:54321/abc=/',
-                ),
-              ),
+              p.outputAttached.then((_) {
+                for (final line in _simStreamAnnouncement(
+                  pid: 4242,
+                  uri: 'http://127.0.0.1:54321/abc=/',
+                )) {
+                  p.emitStdout(line);
+                }
+              }),
             );
           }
           return p;
@@ -2941,9 +2956,9 @@ Filesystem       1K-blocks    Used Available Use% Mounted on
     test('the app-output stream is killed on stop', () async {
       final spawned = <FakeProcess>[];
       // The launch spawns the discovery stream first and the app-output
-      // stream second, and only subscribes to discovery after the simctl
-      // launch call — so the test has to wait for both to exist *and* both to
-      // be listening before it emits anything into these broadcast streams.
+      // stream second, and both pumps subscribe at spawn — so the test has
+      // to wait for both to exist *and* both to be listening before it emits
+      // anything into these broadcast streams.
       final bothSpawned = Completer<void>();
       final device = IOSSimulatorDevice(
         udid: 'TEST-UDID',
@@ -2964,7 +2979,12 @@ Filesystem       1K-blocks    Used Available Use% Mounted on
       await Future.wait([for (final p in spawned) p.outputAttached]);
       // Complete the discovery stream so launch returns.
       for (final p in spawned) {
-        p.emitStdout('  "eventMessage" : "$_vmServiceLine",');
+        for (final line in _simStreamAnnouncement(
+          pid: 4242,
+          uri: 'http://127.0.0.1:12345/test=/',
+        )) {
+          p.emitStdout(line);
+        }
       }
       final instance = await pending;
 
@@ -3016,7 +3036,7 @@ Filesystem       1K-blocks    Used Available Use% Mounted on
                 },
                 startProcess: (exe, args) async {
                   final p = FakeProcess();
-                  if (!args.contains('--style')) {
+                  if (args.any((a) => a.contains('Dart VM service'))) {
                     // The late stream: its header, which proves nothing, and never
                     // the announcement the app already printed.
                     unawaited(
@@ -3110,7 +3130,7 @@ Filesystem       1K-blocks    Used Available Use% Mounted on
                 },
                 startProcess: (exe, args) async {
                   final p = FakeProcess();
-                  if (!args.contains('--style')) {
+                  if (args.any((a) => a.contains('Dart VM service'))) {
                     unawaited(
                       p.outputAttached.then(
                         (_) => p.emitStdout('Filtering the log data using ""'),
@@ -3151,14 +3171,16 @@ Filesystem       1K-blocks    Used Available Use% Mounted on
           },
           startProcess: (exe, args) async {
             final p = FakeProcess();
-            if (!args.contains('--style')) {
+            if (args.any((a) => a.contains('Dart VM service'))) {
               unawaited(
-                p.outputAttached.then(
-                  (_) => p.emitStdout(
-                    'The Dart VM service is listening on '
-                    'http://127.0.0.1:54321/abc=/',
-                  ),
-                ),
+                p.outputAttached.then((_) {
+                  for (final line in _simStreamAnnouncement(
+                    pid: 4242,
+                    uri: 'http://127.0.0.1:54321/abc=/',
+                  )) {
+                    p.emitStdout(line);
+                  }
+                }),
               );
             }
             return p;
@@ -3214,17 +3236,19 @@ Filesystem       1K-blocks    Used Available Use% Mounted on
                   },
                   startProcess: (exe, args) async {
                     final p = FakeProcess();
-                    if (!args.contains('--style')) {
+                    if (args.any((a) => a.contains('Dart VM service'))) {
                       // The stream wins, a beat after the fallback's failing polls.
                       unawaited(
                         p.outputAttached.then((_) async {
                           await Future<void>.delayed(
                             const Duration(milliseconds: 100),
                           );
-                          p.emitStdout(
-                            'The Dart VM service is listening on '
-                            'http://127.0.0.1:54321/abc=/',
-                          );
+                          for (final line in _simStreamAnnouncement(
+                            pid: 4242,
+                            uri: 'http://127.0.0.1:54321/abc=/',
+                          )) {
+                            p.emitStdout(line);
+                          }
                         }),
                       );
                     }
