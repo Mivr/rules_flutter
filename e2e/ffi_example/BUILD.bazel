@@ -17,6 +17,7 @@ load(
     "flutter_ios_registrant_gen",
     "flutter_ios_runner_lib_gen",
     "flutter_ios_simulator_build_test",
+    "ios_sim_debug_app",
 )
 load("@rules_flutter//flutter:linux.bzl", "flutter_linux_app")
 load(
@@ -32,7 +33,6 @@ load(
 )
 load("@rules_flutter//flutter:windows.bzl", "flutter_windows_app")
 load(":c_hot_patch.bzl", "c_hot_patch")
-load(":ios_sim_debug.bzl", "ios_sim_debug_app")
 
 exports_files(["pubspec.lock"])
 
