@@ -17,6 +17,7 @@ import 'dart:typed_data';
 
 import 'macho_constants.dart';
 import 'macho_parse.dart' show LoadCommand, fileRangesOf, parseLoadCommands;
+import 'macho_ranges.dart' show notePayloadRange;
 import 'macho_stub.dart' show sha256;
 
 /// `CS_CodeDirectory` versions carrying a `codeLimit64` word at offset 56.
@@ -431,9 +432,15 @@ Uint8List _resizedLinkedit(LoadCommand lc, int fileLength) {
 }
 
 /// Returns [lc] with every table range, symbol-table range and indirect-table
-/// range at or past [oldSigEnd] shifted down by [shrink] bytes.
+/// range at or past [oldSigEnd] shifted down by [shrink] bytes. A well-formed
+/// `LC_NOTE` at or past [oldSigEnd] shifts its u64 data offset the same way:
+/// the splice above moves its payload with the tail, so leaving the offset
+/// would dangle it past the shrunk signature. A truncated note command is
+/// left alone: the strip refuses those before any resign, and a bare retag
+/// keeps ignoring what it cannot parse.
 Uint8List _shiftedRanges(LoadCommand lc, int oldSigEnd, int shrink) {
   if (shrink == 0) return lc.bytes;
+  if (lc.cmd == lcNote) return _shiftedNote(lc, oldSigEnd, shrink);
   final refs = fileRangesOf(lc);
   var dirty = false;
   for (final ref in refs) {
@@ -447,6 +454,22 @@ Uint8List _shiftedRanges(LoadCommand lc, int oldSigEnd, int shrink) {
       bd.setUint32(ref.field, ref.offset - shrink, Endian.little);
     }
   }
+  return patched;
+}
+
+/// Returns [lc]'s (`LC_NOTE`) bytes with its u64 data offset shifted down by
+/// [shrink] bytes when its payload sits at or past [oldSigEnd]. Anything
+/// else comes back unchanged: payloads before the splice do not move, empty
+/// payloads have no offset, and truncated commands stay exactly as a retag
+/// found them.
+Uint8List _shiftedNote(LoadCommand lc, int oldSigEnd, int shrink) {
+  if (lc.bytes.length < 40) return lc.bytes;
+  final range = notePayloadRange(lc);
+  if (range.size == 0 || range.offset < oldSigEnd) return lc.bytes;
+  final patched = Uint8List.fromList(lc.bytes);
+  ByteData.sublistView(
+    patched,
+  ).setUint64(range.field, range.offset - shrink, Endian.little);
   return patched;
 }
 

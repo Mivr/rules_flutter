@@ -12,11 +12,20 @@ import 'dart:typed_data';
 import 'macho_constants.dart';
 import 'macho_parse.dart'
     show
-        CommandRange,
         LoadCommand,
         buildLcSymtab,
-        fileRangesOf,
+        isSingleRangeLinkeditCommand,
         movedTableRanges;
+import 'macho_ranges.dart'
+    show
+        RewrittenLayout,
+        accountedRangesOf,
+        auditOutputRanges,
+        describeStripCommand,
+        notePayloadRange,
+        rangesIntersect,
+        relocatedNoteCommand,
+        segmentNameOf;
 
 /// A decoded 16-byte `nlist_64` symbol-table entry.
 class _NlistEntry {
@@ -420,8 +429,13 @@ void _collectTablePayloads(
   Uint8List inputBytes,
   List<LoadCommand> commands,
   List<_LinkeditPayload> into,
+  int linkeditOff,
 ) {
   for (final lc in commands) {
+    if (lc.cmd == lcNote) {
+      _collectNotePayload(inputBytes, lc, into, linkeditOff);
+      continue;
+    }
     for (final range in movedTableRanges(lc)) {
       if (range.size == 0) continue;
       if (range.offset + range.size > inputBytes.length) {
@@ -441,6 +455,45 @@ void _collectTablePayloads(
       );
     }
   }
+}
+
+/// Collects [lc]'s (`LC_NOTE`) payload for the compacting rewrite when it
+/// reaches into `__LINKEDIT`: a well-formed note moves down byte-identical
+/// with its u64 offset rewritten. A payload fully before [linkeditOff] is not
+/// collected: those bytes are copied verbatim, so the note keeps naming them.
+/// An empty payload is not a payload; anything else is bounds-checked against
+/// the file like the table ranges above. A payload straddling [linkeditOff]
+/// is refused: the rewrite cannot move half a payload.
+void _collectNotePayload(
+  Uint8List inputBytes,
+  LoadCommand lc,
+  List<_LinkeditPayload> into,
+  int linkeditOff,
+) {
+  final range = notePayloadRange(lc);
+  if (range.size == 0) return;
+  if (range.offset + range.size > inputBytes.length) {
+    throw FormatException(
+      'Load command 0x${lc.cmd.toRadixString(16)} points past the '
+      'end of the file.',
+    );
+  }
+  if (range.offset + range.size <= linkeditOff) return;
+  if (range.offset < linkeditOff) {
+    throw FormatException(
+      'Cannot strip local symbols: load command '
+      '0x${lc.cmd.toRadixString(16)} straddles __LINKEDIT.',
+    );
+  }
+  into.add(
+    _LinkeditPayload(
+      oldOffset: range.offset,
+      oldSize: range.size,
+      bytes: Uint8List.fromList(
+        inputBytes.sublist(range.offset, range.offset + range.size),
+      ),
+    ),
+  );
 }
 
 /// Marks the `LC_CODE_SIGNATURE` payload (when present and non-empty) for
@@ -463,95 +516,67 @@ void _alignSignaturePayload(
 }
 
 /// Throws when a load command names a file range inside `__LINKEDIT` that
-/// the rewrite cannot move: anything but the symbol tables, the indirect
-/// table, the segment commands and the table commands [movedTableRanges]
-/// knows. Such a command would otherwise keep pointing at bytes the
-/// compacting rewrite reuses, so the strip fails loudly instead.
+/// the rewrite cannot move. The symbol tables, the indirect table, the dyld
+/// and linkedit data tables and any note payload reaching into `__LINKEDIT`
+/// are collected for the move; segments are checked by
+/// [_checkNoPayloadPastLinkedit]. Anything else with a real file range
+/// reaching into `__LINKEDIT` would otherwise keep pointing at bytes the
+/// compacting rewrite reuses, so the strip fails loudly naming the command
+/// instead. Commands the tool does not know are refused by
+/// [accountedRangesOf] whatever their bytes look like, because the tool
+/// cannot know where their ranges are.
 ///
-/// [linkeditOff] is the `__LINKEDIT` file offset; [covered] are the payload
-/// ranges [_collectTablePayloads] already collected.
+/// [linkeditOff] is the `__LINKEDIT` file offset.
 void _throwOnUnmovedLinkeditRanges(
   List<LoadCommand> commands,
   int linkeditOff,
   int fileLength,
-  List<_LinkeditPayload> covered,
 ) {
-  bool isCovered(int offset, int size) {
-    for (final payload in covered) {
-      if (payload.oldOffset == offset && payload.oldSize == size) return true;
-    }
-    return false;
-  }
-
   for (final lc in commands) {
-    _throwOnUnmovedCommandRange(lc, linkeditOff, fileLength, isCovered);
+    switch (lc.cmd) {
+      case lcSegment64:
+      case lcSymtab:
+      case lcDysymtab:
+      case lcDyldInfo:
+      case lcDyldInfoOnly:
+      case lcNote:
+        continue;
+    }
+    if (isSingleRangeLinkeditCommand(lc.cmd)) continue;
+    for (final range in accountedRangesOf(lc)) {
+      if (range.size == 0 || range.offset + range.size > fileLength) continue;
+      if (range.offset + range.size > linkeditOff) {
+        throw FormatException(
+          'Cannot strip local symbols: ${describeStripCommand(lc)} points '
+          'into __LINKEDIT.',
+        );
+      }
+    }
   }
 }
 
-/// Checks one [lc] for an unmovable range reaching into `__LINKEDIT`.
-void _throwOnUnmovedCommandRange(
-  LoadCommand lc,
-  int linkeditOff,
-  int fileLength,
-  bool Function(int offset, int size) isCovered,
-) {
-  switch (lc.cmd) {
-    case lcSegment64:
-    case lcSymtab:
-    case lcDysymtab:
-    case lcDyldInfo:
-    case lcDyldInfoOnly:
-    case lcUuid:
-    case lcSourceVersion:
-      return;
-  }
-  if (movedTableRanges(lc).isNotEmpty) return;
-  if (lc.bytes.length < 16) return;
-  final bd = ByteData.sublistView(lc.bytes);
-  _checkCandidateRange(
-    lc.cmd,
-    bd.getUint32(8, Endian.little),
-    bd.getUint32(12, Endian.little),
-    linkeditOff,
-    fileLength,
-    isCovered,
-  );
-}
-
-/// Throws when the candidate `(offset, size)` range of command [cmd] is a
-/// plausible in-file range reaching into `__LINKEDIT` that no collected
-/// payload covers.
-void _checkCandidateRange(
-  int cmd,
-  int offset,
-  int size,
-  int linkeditOff,
-  int fileLength,
-  bool Function(int offset, int size) isCovered,
-) {
-  if (size == 0 || offset + size > fileLength) return;
-  if (offset + size <= linkeditOff) return;
-  if (!isCovered(offset, size)) {
-    throw FormatException(
-      'Cannot strip local symbols: load command 0x${cmd.toRadixString(16)} '
-      'points into __LINKEDIT.',
-    );
-  }
-}
-
-/// Throws when any segment or section file range outside `__LINKEDIT` reaches
+/// Throws when any segment or section file range outside [linkedit] reaches
 /// into [linkeditOff]: the compacting rewrite below rebuilds everything from
-/// there to the end of the file, so nothing else may live there.
+/// there to the end of the file, so nothing else may live there. A second
+/// segment named `__LINKEDIT` is refused outright: only [linkedit], the
+/// segment the rewrite resizes, may carry that name.
 void _checkNoPayloadPastLinkedit(
   Uint8List inputBytes,
   List<LoadCommand> commands,
+  LoadCommand linkedit,
   int linkeditOff,
 ) {
   for (final lc in commands) {
     if (lc.cmd != lcSegment64 || lc.bytes.length < 72) continue;
+    if (identical(lc, linkedit)) continue;
     final bd = ByteData.sublistView(lc.bytes);
-    final name = ascii.decode(lc.bytes.sublist(8, 24)).split('\x00').first;
-    if (name == '__LINKEDIT') continue;
+    final name = segmentNameOf(lc);
+    if (name == '__LINKEDIT') {
+      throw const FormatException(
+        'Cannot strip local symbols: more than one __LINKEDIT segment '
+        '(load command 0x19).',
+      );
+    }
     _checkRangeOutsideLinkedit(
       inputBytes.length,
       linkeditOff,
@@ -564,6 +589,10 @@ void _checkNoPayloadPastLinkedit(
       final sectOff = 72 + s * 80;
       if (sectOff + 80 > lc.bytes.length) break;
       final sectBd = ByteData.sublistView(lc.bytes, sectOff, sectOff + 80);
+      if ((sectBd.getUint32(68, Endian.little) & sectionTypeMask) ==
+          sectionTypeZerofill) {
+        continue;
+      }
       _checkRangeOutsideLinkedit(
         inputBytes.length,
         linkeditOff,
@@ -691,6 +720,7 @@ class _StripPlan {
         'Cannot strip local symbols without a __LINKEDIT segment to shrink.',
       );
     }
+    _throwOnInPlaceOverlap(remapped);
     final out = Uint8List.fromList(input);
     out.setRange(table.symoff, table.symoff + newSymtab.length, newSymtab);
     final newStroff = table.symoff + newSymtab.length;
@@ -703,7 +733,7 @@ class _StripPlan {
         remapped.indirectBytes!,
       );
     }
-    return StrippedSymbols(
+    final stripped = StrippedSymbols(
       out,
       _commandsFor(
         (
@@ -718,6 +748,74 @@ class _StripPlan {
         null,
       ),
     );
+    auditOutputRanges(
+      stripped.commands,
+      RewrittenLayout(linkeditOff: 0, fileLength: out.length),
+    );
+    return stripped;
+  }
+
+  /// Throws when any load command besides the rewritten symbol, string and
+  /// indirect-symbol tables names bytes the in-place rewrite touches: the
+  /// compacted tables and their zeroed tail must belong to those tables
+  /// alone, or the rewrite would wipe a resident payload the way the
+  /// compacting path refuses to. Segments and their sections ride an in-place
+  /// rewrite untouched (the file keeps its length, so their ranges stay
+  /// valid), and the indirect table can only live where the old tables were
+  /// not. The rewritten tables must also never overlap each other.
+  void _throwOnInPlaceOverlap(_RemappedDysymtab? remapped) {
+    final oldEnd = table.stroff + table.strsize;
+    final oldSize = oldEnd - table.symoff;
+    final indirectLen = remapped?.indirectBytes?.length ?? 0;
+    final indirectOff = remapped?.indirectOffset ?? 0;
+    for (var i = 0; i < commands.length; i++) {
+      final lc = commands[i];
+      if (lc.cmd == lcSymtab || lc.cmd == lcSegment64 || i == dysymtabIndex) {
+        continue;
+      }
+      for (final range in accountedRangesOf(lc)) {
+        if (range.size == 0) continue;
+        if (rangesIntersect(
+              range.offset,
+              range.size,
+              table.symoff,
+              oldSize,
+            ) ||
+            (indirectLen > 0 &&
+                rangesIntersect(
+                  range.offset,
+                  range.size,
+                  indirectOff,
+                  indirectLen,
+                ))) {
+          throw FormatException(
+            'Cannot strip local symbols: ${describeStripCommand(lc)} names '
+            'bytes the stripped tables occupy; refusing to strip without a '
+            '__LINKEDIT segment.',
+          );
+        }
+      }
+    }
+    if (remapped == null || remapped.indirectBytes == null) return;
+    final newStrOff = table.symoff + tables.symtab.length;
+    if (rangesIntersect(
+          remapped.indirectOffset,
+          remapped.indirectBytes!.length,
+          table.symoff,
+          oldSize,
+        ) ||
+        rangesIntersect(
+          remapped.indirectOffset,
+          remapped.indirectBytes!.length,
+          newStrOff,
+          tables.strings.bytes.length,
+        )) {
+      throw FormatException(
+        'Cannot strip local symbols: load command '
+        '0x${lcDysymtab.toRadixString(16)} names bytes the stripped tables '
+        'occupy; refusing to strip without a __LINKEDIT segment.',
+      );
+    }
   }
 
   /// Rebuilds `__LINKEDIT` from the linkedit file offset: the compacted
@@ -729,7 +827,7 @@ class _StripPlan {
   ) {
     final linkeditBd = ByteData.sublistView(linkedit.bytes);
     final linkeditOff = linkeditBd.getUint64(40, Endian.little).toInt();
-    _checkNoPayloadPastLinkedit(input, commands, linkeditOff);
+    _checkNoPayloadPastLinkedit(input, commands, linkedit, linkeditOff);
     final symPayload = _LinkeditPayload(
       oldOffset: table.symoff,
       oldSize: table.nsyms * 16,
@@ -750,14 +848,9 @@ class _StripPlan {
       );
       payloads.add(indirectPayload);
     }
-    _collectTablePayloads(input, commands, payloads);
+    _collectTablePayloads(input, commands, payloads, linkeditOff);
     _alignSignaturePayload(commands, payloads);
-    _throwOnUnmovedLinkeditRanges(
-      commands,
-      linkeditOff,
-      input.length,
-      payloads,
-    );
+    _throwOnUnmovedLinkeditRanges(commands, linkeditOff, input.length);
     final newLinkeditSize = _layoutLinkeditPayloads(
       payloads,
       linkeditOff,
@@ -790,41 +883,11 @@ class _StripPlan {
         (linkedit, newLinkeditSize),
       ),
     );
-    _verifyCompactedRanges(stripped.commands, linkeditOff, out.length);
+    auditOutputRanges(
+      stripped.commands,
+      RewrittenLayout(linkeditOff: linkeditOff, fileLength: out.length),
+    );
     return stripped;
-  }
-
-  /// Throws when the compacted `__LINKEDIT` ranges overlap, escape the
-  /// segment, or escape the file: the rewrite must never emit a command
-  /// pointing at bytes it reused.
-  void _verifyCompactedRanges(
-    List<LoadCommand> updated,
-    int linkeditOff,
-    int fileLength,
-  ) {
-    final ranges = <CommandRange>[];
-    for (final lc in updated) {
-      ranges.addAll(fileRangesOf(lc));
-    }
-    for (final range in ranges) {
-      if (range.size == 0) continue;
-      if (range.offset < linkeditOff ||
-          range.offset + range.size > fileLength) {
-        throw FormatException(
-          'Cannot strip local symbols: a rewritten linkedit range '
-          'escapes __LINKEDIT.',
-        );
-      }
-    }
-    ranges.sort((a, b) => a.offset.compareTo(b.offset));
-    for (var i = 1; i < ranges.length; i++) {
-      if (ranges[i].size == 0 || ranges[i - 1].size == 0) continue;
-      if (ranges[i].offset < ranges[i - 1].offset + ranges[i - 1].size) {
-        throw const FormatException(
-          'Cannot strip local symbols: rewritten linkedit ranges overlap.',
-        );
-      }
-    }
   }
 
   /// Returns [commands] with the stripped table positions applied: a rebuilt
@@ -877,6 +940,10 @@ class _StripPlan {
       }
       if (movedOffsets != null && movedTableRanges(lc).isNotEmpty) {
         updated.add(_relocatedTableCommand(lc, movedOffsets));
+        continue;
+      }
+      if (movedOffsets != null && lc.cmd == lcNote) {
+        updated.add(relocatedNoteCommand(lc, movedOffsets));
         continue;
       }
       updated.add(lc);

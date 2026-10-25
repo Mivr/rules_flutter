@@ -10,6 +10,7 @@ import '../macho_fat.dart' as macho;
 import '../macho_framework.dart' as macho;
 import '../macho_parse.dart' as macho;
 import '../macho_patch.dart' as macho;
+import '../macho_ranges.dart' as macho;
 import '../macho_stub.dart' as macho;
 
 String _hex(Uint8List bytes) =>
@@ -2439,6 +2440,517 @@ void main() {
         macho.PatchOptions(stripSymbols: true),
       );
       expect(stripped, equals(input));
+    });
+  });
+
+  group('stripHardening (COV-24 follow-up, RT29-flutter)', () {
+    /// Builds a small unsigned arm64 dylib with no `__LINKEDIT` segment for
+    /// the in-place strip tests: two local symbols and one global, an empty
+    /// `LC_DYSYMTAB`, and (with [bindInGap]) an `LC_DYLD_INFO` whose bind
+    /// table sits between the symbol entries and the string table, modelling
+    /// RT29-flutter finding 01.
+    ({Uint8List bytes, int symoff, int stroff, int strsize})
+    _buildNoLinkeditDylib({required bool bindInGap}) {
+      final names = ['_local_a', '_local_b', '_kept_global'];
+      final types = [0x0e, 0x0e, 0x0f];
+      final strings = BytesBuilder(copy: false)..addByte(0);
+      final strx = <int>[];
+      for (final name in names) {
+        strx.add(strings.length);
+        strings.add(utf8.encode(name));
+        strings.addByte(0);
+      }
+      final strBytes = strings.toBytes();
+      final symBytes = BytesBuilder(copy: false);
+      for (var i = 0; i < names.length; i++) {
+        final entry = ByteData(16)
+          ..setUint32(0, strx[i], Endian.little)
+          ..setUint8(4, types[i])
+          ..setUint8(5, 1)
+          ..setUint16(6, 0, Endian.little)
+          ..setUint64(8, 0x1000 + i * 8, Endian.little);
+        symBytes.add(entry.buffer.asUint8List());
+      }
+      final symTab = symBytes.toBytes();
+
+      // Headers first, then the symbol entries at 0x400 (room for appended
+      // commands below), the bind-table gap when asked, then the strings.
+      const symoff = 0x400;
+      final bind = _patternBytes(77, 320);
+      final bindOff = symoff + symTab.length;
+      final stroff = bindOff + (bindInGap ? bind.length : 0);
+      final fileSize = stroff + strBytes.length;
+
+      final dyldCmd = Uint8List(48);
+      final dyldBd = ByteData.sublistView(dyldCmd);
+      dyldBd.setUint32(0, macho.lcDyldInfo, Endian.little);
+      dyldBd.setUint32(4, 48, Endian.little);
+      if (bindInGap) {
+        dyldBd.setUint32(16, bindOff, Endian.little);
+        dyldBd.setUint32(20, bind.length, Endian.little);
+      }
+
+      final commands = <Uint8List>[
+        macho.buildLcSegment64((
+          segname: '__TEXT',
+          vmaddr: 0,
+          vmsize: fileSize,
+          fileoff: 0,
+          filesize: fileSize,
+          maxprot: 5,
+          initprot: 5,
+          nsects: 0,
+          flags: 0,
+        )).bytes,
+        macho
+            .buildLcSymtab(
+              symoff: symoff,
+              nsyms: names.length,
+              stroff: stroff,
+              strsize: strBytes.length,
+            )
+            .bytes,
+        macho.buildLcDysymtab().bytes,
+        macho.buildLcIdDylib('@rpath/InPlace.dylib').bytes,
+        if (bindInGap) dyldCmd,
+        macho
+            .buildLcBuildVersion(
+              platform: 2,
+              minos: 0x000e0000,
+              sdk: 0x00110000,
+            )
+            .bytes,
+      ];
+      var sizeofcmds = 0;
+      for (final c in commands) {
+        sizeofcmds += c.length;
+      }
+      final buf = Uint8List(fileSize);
+      final bd = ByteData.sublistView(buf);
+      bd.setUint32(0, macho.mhMagic64, Endian.little);
+      bd.setUint32(4, macho.cpuTypeArm64, Endian.little);
+      bd.setUint32(8, macho.cpuSubtypeArm64All, Endian.little);
+      bd.setUint32(12, macho.mhDylib, Endian.little);
+      bd.setUint32(16, commands.length, Endian.little);
+      bd.setUint32(20, sizeofcmds, Endian.little);
+      bd.setUint32(24, macho.mhNoReexportedDylibs, Endian.little);
+      var off = macho.mhHeaderSize64;
+      for (final c in commands) {
+        buf.setRange(off, off + c.length, c);
+        off += c.length;
+      }
+      buf.setRange(symoff, symoff + symTab.length, symTab);
+      if (bindInGap) buf.setRange(bindOff, bindOff + bind.length, bind);
+      buf.setRange(stroff, stroff + strBytes.length, strBytes);
+      return (
+        bytes: buf,
+        symoff: symoff,
+        stroff: stroff,
+        strsize: strBytes.length,
+      );
+    }
+
+    test(
+      'strip refuses an in-place rewrite over a resident bind table (RT29 01)',
+      () {
+        final input = _buildNoLinkeditDylib(bindInGap: true);
+        expect(
+          () => macho.patchMachO(
+            input.bytes,
+            macho.PatchOptions(stripSymbols: true),
+          ),
+          throwsA(
+            isA<FormatException>().having(
+              (e) => e.message,
+              'message',
+              allOf(contains('0x22'), contains('__LINKEDIT')),
+            ),
+          ),
+        );
+      },
+    );
+
+    test(
+      'strip rewrites small tables in place when nothing else lives there',
+      () {
+        final input = _buildNoLinkeditDylib(bindInGap: false);
+        final stripped = macho.patchMachO(
+          input.bytes,
+          macho.PatchOptions(stripSymbols: true),
+        );
+        // The file keeps its length: only the locals are gone.
+        expect(stripped.length, input.bytes.length);
+        final symtab = macho
+            .parseLoadCommands(stripped)
+            .singleWhere((c) => c.cmd == macho.lcSymtab);
+        final sbd = ByteData.sublistView(symtab.bytes);
+        expect(sbd.getUint32(8, Endian.little), input.symoff);
+        expect(sbd.getUint32(12, Endian.little), 1);
+        final newStroff = sbd.getUint32(16, Endian.little);
+        expect(newStroff, input.symoff + 16);
+        final newStrsize = sbd.getUint32(20, Endian.little);
+        expect(newStrsize, '_kept_global'.length + 2);
+        expect(
+          stripped.sublist(newStroff, newStroff + newStrsize),
+          equals([0, ...ascii.encode('_kept_global'), 0]),
+        );
+        // The freed tail is zeroed, and only the tail changed past the tables.
+        final oldEnd = input.stroff + input.strsize;
+        expect(
+          stripped.sublist(newStroff + newStrsize, oldEnd),
+          everyElement(0),
+        );
+        expect(
+          stripped.sublist(input.symoff, newStroff + newStrsize),
+          isNot(equals(input.bytes.sublist(input.symoff, oldEnd))),
+        );
+        // The range-free commands ride along byte-identical.
+        final before = macho.parseLoadCommands(input.bytes);
+        final after = macho.parseLoadCommands(stripped);
+        for (final cmd in [macho.lcBuildVersion, macho.lcIdDylib]) {
+          expect(
+            after.singleWhere((c) => c.cmd == cmd).bytes,
+            equals(before.singleWhere((c) => c.cmd == cmd).bytes),
+          );
+        }
+      },
+    );
+
+    test('strip refuses a short LC_NOTE command (RT29 02 demo A)', () {
+      final input = _buildStripIntegrityDylib(dyldInfoOnly: false);
+      // A 32-byte 0x31 command: owner plus a u32 (offset, size) pair where the
+      // u64 pair belongs. Too short to be a note, so it must be refused.
+      final note = Uint8List(32);
+      final nbd = ByteData.sublistView(note);
+      nbd.setUint32(0, macho.lcNote, Endian.little);
+      nbd.setUint32(4, 32, Endian.little);
+      note.setRange(8, 24, ascii.encode('0123456789abcdef'));
+      nbd.setUint32(24, 15936, Endian.little);
+      nbd.setUint32(28, 32, Endian.little);
+      final boobyTrapped = _withAppendedCommand(input.bytes, note);
+      expect(
+        () => macho.patchMachO(
+          boobyTrapped,
+          macho.PatchOptions(stripSymbols: true),
+        ),
+        throwsA(
+          isA<FormatException>().having(
+            (e) => e.message,
+            'message',
+            contains('0x31'),
+          ),
+        ),
+      );
+    });
+
+    test('strip refuses a second __LINKEDIT segment (RT29 02 demo B)', () {
+      final input = _buildStripIntegrityDylib(dyldInfoOnly: false);
+      final linkedit2 = macho.buildLcSegment64((
+        segname: '__LINKEDIT',
+        vmaddr: 0x4000,
+        vmsize: 320,
+        fileoff: input.linkeditOff + 64,
+        filesize: 320,
+        maxprot: 1,
+        initprot: 1,
+        nsects: 0,
+        flags: 0,
+      )).bytes;
+      final boobyTrapped = _withAppendedCommand(input.bytes, linkedit2);
+      expect(
+        () => macho.patchMachO(
+          boobyTrapped,
+          macho.PatchOptions(stripSymbols: true),
+        ),
+        throwsA(
+          isA<FormatException>().having(
+            (e) => e.message,
+            'message',
+            contains('more than one __LINKEDIT'),
+          ),
+        ),
+      );
+    });
+
+    test('strip refuses a segment reaching into __LINKEDIT', () {
+      final input = _buildStripIntegrityDylib(dyldInfoOnly: false);
+      final data = macho.buildLcSegment64((
+        segname: '__DATA',
+        vmaddr: 0x10000,
+        vmsize: 0x200,
+        fileoff: input.linkeditOff - 0x100,
+        filesize: 0x200,
+        maxprot: 3,
+        initprot: 3,
+        nsects: 0,
+        flags: 0,
+      )).bytes;
+      final boobyTrapped = _withAppendedCommand(input.bytes, data);
+      expect(
+        () => macho.patchMachO(
+          boobyTrapped,
+          macho.PatchOptions(stripSymbols: true),
+        ),
+        throwsA(
+          isA<FormatException>().having(
+            (e) => e.message,
+            'message',
+            contains('__LINKEDIT'),
+          ),
+        ),
+      );
+    });
+
+    test('strip moves a well-formed LC_NOTE down with __LINKEDIT', () {
+      final input = _buildStripIntegrityDylib(dyldInfoOnly: false);
+      // A note payload past the end of the file, inside a grown __LINKEDIT.
+      final payload = _patternBytes(99, 64);
+      final noteOff = input.bytes.length;
+      final grown = Uint8List.fromList([...input.bytes, ...payload]);
+      final segBd = ByteData.sublistView(
+        grown,
+        macho.mhHeaderSize64 + 152,
+        macho.mhHeaderSize64 + 152 + 72,
+      );
+      segBd.setUint64(
+        32,
+        segBd.getUint64(32, Endian.little) + payload.length,
+        Endian.little,
+      );
+      segBd.setUint64(
+        48,
+        segBd.getUint64(48, Endian.little) + payload.length,
+        Endian.little,
+      );
+      final note = Uint8List(40);
+      final nbd = ByteData.sublistView(note);
+      nbd.setUint32(0, macho.lcNote, Endian.little);
+      nbd.setUint32(4, 40, Endian.little);
+      note.setRange(8, 24, ascii.encode('com.apple.test\x00\x00'));
+      nbd.setUint64(24, noteOff, Endian.little);
+      nbd.setUint64(32, payload.length, Endian.little);
+      final noted = _withAppendedCommand(grown, note);
+      final stripped = macho.patchMachO(
+        noted,
+        macho.PatchOptions(stripSymbols: true),
+      );
+      final noteLc = macho
+          .parseLoadCommands(stripped)
+          .singleWhere((c) => c.cmd == macho.lcNote);
+      final movedBd = ByteData.sublistView(noteLc.bytes);
+      final newOff = movedBd.getUint64(24, Endian.little).toInt();
+      expect(newOff, lessThan(noteOff));
+      expect(newOff, greaterThanOrEqualTo(input.linkeditOff));
+      expect(movedBd.getUint64(32, Endian.little), payload.length);
+      expect(
+        stripped.sublist(newOff, newOff + payload.length),
+        equals(payload),
+      );
+      _expectLinkeditSound(stripped, input.linkeditOff);
+      _expectValidStripSignature(
+        stripped,
+        specialSlot: input.specialSlot,
+        requirements: input.requirements,
+      );
+    });
+
+    test('strip refuses an unknown load command type', () {
+      final input = _buildStripIntegrityDylib(dyldInfoOnly: false);
+      // Unknown type 0x99 carrying a u32 (offset, size) pair into __LINKEDIT:
+      // the tool cannot know where its range really is, so it refuses by name.
+      final unknown = Uint8List(24);
+      ByteData.sublistView(unknown)
+        ..setUint32(0, 0x99, Endian.little)
+        ..setUint32(4, 24, Endian.little)
+        ..setUint32(8, input.linkeditOff + 64, Endian.little)
+        ..setUint32(12, 32, Endian.little);
+      final boobyTrapped = _withAppendedCommand(input.bytes, unknown);
+      expect(
+        () => macho.patchMachO(
+          boobyTrapped,
+          macho.PatchOptions(stripSymbols: true),
+        ),
+        throwsA(
+          isA<FormatException>().having(
+            (e) => e.message,
+            'message',
+            contains('0x99'),
+          ),
+        ),
+      );
+    });
+
+    test('strip carries known range-free commands untouched', () {
+      final input = _buildStripIntegrityDylib(dyldInfoOnly: false);
+      // LC_MAIN must be range-free for real producer binaries to keep
+      // stripping: it carries only an entry offset, no file range.
+      final main = Uint8List(24);
+      ByteData.sublistView(main)
+        ..setUint32(0, macho.lcMain, Endian.little)
+        ..setUint32(4, 24, Endian.little)
+        ..setUint64(8, 0x1000, Endian.little)
+        ..setUint64(16, 0, Endian.little);
+      final withMain = _withAppendedCommand(input.bytes, main);
+      final withVersion = _withAppendedCommand(
+        withMain,
+        macho
+            .buildLcBuildVersion(
+              platform: 2,
+              minos: 0x000e0000,
+              sdk: 0x00110000,
+            )
+            .bytes,
+      );
+      final stripped = macho.patchMachO(
+        withVersion,
+        macho.PatchOptions(stripSymbols: true),
+      );
+      final cmds = macho.parseLoadCommands(stripped);
+      expect(
+        cmds.singleWhere((c) => c.cmd == macho.lcMain).bytes,
+        equals(main),
+      );
+      expect(
+        cmds.singleWhere((c) => c.cmd == macho.lcBuildVersion).bytes,
+        equals(
+          macho
+              .parseLoadCommands(withVersion)
+              .singleWhere((c) => c.cmd == macho.lcBuildVersion)
+              .bytes,
+        ),
+      );
+      _expectLinkeditSound(stripped, input.linkeditOff);
+    });
+
+    group('auditOutputRanges', () {
+      Uint8List rangeCommand(int size) {
+        final buf = Uint8List(size);
+        ByteData.sublistView(buf)..setUint32(4, size, Endian.little);
+        return buf;
+      }
+
+      test('refuses overlapping rewritten ranges', () {
+        final a = Uint8List.fromList(rangeCommand(16));
+        ByteData.sublistView(a)
+          ..setUint32(0, macho.lcFunctionStarts, Endian.little)
+          ..setUint32(8, 0x3100, Endian.little)
+          ..setUint32(12, 64, Endian.little);
+        final b = Uint8List.fromList(rangeCommand(16));
+        ByteData.sublistView(b)
+          ..setUint32(0, macho.lcDataInCode, Endian.little)
+          ..setUint32(8, 0x3130, Endian.little)
+          ..setUint32(12, 64, Endian.little);
+        expect(
+          () => macho.auditOutputRanges(
+            [
+              macho.LoadCommand(macho.lcFunctionStarts, a),
+              macho.LoadCommand(macho.lcDataInCode, b),
+            ],
+            macho.RewrittenLayout(linkeditOff: 0x3000, fileLength: 0x5000),
+          ),
+          throwsA(
+            isA<FormatException>().having(
+              (e) => e.message,
+              'message',
+              contains('overlap'),
+            ),
+          ),
+        );
+      });
+
+      test('accepts adjacent ranges sharing only an edge', () {
+        final a = Uint8List.fromList(rangeCommand(16));
+        ByteData.sublistView(a)
+          ..setUint32(0, macho.lcFunctionStarts, Endian.little)
+          ..setUint32(8, 0x3100, Endian.little)
+          ..setUint32(12, 64, Endian.little);
+        final b = Uint8List.fromList(rangeCommand(16));
+        ByteData.sublistView(b)
+          ..setUint32(0, macho.lcDataInCode, Endian.little)
+          ..setUint32(8, 0x3140, Endian.little)
+          ..setUint32(12, 64, Endian.little);
+        expect(
+          () => macho.auditOutputRanges(
+            [
+              macho.LoadCommand(macho.lcFunctionStarts, a),
+              macho.LoadCommand(macho.lcDataInCode, b),
+            ],
+            macho.RewrittenLayout(linkeditOff: 0x3000, fileLength: 0x5000),
+          ),
+          returnsNormally,
+        );
+      });
+
+      test('refuses ranges past the end of the file', () {
+        final a = Uint8List.fromList(rangeCommand(16));
+        ByteData.sublistView(a)
+          ..setUint32(0, macho.lcFunctionStarts, Endian.little)
+          ..setUint32(8, 0x4ff0, Endian.little)
+          ..setUint32(12, 64, Endian.little);
+        expect(
+          () => macho.auditOutputRanges(
+            [macho.LoadCommand(macho.lcFunctionStarts, a)],
+            macho.RewrittenLayout(linkeditOff: 0x3000, fileLength: 0x5000),
+          ),
+          throwsA(
+            isA<FormatException>().having(
+              (e) => e.message,
+              'message',
+              contains('past the end'),
+            ),
+          ),
+        );
+      });
+
+      test('refuses managed ranges escaping __LINKEDIT', () {
+        final symtab = macho
+            .buildLcSymtab(
+              symoff: 0x1000,
+              nsyms: 1,
+              stroff: 0x2000,
+              strsize: 16,
+            )
+            .bytes;
+        expect(
+          () => macho.auditOutputRanges(
+            [macho.LoadCommand(macho.lcSymtab, symtab)],
+            macho.RewrittenLayout(linkeditOff: 0x3000, fileLength: 0x5000),
+          ),
+          throwsA(
+            isA<FormatException>().having(
+              (e) => e.message,
+              'message',
+              contains('escapes'),
+            ),
+          ),
+        );
+      });
+
+      test('accepts disjoint ranges inside the rewritten image', () {
+        final a = Uint8List.fromList(rangeCommand(16));
+        ByteData.sublistView(a)
+          ..setUint32(0, macho.lcFunctionStarts, Endian.little)
+          ..setUint32(8, 0x3100, Endian.little)
+          ..setUint32(12, 64, Endian.little);
+        final symtab = macho
+            .buildLcSymtab(
+              symoff: 0x3200,
+              nsyms: 1,
+              stroff: 0x3210,
+              strsize: 16,
+            )
+            .bytes;
+        expect(
+          () => macho.auditOutputRanges(
+            [
+              macho.LoadCommand(macho.lcFunctionStarts, a),
+              macho.LoadCommand(macho.lcSymtab, symtab),
+            ],
+            macho.RewrittenLayout(linkeditOff: 0x3000, fileLength: 0x5000),
+          ),
+          returnsNormally,
+        );
+      });
     });
   });
 
