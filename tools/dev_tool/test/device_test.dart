@@ -20,17 +20,22 @@ import 'fakes.dart';
 const _vmServiceLine =
     'The Dart VM service is listening on http://127.0.0.1:12345/test=/';
 
-/// One `log show --style json` entry for [pid] at [timestamp] announcing [uri].
+/// Field lines of one `log show --style json` entry for [pid] at [timestamp]
+/// carrying [message]: the document wraps these in `[{` / `},{` / `}]`, with
+/// `"key" : value` fields exactly as Apple's `log` prints them.
 String _simLogShowEntry({
   required int pid,
   required DateTime timestamp,
-  required String uri,
+  required String message,
 }) =>
-    '{\n'
-    '  "timestamp" : "${timestamp.toUtc().toIso8601String()}",\n'
+    '  "timestamp" : ${json.encode(timestamp.toUtc().toIso8601String())},\n'
     '  "processIdentifier" : $pid,\n'
-    '  "eventMessage" : "The Dart VM service is listening on $uri"\n'
-    '}';
+    '  "eventMessage" : ${json.encode(message)}';
+
+/// Field-line entries joined into the document `log show --style json`
+/// prints: a first line of `[{`, entries joined as `},{`, a last line of `}]`.
+String _simLogShowDoc(List<String> entries) =>
+    '[{\n${entries.join('\n},{\n')}\n}]';
 
 /// The structured `message` of a log record, or null for plain-text records.
 String? _logMessageOf(LogRecord record) {
@@ -2987,11 +2992,15 @@ Filesystem       1K-blocks    Used Available Use% Mounted on
                     return ProcessResult(
                       0,
                       0,
-                      _simLogShowEntry(
-                        pid: 4242,
-                        timestamp: DateTime.now(),
-                        uri: 'http://127.0.0.1:9999/xyz=/',
-                      ),
+                      _simLogShowDoc([
+                        _simLogShowEntry(
+                          pid: 4242,
+                          timestamp: DateTime.now(),
+                          message:
+                              'The Dart VM service is listening on '
+                              'http://127.0.0.1:9999/xyz=/',
+                        ),
+                      ]),
                       '',
                     );
                   }
@@ -3051,26 +3060,34 @@ Filesystem       1K-blocks    Used Available Use% Mounted on
           if (polls == 1) {
             // Stale first: another pid's fresh announcement, then this pid's
             // pre-launch one. Neither may be taken.
-            return [
+            return _simLogShowDoc([
               _simLogShowEntry(
                 pid: 9999,
                 timestamp: DateTime.now(),
-                uri: 'http://127.0.0.1:1111/stale-other=/',
+                message:
+                    'The Dart VM service is listening on '
+                    'http://127.0.0.1:1111/stale-other=/',
               ),
               _simLogShowEntry(
                 pid: 4242,
                 timestamp: DateTime.now().subtract(
                   const Duration(hours: 1),
                 ),
-                uri: 'http://127.0.0.1:2222/stale-old=/',
+                message:
+                    'The Dart VM service is listening on '
+                    'http://127.0.0.1:2222/stale-old=/',
               ),
-            ].join('\n');
+            ]);
           }
-          return _simLogShowEntry(
-            pid: 4242,
-            timestamp: DateTime.now(),
-            uri: 'http://127.0.0.1:7777/fresh=/',
-          );
+          return _simLogShowDoc([
+            _simLogShowEntry(
+              pid: 4242,
+              timestamp: DateTime.now(),
+              message:
+                  'The Dart VM service is listening on '
+                  'http://127.0.0.1:7777/fresh=/',
+            ),
+          ]);
         }
 
         final device =
@@ -3242,38 +3259,42 @@ Filesystem       1K-blocks    Used Available Use% Mounted on
   group('findSimLogVmServiceUri', () {
     final since = DateTime.utc(2026, 10, 25, 12);
     const uri = 'http://127.0.0.1:9999/xyz=/';
+    const announcement = 'The Dart VM service is listening on $uri';
 
-    String entry({
+    String body({
       int pid = 4242,
       DateTime? timestamp,
-      String message =
-          'The Dart VM service is listening on http://127.0.0.1:9999/xyz=/',
+      String message = announcement,
     }) =>
-        '{\n'
-        '  "timestamp" : "${(timestamp ?? since).toIso8601String()}",\n'
+        '  "eventMessage" : ${json.encode(message)},\n'
         '  "processIdentifier" : $pid,\n'
-        '  "eventMessage" : "$message"\n'
-        '}';
+        '  "timestamp" : '
+        '${json.encode((timestamp ?? since).toIso8601String())}';
 
-    test('finds a pretty-printed entry whatever the key order', () {
-      // The message first: field order is the entry's, not the reader's.
-      const output =
-          '{\n'
-          '  "eventMessage" : "The Dart VM service is listening on '
-          'http://127.0.0.1:9999/xyz=/",\n'
-          '  "processIdentifier" : 4242,\n'
-          '  "timestamp" : "2026-10-25T12:00:01.000Z"\n'
-          '}';
+    String doc(List<String> bodies) => '[{\n${bodies.join('\n},{\n')}\n}]';
+
+    test('finds this launch in the exact log show document layout', () {
+      // `[{` opens, `},{` joins, `}]` closes, fields read `"key" : value`.
+      // The message leads, so field order is the entry's, not the reader's.
+      final output = doc([
+        body(
+          pid: 9999,
+          message:
+              'The Dart VM service is listening on '
+              'http://127.0.0.1:1111/stale-other=/',
+        ),
+        body(timestamp: since.subtract(const Duration(seconds: 1))),
+        body(
+          message:
+              'The Dart VM service is listening on $uri\n'
+              '  continues on the next line',
+        ),
+      ]);
       expect(
-        findSimLogVmServiceUri(output, pid: 4242, since: since),
-        Uri.parse(uri),
+        output.split('\n').first,
+        '[{',
+        reason: 'the fixture really uses the Apple layout',
       );
-    });
-
-    test('finds a compact single-line entry', () {
-      final output =
-          '{"timestamp":"2026-10-25T12:00:01.000Z","processIdentifier":4242,'
-          '"eventMessage":"The Dart VM service is listening on $uri"}';
       expect(
         findSimLogVmServiceUri(output, pid: 4242, since: since),
         Uri.parse(uri),
@@ -3281,10 +3302,13 @@ Filesystem       1K-blocks    Used Available Use% Mounted on
     });
 
     test('reads the Apple timestamp shape', () {
-      final output = entry().replaceFirst(
-        (since).toIso8601String(),
-        '2026-10-25 12:00:01.123456+0000',
-      );
+      final output =
+          doc([
+            body(),
+          ]).replaceFirst(
+            (since).toIso8601String(),
+            '2026-10-25 12:00:01.123456+0000',
+          );
       expect(
         findSimLogVmServiceUri(output, pid: 4242, since: since),
         Uri.parse(uri),
@@ -3293,35 +3317,32 @@ Filesystem       1K-blocks    Used Available Use% Mounted on
 
     test('rejects another pid, an older timestamp, and a missing pid', () {
       expect(
-        findSimLogVmServiceUri(
-          entry(pid: 9999),
-          pid: 4242,
-          since: since,
-        ),
+        findSimLogVmServiceUri(doc([body(pid: 9999)]), pid: 4242, since: since),
         isNull,
         reason: 'another process announcing proves nothing about this launch',
       );
       expect(
         findSimLogVmServiceUri(
-          entry(timestamp: since.subtract(const Duration(seconds: 1))),
+          doc([
+            body(timestamp: since.subtract(const Duration(seconds: 1))),
+          ]),
           pid: 4242,
           since: since,
         ),
         isNull,
         reason: 'an entry from before the launch is a stale announcement',
       );
+      final noPid =
+          '  "eventMessage" : ${json.encode(announcement)},\n'
+          '  "timestamp" : ${json.encode(since.toIso8601String())}';
       expect(
-        findSimLogVmServiceUri(
-          entry().replaceAll('"processIdentifier" : 4242,\n', ''),
-          pid: 4242,
-          since: since,
-        ),
+        findSimLogVmServiceUri(doc([noPid]), pid: 4242, since: since),
         isNull,
         reason: 'without a pid the entry cannot prove it is this launch',
       );
       expect(
         findSimLogVmServiceUri(
-          entry(message: 'Filtering the log data using ""'),
+          doc([body(message: 'Filtering the log data using ""')]),
           pid: 4242,
           since: since,
         ),
@@ -3339,6 +3360,24 @@ Filesystem       1K-blocks    Used Available Use% Mounted on
           since: since,
         ),
         throwsA(isA<FormatException>()),
+      );
+      expect(
+        () => findSimLogVmServiceUri(
+          '{\n${body()}\n}',
+          pid: 4242,
+          since: since,
+        ),
+        throwsA(isA<FormatException>()),
+        reason: 'a bare object is not the document `log show` prints',
+      );
+      expect(
+        () => findSimLogVmServiceUri(
+          '[{\n  "timestamp" : "2026-10-25T12:00:00.000Z"',
+          pid: 4242,
+          since: since,
+        ),
+        throwsA(isA<FormatException>()),
+        reason: 'a truncated document reports rather than reading as quiet',
       );
     });
   });

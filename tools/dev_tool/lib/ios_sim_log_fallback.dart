@@ -59,37 +59,6 @@ const defaultSimLogFallbackPollInterval = Duration(seconds: 2);
 /// The logger the fallback reports through when the caller names none.
 final Logger _fallbackLogger = Logger('dev_tool.ios_sim_log');
 
-/// One `log show --style json` entry's discovery-relevant fields.
-class _SimLogEntry {
-  int? pid;
-  DateTime? timestamp;
-  String? message;
-}
-
-/// A line opening a JSON object starts a new entry, in both the
-/// pretty-printed form (a bare `{`) and the compact form (the whole entry on
-/// one line).
-final _entryStart = RegExp(r'^\s*\{');
-
-/// A line closing a pretty-printed entry: the brace is required, so blank
-/// lines between entries end nothing.
-final _entryEnd = RegExp(r'^\s*\},?\s*$');
-
-/// `"processIdentifier" : 123` — the pid key spelled the way Apple's `log`
-/// spells it, plus the shortenings a fixture or a future format may use.
-final _entryPid = RegExp(
-  r'"(?:processIdentifier|processID|processId|pid)"\s*:\s*(\d+)',
-);
-
-/// `"timestamp" : "..."` — the instant the entry was logged.
-final _entryTimestamp = RegExp(r'"(?:timestamp|time)"\s*:\s*"([^"]+)"');
-
-/// `"eventMessage" : "..."` — the full JSON string literal, escapes intact,
-/// for `json.decode` to unquote.
-final _entryMessage = RegExp(
-  r'"(?:eventMessage|message)"\s*:\s*("(?:[^"\\]|\\.)*")',
-);
-
 /// `log show --start` takes `YYYY-MM-DD HH:MM:SS`-shaped instants; the
 /// fallback reads in UTC so the text is unambiguous.
 String _formatShowStart(DateTime instant) {
@@ -142,46 +111,53 @@ DateTime? _parseLogTimestamp(String raw) {
   return instant;
 }
 
-/// Read one line's discovery fields into the entry under construction.
-///
-/// Field order is the entry's, not the reader's: pretty-printed entries put
-/// the pid and timestamp on their own lines in whatever order `log` chooses,
-/// and compact entries put everything on one line, so each line only adds
-/// what it carries and the entry is judged when it ends.
-void _readEntryLine(_SimLogEntry entry, String line) {
-  final pid = _entryPid.firstMatch(line);
-  if (pid != null) entry.pid ??= int.parse(pid.group(1)!);
-  final timestamp = _entryTimestamp.firstMatch(line);
-  if (timestamp != null) {
-    entry.timestamp ??= _parseLogTimestamp(timestamp.group(1)!);
+/// Read one decoded entry's discovery fields: the first [String] under any of
+/// [keys], or null.
+String? _firstString(Map<Object?, Object?> entry, List<String> keys) {
+  for (final key in keys) {
+    final value = entry[key];
+    if (value is String) return value;
   }
-  final message = _entryMessage.firstMatch(line);
-  if (message != null && entry.message == null) {
-    try {
-      final decoded = json.decode(message.group(1)!);
-      if (decoded is String) entry.message = decoded;
-    } on FormatException {
-      // A truncated line's half-string is no message; the entry simply has
-      // none, which is judged below like any entry without one.
-    }
-  }
+  return null;
 }
 
-/// Judge a finished entry: this launch's announcement, or null.
+/// The entry's pid: the key spelled the way Apple's `log` spells it, plus the
+/// shortenings a fixture or a future format may use, tolerating a string
+/// encoding.
+int? _entryPid(Map<Object?, Object?> entry) {
+  for (final key in const [
+    'processIdentifier',
+    'processID',
+    'processId',
+    'pid',
+  ]) {
+    final value = entry[key];
+    if (value is int) return value;
+    if (value is String) return int.tryParse(value);
+  }
+  return null;
+}
+
+/// Judge one decoded entry: this launch's announcement, or null.
 ///
-/// Null covers every way an entry does not count — unfinished (no pid, no
-/// timestamp, no message), another process's, older than the launch, or
-/// carrying no announcement — because only a proven entry may feed
-/// discovery.
-Uri? _judgeEntry(
-  _SimLogEntry? entry, {
+/// Null covers every way an entry does not count — no message, another
+/// process's pid, no pid, older than the launch, an unparsable timestamp, or
+/// carrying no announcement — because only a proven entry may feed discovery.
+/// The timestamp check runs in absolute time, whatever zone the text names.
+Uri? _judgeJsonEntry(
+  Map<Object?, Object?> entry, {
   required int pid,
   required DateTime since,
 }) {
-  final message = entry?.message;
+  final message = _firstString(entry, const ['eventMessage', 'message']);
   if (message == null) return null;
-  if (entry!.pid != pid) return null;
-  final timestamp = entry.timestamp;
+  if (_entryPid(entry) != pid) return null;
+  final rawTimestamp = _firstString(entry, const ['timestamp', 'time']);
+  final timestamp = rawTimestamp == null
+      ? null
+      : _parseLogTimestamp(
+          rawTimestamp,
+        );
   if (timestamp == null || timestamp.isBefore(since)) return null;
   final match = vmServiceUriPattern.firstMatch(message);
   if (match == null) return null;
@@ -191,58 +167,38 @@ Uri? _judgeEntry(
 /// Find this launch's VM-service announcement in one `log show` call's
 /// output, or null when it holds none.
 ///
-/// Total over well-formed output: entries are judged in order and the first
-/// proven one wins (`log show` reads oldest-first). Throws [FormatException]
-/// when non-blank output holds no entry at all — that is not "no announcement
-/// yet", it is a caller looking at something that is not `log show` JSON,
-/// and the poller reports it rather than mistaking it for quiet.
+/// The output is the JSON document `--style json` prints: an array of entries
+/// whose first line is `[{`, whose entries are joined as `},{`, and whose last
+/// line is `}]`. Entries are judged in order and the first proven one wins
+/// (`log show` reads oldest-first). Throws [FormatException] when non-blank
+/// output is not that document — that is not "no announcement yet", it is a
+/// caller looking at something that is not `log show` JSON, and the poller
+/// reports it rather than mistaking it for quiet.
 Uri? findSimLogVmServiceUri(
   String output, {
   required int pid,
   required DateTime since,
 }) {
-  _SimLogEntry? current;
-  var entries = 0;
-  Uri? judge() {
-    entries++;
-    final found = _judgeEntry(current, pid: pid, since: since);
-    current = null;
-    return found;
-  }
-
-  for (final line in output.split('\n')) {
-    if (_entryStart.hasMatch(line)) {
-      if (current != null) {
-        final found = judge();
-        if (found != null) return found;
-      }
-      current = _SimLogEntry();
+  final text = output.trim();
+  if (text.isEmpty) return null;
+  late final List<Object?> entries;
+  try {
+    final decoded = json.decode(text);
+    if (decoded is! List) {
+      throw const FormatException('not a JSON array of log entries');
     }
-    final entry = current;
-    if (entry == null) continue;
-    // A compact entry's only line opens it and carries its fields together;
-    // a lone `{` carries none, so reading every non-closing line is what
-    // covers both shapes.
-    if (_entryEnd.hasMatch(line)) {
-      final found = judge();
-      if (found != null) return found;
-    } else {
-      _readEntryLine(entry, line);
-    }
-  }
-  if (current != null) {
-    // A compact entry is judged on its single line above; reaching here with
-    // one still open means trailing lines without a closer, which judge the
-    // same either way.
-    final found = judge();
-    if (found != null) return found;
-  }
-  if (output.trim().isNotEmpty && entries == 0) {
-    final head = output.trim();
+    entries = decoded;
+  } on FormatException {
+    final head = text;
     throw FormatException(
       'expected `log show --style json` entries, got: '
       '${head.substring(0, head.length < 120 ? head.length : 120)}',
     );
+  }
+  for (final entry in entries) {
+    if (entry is! Map<Object?, Object?>) continue;
+    final found = _judgeJsonEntry(entry, pid: pid, since: since);
+    if (found != null) return found;
   }
   return null;
 }
