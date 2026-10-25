@@ -2,7 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
-import 'package:flutter_bazel_dev_tool/device.dart';
+import 'package:flutter_bazel_dev_tool/device_web.dart';
 import 'package:flutter_bazel_dev_tool/web_options.dart';
 import 'package:test/test.dart';
 

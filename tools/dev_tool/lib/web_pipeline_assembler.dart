@@ -28,7 +28,7 @@ import 'package:webkit_inspection_protocol/webkit_inspection_protocol.dart'
 import 'command_report.dart';
 import 'compiler_config.dart';
 import 'dev_tool_exception.dart';
-import 'device.dart';
+import 'device_web.dart';
 import 'frontend_server.dart';
 import 'hot_reload/asset_bundle.dart';
 import 'hot_reload/source_uri_resolver.dart';

@@ -17,6 +17,7 @@ import 'package:dds/dds.dart';
 import 'app_log_sink.dart';
 import 'dev_tool_exception.dart';
 import 'device.dart';
+import 'device_web.dart';
 import 'run_plan.dart';
 import 'session.dart';
 import 'session_host.dart';

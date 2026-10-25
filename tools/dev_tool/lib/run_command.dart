@@ -25,7 +25,7 @@ import 'package:args/args.dart';
 
 import 'bazel.dart';
 import 'dev_tool_exception.dart';
-import 'device.dart';
+import 'device_web.dart';
 import 'hot_reload/file_clock.dart';
 import 'hot_reload/source_watcher.dart';
 import 'logging.dart';

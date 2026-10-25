@@ -4,6 +4,7 @@ import 'package:flutter_bazel_dev_tool/agent_command.dart';
 import 'package:flutter_bazel_dev_tool/command_failure.dart';
 import 'package:flutter_bazel_dev_tool/command_runner.dart';
 import 'package:flutter_bazel_dev_tool/device.dart';
+import 'package:flutter_bazel_dev_tool/device_web.dart';
 import 'package:flutter_bazel_dev_tool/device_ios.dart';
 import 'package:flutter_bazel_dev_tool/device_ios_sim.dart';
 import 'package:flutter_bazel_dev_tool/device_android.dart';

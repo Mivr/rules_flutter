@@ -14,6 +14,7 @@ import 'package:http_multi_server/http_multi_server.dart';
 import 'command_failure.dart';
 import 'command_runner.dart';
 import 'device.dart';
+import 'device_web.dart';
 import 'logging.dart';
 import 'machine_protocol.dart';
 import 'session.dart';

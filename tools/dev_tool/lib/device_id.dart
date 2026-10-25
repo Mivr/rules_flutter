@@ -22,6 +22,7 @@ import 'package:path/path.dart' as p;
 
 import 'dev_tool_exception.dart';
 import 'device.dart';
+import 'device_web.dart';
 import 'device_ios.dart';
 import 'device_ios_sim.dart';
 import 'device_android.dart';

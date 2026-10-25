@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter_bazel_dev_tool/device.dart';
+import 'package:flutter_bazel_dev_tool/device_web.dart';
 import 'package:flutter_bazel_dev_tool/device_ios.dart';
 import 'package:flutter_bazel_dev_tool/device_ios_sim.dart';
 import 'package:flutter_bazel_dev_tool/device_android.dart';
