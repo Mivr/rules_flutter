@@ -154,6 +154,72 @@ Map<String, dynamic> decodeSingleEvent(BufferSink sink) {
   return (json.decode(lines.single) as List).single as Map<String, dynamic>;
 }
 
+/// Lines of one `log stream --style json` entry announcing [uri] from [pid],
+/// in the runners' real layout: Apple's key order with the nested `backtrace`
+/// object, and the entry opened by its delimiter (`[{` for the stream's first
+/// entry, `},{` once the next entry starts) and never closed — the delimiter
+/// closing an entry is printed only when the next entry starts, so the newest
+/// entry stays open. Slashes in the message print escaped, the way `log`
+/// prints them.
+///
+/// Shared by the discovery-stream tests, so every fake carries the nesting
+/// and the open tail the parser must survive; a fake answering a shape the
+/// real stream cannot produce would hide the bug it stands in for.
+List<String> simStreamAnnouncement({
+  required int pid,
+  required String uri,
+  required bool first,
+}) {
+  final message = json
+      .encode('flutter: The Dart VM service is listening on $uri')
+      .replaceAll('/', r'\/');
+  return [
+    if (first) '[{' else '},{',
+    '  "timezoneName" : "CEST",',
+    '  "messageType" : "Default",',
+    '  "eventType" : "logEvent",',
+    '  "source" : "AppSandbox",',
+    '  "formatString" : "flutter: %@",',
+    '  "userID" : 501,',
+    '  "activityIdentifier" : 0,',
+    '  "subsystem" : "com.example.test",',
+    '  "category" : "flutter",',
+    '  "threadID" : 123456,',
+    '  "senderImageUUID" : "4C4C44FD-5555-3144-A1AC-D0A294851CED",',
+    '  "backtrace" : {',
+    '    "frames" : [',
+    '      {',
+    '        "imageOffset" : 5782416,',
+    '        "imageUUID" : "4C4C44FD-5555-3144-A1AC-D0A294851CED"',
+    '      }',
+    '    ]',
+    '  },',
+    '  "bootUUID" : "A1B2C3D4-E5F6-7890-ABCD-EF1234567890",',
+    '  "processImagePath" : "/private/tmp/MyApp.app/MyApp",',
+    '  "senderImagePath" : "/private/tmp/MyApp.app/Frameworks/Flutter.framework/Flutter",',
+    '  "timestamp" : "2026-10-25 09:39:41.123456+0200",',
+    '  "machTimestamp" : 123456789012345,',
+    '  "eventMessage" : $message,',
+    '  "processImageUUID" : "4C4C44FD-5555-3144-A1AC-D0A294851CED",',
+    '  "traceID" : 18234567890123456789,',
+    '  "processID" : $pid,',
+    '  "senderProgramCounter" : 5783000,',
+    '  "parentActivityIdentifier" : 0',
+  ];
+}
+
+/// Emit one [simStreamAnnouncement] on [process]' stdout.
+void emitSimStreamAnnouncement(
+  FakeProcess process, {
+  required int pid,
+  required String uri,
+  required bool first,
+}) {
+  for (final line in simStreamAnnouncement(pid: pid, uri: uri, first: first)) {
+    process.emitStdout(line);
+  }
+}
+
 /// A controllable fake [Process] for testing.
 class FakeProcess implements Process {
   final Completer<void> _stdoutAttached = Completer<void>();

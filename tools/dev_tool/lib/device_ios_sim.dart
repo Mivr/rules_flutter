@@ -13,6 +13,7 @@ import 'package:path/path.dart' as p;
 import 'app_log.dart';
 import 'device.dart';
 import 'device_ios.dart';
+import 'device_ios_sim_discovery.dart';
 import 'ios_sim_log_fallback.dart';
 import 'native_patch_delivery.dart';
 import 'vm_service_client.dart';
@@ -126,7 +127,59 @@ class IOSSimulatorDevice extends Device {
     return result.exitCode == 0;
   }
 
+  /// Start the discovery stream and read it pid-gated from its first line.
+  ///
+  /// The stream reads `--style json` so every entry carries its process id,
+  /// and the source holds announcements parsed before `simctl launch`
+  /// answers until the launch reports its pid — see [SimDiscoverySource].
+  Future<SimDiscoverySource> _startDiscoverySource() async {
+    final discoveryLog = await _startHelper('xcrun', [
+      'simctl',
+      'spawn',
+      udid,
+      'log',
+      'stream',
+      '--style',
+      'json',
+      '--predicate',
+      'eventMessage contains "Observatory" or eventMessage contains "Dart VM service"',
+    ]);
+    return SimDiscoverySource(discoveryLog, logger: activeDiscoveryLogger());
+  }
+
+  /// Wait for the VM-service announcement on [source] for a launch that
+  /// reported [launchStdout].
+  ///
+  /// Completing the source's pid judges every announcement parsed so far, so
+  /// an early announcement that turns out to be this launch's is still taken.
+  /// A release build serves no VM service, so there is nothing to wait for —
+  /// and no pid watch to start — and the source is released at once instead.
+  Future<VmServiceDiscovery> _waitForSimDiscovery(
+    SimDiscoverySource source,
+    String launchStdout, {
+    required DateTime launchStarted,
+  }) async {
+    final simPid = parseSimctlLaunchPid(launchStdout);
+    source.pid.complete(simPid);
+    if (!buildMode.servesVmService) {
+      await source.dispose();
+      return (uri: null, gaveUpNote: null);
+    }
+    return _discoverSimVmService(
+      logs: source.lines,
+      pump: source.pump,
+      simPid: simPid,
+      launchStdout: launchStdout,
+      launchStarted: launchStarted,
+    );
+  }
+
   /// Discover the VM-service URI from the simulator's discovery stream.
+  ///
+  /// The stream takes only this launch's announcement: [SimDiscoverySource]
+  /// judges every entry by the pid `simctl launch` reported, holding entries
+  /// parsed before the pid arrives, so a concurrent app on the same
+  /// simulator can never hand discovery its own URI.
   ///
   /// The pid watch starts only here — never in a build mode that serves no VM
   /// service — and stops when the wait ends, whatever the outcome, so no `ps`
@@ -143,16 +196,15 @@ class IOSSimulatorDevice extends Device {
   /// exit, and the bound note behave exactly as with the stream alone. No pid
   /// means no fallback — and a log line saying so — because there is nothing
   /// to hunt the persisted log for.
-  Future<VmServiceDiscovery> _discoverSimVmService(
-    Process discoveryLog,
-    String launchStdout, {
+  Future<VmServiceDiscovery> _discoverSimVmService({
+    required AppLogStream logs,
+    required AppLogPump pump,
+    required int? simPid,
+    required String launchStdout,
     required DateTime launchStarted,
   }) async {
     final config = discoveryConfig();
     final stopWatch = Completer<void>();
-    final logs = AppLogStream();
-    final pump = pumpProcessLines(discoveryLog, logs);
-    final simPid = parseSimctlLaunchPid(launchStdout);
     final fallback = simPid == null
         ? null
         : SimLogFallback(
@@ -168,7 +220,8 @@ class IOSSimulatorDevice extends Device {
         'text':
             'The iOS simulator persisted-log fallback is off: `simctl '
             'launch` reported no pid, so discovery reads the live stream '
-            'alone. Launch output was: "$launchStdout".',
+            'alone and the stream takes the first announcement without '
+            'pid-checking it. Launch output was: "$launchStdout".',
         'launch_stdout': launchStdout,
       });
     }
@@ -231,22 +284,16 @@ class IOSSimulatorDevice extends Device {
 
     // Two log streams, deliberately.
     //
-    // Discovery matches on message content and nothing else. App output needs
+    // Discovery matches on message content, judged by the pid `simctl launch`
+    // reports — never by the app name alone, which a second session of the
+    // same app shares. App output needs
     // a process-scoped predicate with several NOT(...) noise filters
     // ([iosSimulatorLogPredicate]). Folding the two together would make
     // VM-service discovery — which hot reload, screenshots and agent control
     // all depend on — contingent on those exclusion clauses continuing to
     // spare the announcement. Two narrow streams fail independently and
     // visibly; one broad stream fails silently.
-    final discoveryLog = await _startHelper('xcrun', [
-      'simctl',
-      'spawn',
-      udid,
-      'log',
-      'stream',
-      '--predicate',
-      'eventMessage contains "Observatory" or eventMessage contains "Dart VM service"',
-    ]);
+    final discoverySource = await _startDiscoverySource();
 
     final appName = p.basename(installPath).replaceAll('.app', '');
     final outputLog = await _startHelper('xcrun', [
@@ -293,13 +340,11 @@ class IOSSimulatorDevice extends Device {
     // Discover VM service URI from the dedicated discovery stream, with the
     // persisted log as fallback. A release build serves none, so there is
     // nothing to wait for — and no pid watch to start.
-    final discovery = buildMode.servesVmService
-        ? await _discoverSimVmService(
-            discoveryLog,
-            launchResult.stdout as String,
-            launchStarted: launchStarted,
-          )
-        : (uri: null, gaveUpNote: null);
+    final discovery = await _waitForSimDiscovery(
+      discoverySource,
+      launchResult.stdout as String,
+      launchStarted: launchStarted,
+    );
 
     // The shutdown may have arrived while discovery ran: refuse the launch
     // rather than hand back an app nobody will stop.
@@ -307,7 +352,7 @@ class IOSSimulatorDevice extends Device {
     _inFlightOwnsApp = false;
     _launchHelpers.clear();
     return AppInstance(
-      process: discoveryLog,
+      process: discoverySource.process,
       vmServiceUri: discovery.uri,
       vmServiceDiscoveryNote: discovery.gaveUpNote,
       logs: logs,
