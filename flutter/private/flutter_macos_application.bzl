@@ -267,7 +267,7 @@ flutter_macos_framework = rule(
         apple_support.platform_constraint_attrs(),
         {
             "allow_non_macho": attr.string_list(
-                doc = "Explicit allow-list of binary or framework names permitted to bypass Mach-O validation.",
+                doc = "Explicit allow-list of binary or framework names allowed to pass through unpatched when they are not 64-bit or universal Mach-O binaries. A 64-bit or universal Mach-O binary is always patched (and stripped when requested); patch failures are errors even for allowed names.",
                 default = [],
             ),
             "application": attr.label(
@@ -390,7 +390,7 @@ flutter_macos_native_libs = rule(
     implementation = _flutter_macos_native_libs_impl,
     attrs = {
         "allow_non_macho": attr.string_list(
-            doc = "Explicit allow-list of binary names permitted to bypass Mach-O validation.",
+            doc = "Explicit allow-list of binary names allowed to pass through unpatched when they are not 64-bit or universal Mach-O binaries. A 64-bit or universal Mach-O binary is always patched (and stripped when requested); patch failures are errors even for allowed names.",
             default = [],
         ),
         "application": attr.label(

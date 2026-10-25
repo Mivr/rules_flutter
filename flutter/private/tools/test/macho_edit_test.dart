@@ -645,6 +645,25 @@ List<int> _readTestIndirect(Uint8List bytes) {
   ];
 }
 
+/// Copies the dylib in [bytes] with a local-relocation count, so the
+/// local-symbol strip refuses it like a real dylib carrying relocations.
+Uint8List _withLocalRelocations(Uint8List bytes) {
+  final out = Uint8List.fromList(bytes);
+  var off = macho.mhHeaderSize64;
+  for (final lc in macho.parseLoadCommands(bytes)) {
+    if (lc.cmd == macho.lcDysymtab) {
+      ByteData.sublistView(
+        out,
+        off,
+        off + lc.cmdsize,
+      ).setUint32(76, 1, Endian.little);
+      return out;
+    }
+    off += lc.cmdsize;
+  }
+  throw StateError('Test dylib has no LC_DYSYMTAB to refuse stripping.');
+}
+
 void main() {
   group('sha256', () {
     test('matches FIPS 180-4 test vectors', () {
@@ -3452,6 +3471,156 @@ void main() {
         'dummy.dylib',
       ]);
       expect(dummyOut.readAsStringSync(), 'not a macho file');
+
+      // A 32-bit Mach-O named in --allow-non-macho still passes through
+      // unchanged.
+      final macho32Out = File('${tempDir.path}/legacy32_out.dylib');
+      macho.main([
+        'patch',
+        '--input',
+        macho32In.path,
+        '--output',
+        macho32Out.path,
+        '--install-name',
+        '@rpath/Legacy.framework/Legacy',
+        '--allow-non-macho',
+        'legacy32.dylib',
+      ]);
+      expect(macho32Out.readAsBytesSync(), macho32In.readAsBytesSync());
+    });
+
+    test(
+      'patch with --allow-non-macho fails on a Mach-O the strip refuses',
+      () {
+        final refusedIn = File('${tempDir.path}/Refused.dylib')
+          ..writeAsBytesSync(
+            _withLocalRelocations(_buildUnstrippedDylib().bytes),
+          );
+        final refusedOut = File('${tempDir.path}/refused_out.dylib');
+
+        expect(
+          () => macho.main([
+            'patch',
+            '--input',
+            refusedIn.path,
+            '--output',
+            refusedOut.path,
+            '--strip-symbols',
+            '--allow-non-macho',
+            'Refused.dylib',
+          ]),
+          throwsA(
+            isA<FormatException>().having(
+              (e) => e.message,
+              'message',
+              allOf(contains('Refused.dylib'), contains('table-of-contents')),
+            ),
+          ),
+        );
+        expect(refusedOut.existsSync(), isFalse);
+      },
+    );
+
+    test('patch and copy-files with --allow-non-macho fail on a Mach-O the patch refuses', () {
+      final stubIn = File('${tempDir.path}/archstub.dylib')
+        ..writeAsBytesSync(
+          macho.generateStubMachO(
+            arch: 'arm64',
+            platform: macho.platformMacos,
+            minOs: macho.parsePackedVersion('11.0'),
+            sdkVersion: macho.parsePackedVersion('11.0'),
+            installName: '@rpath/ArchStub.dylib',
+          ),
+        );
+      final stubOut = File('${tempDir.path}/archstub_out.dylib');
+
+      // Thinning an arm64 binary to x86_64 is a patch refusal, not a pass-through.
+      expect(
+        () => macho.main([
+          'patch',
+          '--input',
+          stubIn.path,
+          '--output',
+          stubOut.path,
+          '--arch',
+          'x86_64',
+          '--allow-non-macho',
+          'archstub.dylib',
+        ]),
+        throwsA(
+          isA<FormatException>().having(
+            (e) => e.message,
+            'message',
+            allOf(contains('archstub.dylib'), contains('does not match')),
+          ),
+        ),
+      );
+      expect(stubOut.existsSync(), isFalse);
+
+      final stagedDir = '${tempDir.path}/archstub_staged';
+      expect(
+        () => macho.main([
+          'copy-files',
+          '--platform',
+          'macos',
+          '--min-os',
+          '13.2',
+          '--arch',
+          'x86_64',
+          '--allow-non-macho',
+          'archstub.dylib',
+          '--output-dir',
+          stagedDir,
+          stubIn.path,
+          'archstub.dylib',
+        ]),
+        throwsA(
+          isA<FormatException>().having(
+            (e) => e.message,
+            'message',
+            allOf(contains('archstub.dylib'), contains('does not match')),
+          ),
+        ),
+      );
+      expect(File('$stagedDir/archstub.dylib').existsSync(), isFalse);
+    });
+
+    test('patch with --allow-non-macho still patches a patchable Mach-O', () {
+      final stubIn = File('${tempDir.path}/allowed.dylib')
+        ..writeAsBytesSync(
+          macho.generateStubMachO(
+            arch: 'arm64',
+            platform: macho.platformMacos,
+            minOs: macho.parsePackedVersion('10.15'),
+            sdkVersion: macho.parsePackedVersion('10.15'),
+            installName: '@rpath/Allowed.dylib',
+          ),
+        );
+      final stubOut = File('${tempDir.path}/allowed_out.dylib');
+
+      macho.main([
+        'patch',
+        '--input',
+        stubIn.path,
+        '--output',
+        stubOut.path,
+        '--platform',
+        'macos',
+        '--min-os',
+        '13.2',
+        '--sdk-version',
+        '13.2',
+        '--allow-non-macho',
+        'allowed.dylib',
+      ]);
+
+      final bvCmd = macho
+          .parseLoadCommands(stubOut.readAsBytesSync())
+          .singleWhere((c) => c.cmd == macho.lcBuildVersion);
+      expect(
+        ByteData.sublistView(bvCmd.bytes).getUint32(12, Endian.little),
+        0x000d0200,
+      );
     });
 
     test('stub --type execute generates valid MH_EXECUTE Mach-O binary', () {

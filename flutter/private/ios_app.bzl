@@ -520,7 +520,10 @@ def flutter_ios_app(
             the Android, Linux, macOS and Windows registrants always
             register every collected native plugin.
         allow_non_macho: Explicit allow-list of binary or framework names
-            permitted to bypass Mach-O validation.
+            allowed to pass through unpatched when they are not 64-bit or
+            universal Mach-O binaries. A 64-bit or universal Mach-O binary
+            is always patched (and stripped when requested); patch failures
+            are errors even for allowed names.
         backend: Apple bundling backend: `"rules_apple"` (default) or
             `"xtool"` (explicit opt-in). Note: `"xtool"` requires a
             user-supplied `darwin.artifactbundle` configured via

@@ -184,10 +184,6 @@ void runPatch(List<String> args) {
       ),
     );
   } on FormatException catch (e) {
-    if (isAllowed) {
-      _writePatchedOutput(inputBytes, outputPath);
-      return;
-    }
     throw FormatException('Input file "$inputPath": ${e.message}');
   }
 

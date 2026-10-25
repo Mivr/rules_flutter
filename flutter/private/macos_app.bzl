@@ -488,7 +488,10 @@ def flutter_macos_app(
             (remove `macos/Runner/Base.lproj/MainMenu.xib` and omit `menu_xib`
             to use the programmatic menu, or use `backend = "rules_apple"`).
         allow_non_macho: Explicit allow-list of binary or framework names
-            permitted to bypass Mach-O validation.
+            allowed to pass through unpatched when they are not 64-bit or
+            universal Mach-O binaries. A 64-bit or universal Mach-O binary
+            is always patched (and stripped when requested); patch failures
+            are errors even for allowed names.
         backend: Apple bundling backend: `"rules_apple"` (default) or
             `"xtool"` (explicit opt-in). Note: `"xtool"` requires a
             user-supplied `darwin.artifactbundle` configured via

@@ -452,10 +452,6 @@ void _stageCopyFilesEntry(
     );
     File(destPath).writeAsBytesSync(patched);
   } on FormatException catch (e) {
-    if (isAllowed) {
-      File(destPath).writeAsBytesSync(inputBytes);
-      return;
-    }
     throw FormatException(
       'Input file "$srcPath" ("$destName"): ${e.message}',
     );
