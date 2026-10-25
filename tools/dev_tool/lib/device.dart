@@ -256,6 +256,8 @@ class AppInstance {
 class LaunchScratch {
   Directory? _dir;
 
+  /// Takes ownership of [dir] for the launch in flight: [handOver] passes it
+  /// to the [AppInstance] being returned, [release] deletes it.
   void hold(Directory dir) => _dir = dir;
 
   /// Gives the folder to the [AppInstance] being returned, which deletes it
