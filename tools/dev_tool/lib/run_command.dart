@@ -31,6 +31,7 @@ import 'hot_reload/source_watcher.dart';
 import 'logging.dart';
 import 'machine_protocol.dart';
 import 'device_launcher.dart';
+import 'native_assembly_gate.dart';
 import 'native_pipeline_assembler.dart';
 import 'reload_pipeline.dart';
 import 'run_plan.dart';
@@ -656,18 +657,25 @@ class RunCommand {
     // The flag decides whether the machinery exists, which is what makes
     // every transport's refusal true rather than merely stated.
     if (!plan.isWebDevice && hasVmClient && plan.hotReloadOff == null) {
-      await NativePipelineAssembler(
-        workspace: plan.workspace,
-        toolchain: plan.toolchain,
-        target: plan.target,
-        configDevice: plan.devices.first,
-        userBuildArgs: plan.userBuildArgs,
+      // Ordered past the first frame, except under `--start-paused` (see
+      // `assembleNativeAfterFirstFrame`): the toolchain's build must not run
+      // while the app it just launched is still starting.
+      await assembleNativeAfterFirstFrame(
         host: host,
-        pipeline: pipeline,
-        logger: logger,
-        builtBefore: builtBefore,
-        launch: NativeLaunch(appFile: appFile),
-      ).assemble();
+        startPaused: plan.startPaused,
+        assemble: () => NativePipelineAssembler(
+          workspace: plan.workspace,
+          toolchain: plan.toolchain,
+          target: plan.target,
+          configDevice: plan.devices.first,
+          userBuildArgs: plan.userBuildArgs,
+          host: host,
+          pipeline: pipeline,
+          logger: logger,
+          builtBefore: builtBefore,
+          launch: NativeLaunch(appFile: appFile),
+        ).assemble(),
+      );
     }
   }
 
