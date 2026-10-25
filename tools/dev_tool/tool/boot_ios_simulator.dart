@@ -22,14 +22,16 @@
 /// ```
 ///
 /// `--timeout` sets the `bootstatus` deadline in seconds (default 600); the
-/// `list` and `boot` calls have their own fixed deadlines. `xcrun` is resolved
+/// `list` and `boot` calls retry with growing bounds inside an overall bound
+/// (see [BootOptions]). `xcrun` is resolved
 /// from `PATH` and the host OS is never inspected: on a machine without Xcode
 /// the script simply fails like any other missing tool.
 ///
 /// Exit codes: 0 once `bootstatus` has returned 0. Anything else is non-zero
 /// with a one-line reason on stderr — no `xcrun`, an unparsable listing, no
 /// available iOS runtime, no available iPhone on the newest runtime (devices
-/// are never created), a failed `boot`, or a failed or timed-out `bootstatus`.
+/// are never created), a failed `boot`, a `list` or `boot` silent past its
+/// overall bound, or a failed or timed-out `bootstatus`.
 /// The script never skips. On success the last stdout line is exactly
 /// `booted <udid>`.
 library;
@@ -38,12 +40,23 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
-/// How long `simctl list` may take. Simulators enumerate from disk; a minute
-/// is generous and a hang is a failure, not a wait.
-const _listTimeout = Duration(seconds: 60);
+/// The bounds one retrying `simctl` call runs inside: the first attempt's
+/// deadline, and the overall deadline the attempts share.
+///
+/// The first bound is the generous single-call deadline the script always had
+/// (`list` enumerates from disk, `boot` hands over to `bootstatus`); the
+/// overall bound is what makes a slow call a wait rather than a failure. Kept
+/// in one place so [BootOptions] can carry a pair per call, and tests can
+/// shrink a pair to milliseconds.
+class RetryBounds {
+  /// How long the first attempt may take; each retry doubles it.
+  final Duration first;
 
-/// How long `simctl boot` may take before `bootstatus` takes over the wait.
-const _bootTimeout = Duration(seconds: 180);
+  /// How long all attempts together may take before the call fails.
+  final Duration overall;
+
+  const RetryBounds({required this.first, required this.overall});
+}
 
 /// The `bootstatus` deadline when `--timeout` is not given.
 const _defaultBootstatusTimeout = Duration(seconds: 600);
@@ -98,7 +111,7 @@ class SimulatorChoice {
   bool get wasBooted => device.state == 'Booted';
 }
 
-/// Everything [bootSimulator] needs, grouped so callers never thread five
+/// Everything [bootSimulator] needs, grouped so callers never thread six
 /// arguments through.
 class BootOptions {
   /// How children are started; inject a stub to test without `xcrun`.
@@ -110,10 +123,32 @@ class BootOptions {
   /// Where the choice (`booting ...` / `chose ...`) is reported.
   final void Function(String line) log;
 
+  /// Bounds for `simctl list -j`: a minute for the first attempt (simulators
+  /// enumerate from disk, and a loaded runner is slow, not stuck), five
+  /// minutes overall.
+  final RetryBounds listBounds;
+
+  /// Bounds for `simctl boot`: three minutes for the first attempt, five
+  /// minutes overall. `bootstatus` takes over the wait once `boot` returns.
+  final RetryBounds bootBounds;
+
+  /// Clock used to measure the attempt bounds. Defaults to [DateTime.now];
+  /// tests pass a fake clock for deterministic bounds.
+  final DateTime Function() now;
+
   const BootOptions({
     required this.spawner,
     required this.bootstatusTimeout,
     required this.log,
+    this.listBounds = const RetryBounds(
+      first: Duration(seconds: 60),
+      overall: Duration(minutes: 5),
+    ),
+    this.bootBounds = const RetryBounds(
+      first: Duration(seconds: 180),
+      overall: Duration(minutes: 5),
+    ),
+    this.now = DateTime.now,
   });
 }
 
@@ -330,6 +365,73 @@ Future<CommandResult> runSimctl(
   required Duration timeout,
 }) async {
   final label = 'xcrun ${args.join(' ')}';
+  final waited = Stopwatch()..start();
+  final result = await _runSimctlAttempt(spawner, args, timeout);
+  if (result == null) {
+    throw BootFailure('`$label` timed out after ${waited.elapsed.inSeconds}s');
+  }
+  return result;
+}
+
+/// Runs one `xcrun simctl ...` call with load-tolerant bounds: an attempt that
+/// overruns its bound is killed and retried with a doubled bound, inside the
+/// overall bound the attempts share.
+///
+/// Each retry logs a line naming the call, the attempt that overran and the
+/// elapsed time, and the attempt that follows it. A call that answers —
+/// including a non-zero exit — returns (or fails, through
+/// [_requireSimctlSuccess]) at once: only silence is retried, never a refusal.
+Future<CommandResult> runSimctlWithRetries(
+  CommandSpawner spawner,
+  List<String> args, {
+  required RetryBounds bounds,
+  required void Function(String line) log,
+  DateTime Function() now = DateTime.now,
+}) async {
+  final label = 'xcrun ${args.join(' ')}';
+  final started = now();
+  var elapsed = Duration.zero;
+  var attempt = 0;
+  var attemptBound = bounds.first;
+  while (true) {
+    final left = bounds.overall - elapsed;
+    if (left <= Duration.zero) break;
+    attempt++;
+    final bound = attemptBound < left ? attemptBound : left;
+    final result = await _runSimctlAttempt(spawner, args, bound);
+    if (result != null) return result;
+    elapsed = now().difference(started);
+    // The overall bound expired with this overrun: fail without logging a
+    // retry for an attempt that will never run.
+    if (bounds.overall - elapsed <= Duration.zero) break;
+    log(
+      '`$label` timed out after ${_formatElapsed(elapsed)} '
+      '(attempt $attempt); retrying as attempt ${attempt + 1}',
+    );
+    attemptBound *= 2;
+  }
+  throw BootFailure(
+    '`$label` timed out after ${_formatElapsed(elapsed)} '
+    'over $attempt attempt${attempt == 1 ? '' : 's'}',
+  );
+}
+
+/// Elapsed times print in seconds at production bounds and in milliseconds
+/// below a second, so ms-scale test bounds never report a bare `0s`.
+String _formatElapsed(Duration elapsed) => elapsed >= const Duration(seconds: 1)
+    ? '${elapsed.inSeconds}s'
+    : '${elapsed.inMilliseconds}ms';
+
+/// One attempt at a `simctl` call: starts the child and waits up to [bound]
+/// for its exit, killing it past the bound.
+///
+/// Returns null when the child was killed for overrunning; anything else —
+/// including a missing `xcrun` — throws, because only silence is retried.
+Future<CommandResult?> _runSimctlAttempt(
+  CommandSpawner spawner,
+  List<String> args,
+  Duration bound,
+) async {
   SpawnedCommand child;
   try {
     child = await spawner.start('xcrun', args);
@@ -338,15 +440,12 @@ Future<CommandResult> runSimctl(
       'no xcrun on PATH (the Xcode command line tools are required)',
     );
   }
-  final waited = Stopwatch()..start();
   int exitCode;
   try {
-    exitCode = await child.exitCode.timeout(timeout);
+    exitCode = await child.exitCode.timeout(bound);
   } on TimeoutException {
     child.kill();
-    throw BootFailure(
-      '`$label` timed out after ${waited.elapsed.inSeconds}s',
-    );
+    return null;
   }
   return CommandResult(
     exitCode: exitCode,
@@ -377,10 +476,12 @@ void _requireSimctlSuccess(CommandResult result, String label) {
 
 /// Boots the selected simulator and waits for it, logging the choice.
 Future<SimulatorChoice> bootSimulator(BootOptions options) async {
-  final list = await runSimctl(
+  final list = await runSimctlWithRetries(
     options.spawner,
     const ['simctl', 'list', '-j'],
-    timeout: _listTimeout,
+    bounds: options.listBounds,
+    log: options.log,
+    now: options.now,
   );
   _requireSimctlSuccess(list, 'xcrun simctl list -j');
   final choice = selectSimulator(decodeListing(list.stdoutText));
@@ -394,10 +495,12 @@ Future<SimulatorChoice> bootSimulator(BootOptions options) async {
     options.log(
       'booting ${device.name} (${device.udid}) on ${choice.runtime.label}...',
     );
-    final boot = await runSimctl(
+    final boot = await runSimctlWithRetries(
       options.spawner,
       ['simctl', 'boot', device.udid],
-      timeout: _bootTimeout,
+      bounds: options.bootBounds,
+      log: options.log,
+      now: options.now,
     );
     _requireSimctlSuccess(boot, 'xcrun simctl boot ${device.udid}');
   }

@@ -105,7 +105,7 @@ void main() {
           1,
           'app.restart',
           params: {'appId': appId},
-          timeout: const Duration(minutes: 4),
+          timeout: e2eColdBuildTimeout,
         );
         expect(
           clean['result']?['succeeded'],
@@ -122,7 +122,7 @@ void main() {
           2,
           'app.restart',
           params: {'appId': appId},
-          timeout: const Duration(minutes: 4),
+          timeout: e2eColdBuildTimeout,
         );
         expect(
           broken['result']?['succeeded'],
@@ -147,7 +147,7 @@ void main() {
           3,
           'app.restart',
           params: {'appId': appId},
-          timeout: const Duration(minutes: 4),
+          timeout: e2eColdBuildTimeout,
         );
         expect(
           fixed['result']?['succeeded'],
@@ -172,7 +172,7 @@ void main() {
 
         await dt.sendCommand(4, 'daemon.shutdown');
       },
-      timeout: const Timeout(Duration(minutes: 15)),
+      timeout: const Timeout(Duration(minutes: 25)),
     );
   });
 }

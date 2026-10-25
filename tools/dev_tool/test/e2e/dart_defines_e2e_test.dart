@@ -78,6 +78,7 @@ void main() {
           1,
           'app.hotReload',
           params: {'appId': appId},
+          timeout: e2eColdBuildTimeout,
         );
         expect(
           reload['error'],
@@ -100,7 +101,7 @@ void main() {
           reason: 'hot reload must apply the edit AND keep the dart-define',
         );
       },
-      timeout: const Timeout(Duration(minutes: 5)),
+      timeout: const Timeout(Duration(minutes: 25)),
     );
   });
 }

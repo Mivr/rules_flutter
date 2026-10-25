@@ -149,6 +149,7 @@ void main() {
             params: {
               'appId': appId,
             },
+            timeout: e2eColdBuildTimeout,
           );
           expect(
             restart['error'],
@@ -167,7 +168,7 @@ void main() {
                 '(Dart registrant must re-run)',
           );
         },
-        timeout: const Timeout(Duration(minutes: 4)),
+        timeout: const Timeout(Duration(minutes: 25)),
       );
 
       test(
@@ -202,6 +203,7 @@ void main() {
             9,
             'app.restart',
             params: {'appId': appId},
+            timeout: e2eColdBuildTimeout,
           );
           final result = restart['result'] as Map<String, dynamic>? ?? {};
           expect(result['succeeded'], isTrue, reason: '$restart');
@@ -242,7 +244,7 @@ void main() {
           // Hand the front back to whoever had it.
           await app.hide();
         },
-        timeout: const Timeout(Duration(minutes: 4)),
+        timeout: const Timeout(Duration(minutes: 25)),
       );
 
       // The dev tool must keep forwarding the app's stdout/stderr after it
@@ -431,7 +433,7 @@ void main() {
           target: ':plugin_ios',
           device: 'ios-simulator',
           outputBasename: 'plugin_ios_sim_e2e',
-          buildTimeout: const Duration(minutes: 20),
+          buildTimeout: e2eColdBuildTimeout,
           launchTimeout: const Duration(minutes: 10),
         );
       }, timeout: const Timeout(Duration(minutes: 35)));
@@ -468,7 +470,7 @@ void main() {
           // over 100 s between `app.start` and `app.started`.
           await dt.waitForEvent(
             'app.start',
-            timeout: const Duration(minutes: 20),
+            timeout: e2eColdBuildTimeout,
           );
           await dt.waitForEvent(
             'app.started',
@@ -521,6 +523,7 @@ void main() {
             params: {
               'appId': appId,
             },
+            timeout: e2eColdBuildTimeout,
           );
           expect(
             restart['error'],
@@ -554,7 +557,7 @@ void main() {
           );
           await dt.waitForEvent(
             'app.start',
-            timeout: const Duration(minutes: 20),
+            timeout: e2eColdBuildTimeout,
           );
           await dt.waitForEvent(
             'app.started',

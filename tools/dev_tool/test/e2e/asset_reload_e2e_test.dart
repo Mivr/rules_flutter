@@ -81,6 +81,7 @@ void main() {
           1,
           'app.hotReload',
           params: {'appId': appId},
+          timeout: e2eColdBuildTimeout,
         );
         expect(
           reload['error'],
@@ -125,7 +126,7 @@ void main() {
           reason: 'the app must still be the one that was launched',
         );
       },
-      timeout: const Timeout(Duration(minutes: 5)),
+      timeout: const Timeout(Duration(minutes: 25)),
     );
 
     test(
@@ -188,6 +189,7 @@ void main() {
           1,
           'app.hotReload',
           params: {'appId': appId},
+          timeout: e2eColdBuildTimeout,
         );
         expect(
           reload['error'],
@@ -233,7 +235,7 @@ void main() {
               'bytes it started with',
         );
       },
-      timeout: const Timeout(Duration(minutes: 6)),
+      timeout: const Timeout(Duration(minutes: 25)),
     );
 
     /// The same edit, on the platform where the tracked tree can diverge from
@@ -274,7 +276,7 @@ void main() {
         // the build was still emitting actions past the old 300 s bound.
         final start = await dt.waitForEvent(
           'app.start',
-          timeout: const Duration(minutes: 20),
+          timeout: e2eColdBuildTimeout,
         );
         await dt.waitForEvent(
           'app.started',
@@ -309,6 +311,7 @@ void main() {
           1,
           'app.hotReload',
           params: {'appId': appId},
+          timeout: e2eColdBuildTimeout,
         );
         expect(
           reload['error'],

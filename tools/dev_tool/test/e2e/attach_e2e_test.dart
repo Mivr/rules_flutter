@@ -176,6 +176,7 @@ void main() {
           1,
           'app.hotReload',
           params: {'appId': appId},
+          timeout: e2eColdBuildTimeout,
         );
         expect(
           reload['error'],
@@ -200,7 +201,7 @@ void main() {
               'recompile must carry the define attach was never told about',
         );
       },
-      timeout: const Timeout(Duration(minutes: 6)),
+      timeout: const Timeout(Duration(minutes: 25)),
     );
 
     // Restart is the half of the pipeline reload does not reach: it re-runs
@@ -250,6 +251,7 @@ void main() {
           1,
           'app.restart',
           params: {'appId': appId},
+          timeout: e2eColdBuildTimeout,
         );
         expect(
           restart['error'],
@@ -279,7 +281,7 @@ void main() {
               'Got: $after',
         );
       },
-      timeout: const Timeout(Duration(minutes: 6)),
+      timeout: const Timeout(Duration(minutes: 25)),
     );
 
     // The other way an attach ends, and the one it does not control: the app

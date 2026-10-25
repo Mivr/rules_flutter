@@ -104,6 +104,7 @@ void main() {
           1,
           'app.hotReload',
           params: {'appId': appId},
+          timeout: e2eColdBuildTimeout,
         );
         expect(
           failed['result']?['error'],
@@ -126,6 +127,7 @@ void main() {
           2,
           'app.hotReload',
           params: {'appId': appId},
+          timeout: e2eColdBuildTimeout,
         );
         expect(
           afterFailure,
@@ -141,6 +143,7 @@ void main() {
           3,
           'app.restart',
           params: {'appId': appId},
+          timeout: e2eColdBuildTimeout,
         );
         expect(
           restart['error'],
@@ -169,7 +172,7 @@ void main() {
               'field: $text',
         );
       },
-      timeout: const Timeout(Duration(minutes: 12)),
+      timeout: const Timeout(Duration(minutes: 25)),
     );
   });
 }

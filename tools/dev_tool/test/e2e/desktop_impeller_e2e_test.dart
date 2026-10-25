@@ -188,6 +188,7 @@ void _desktop({
           1,
           'app.hotReload',
           params: {'appId': appId},
+          timeout: e2eColdBuildTimeout,
         );
         expect(
           reload['result']?['error'],
@@ -218,7 +219,7 @@ void _desktop({
 
         await dt.sendCommand(2, 'app.stop', params: {'appId': appId});
       },
-      timeout: const Timeout(Duration(minutes: 20)),
+      timeout: const Timeout(Duration(minutes: 25)),
     );
   }, skip: runs ? null : 'runs on $platform only');
 }

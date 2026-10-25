@@ -63,6 +63,7 @@ void main() {
           7,
           'app.restart',
           params: {'appId': dt.appId},
+          timeout: e2eColdBuildTimeout,
         );
         expect(restart['error'], isNull, reason: 'app.restart: $restart');
         await dt.nativeScreenshotWhenOnScreen(dt.appId!);
@@ -86,7 +87,7 @@ void main() {
           reason: '300x500 at the run\'s 3x',
         );
       },
-      timeout: const Timeout(Duration(minutes: 12)),
+      timeout: const Timeout(Duration(minutes: 25)),
     );
 
     test(

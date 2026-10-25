@@ -213,6 +213,33 @@ Map<String, CannedResult> bootStubs(String udid, {bool skipBoot = false}) => {
   'xcrun simctl bootstatus $udid -b': const CannedResult(),
 };
 
+/// Answers the first call to [slowKey] with a hang and delegates the rest to
+/// [inner]: a `simctl` call that overruns its first attempt bound and answers
+/// the retry. Records the hung attempt's kill.
+class SlowFirstCall implements CommandSpawner {
+  final String slowKey;
+  final FakeSpawner inner;
+
+  var calls = 0;
+  final killed = <String>[];
+
+  SlowFirstCall(this.slowKey, this.inner);
+
+  @override
+  Future<SpawnedCommand> start(String executable, List<String> args) async {
+    final key = '$executable ${args.join(' ')}';
+    if (key == slowKey && calls++ == 0) {
+      return SpawnedCommand(
+        exitCode: Completer<int>().future,
+        stdoutText: Future.value(''),
+        stderrText: Future.value(''),
+        kill: () => killed.add(key),
+      );
+    }
+    return inner.start(executable, args);
+  }
+}
+
 void main() {
   const ios265 = 'com.apple.CoreSimulator.SimRuntime.iOS-26-5';
   const ios2610 = 'com.apple.CoreSimulator.SimRuntime.iOS-26-10';
@@ -608,6 +635,149 @@ void main() {
         onError: (Object e) => e as BootFailure,
       );
       expect(failure.reason, isNot(contains('\n')));
+    });
+
+    group('load-tolerant list and boot bounds', () {
+      test(
+        'a slow list answers on retry and boots, logging the retry',
+        () async {
+          final inner = listingSpawner({
+            ios265: [device('iPhone 17', 'udid-r')],
+          }, extra: bootStubs('udid-r'));
+          final spawner = SlowFirstCall(listKey(), inner);
+          final log = <String>[];
+          var ticks = 0;
+          final epoch = DateTime(2026, 1, 1);
+          final udid = await bootAndReport(
+            BootOptions(
+              spawner: spawner,
+              bootstatusTimeout: const Duration(seconds: 10),
+              log: log.add,
+              listBounds: const RetryBounds(
+                first: Duration(milliseconds: 50),
+                overall: Duration(seconds: 10),
+              ),
+              now: () => epoch.add(Duration(milliseconds: 150 * ticks++)),
+            ),
+            log.add,
+          );
+
+          expect(udid, 'udid-r');
+          expect(spawner.calls, 2, reason: 'one hang, then one answer');
+          expect(spawner.killed, [listKey()]);
+          expect(
+            log.where((line) => line.contains('retrying as attempt 2')),
+            hasLength(1),
+          );
+          final retry = log.firstWhere((line) => line.contains('retrying'));
+          expect(
+            retry,
+            '`xcrun simctl list -j` timed out after 150ms '
+            '(attempt 1); retrying as attempt 2',
+          );
+        },
+      );
+
+      test('a list that never answers fails at the overall bound', () async {
+        final spawner = FakeSpawner({
+          listKey(): const CannedResult(hang: true),
+        });
+        final log = <String>[];
+        var ticks = 0;
+        final epoch = DateTime(2026, 1, 1);
+        final failure =
+            await bootAndReport(
+              BootOptions(
+                spawner: spawner,
+                bootstatusTimeout: const Duration(seconds: 10),
+                log: log.add,
+                listBounds: const RetryBounds(
+                  first: Duration(milliseconds: 50),
+                  overall: Duration(milliseconds: 350),
+                ),
+                now: () => epoch.add(Duration(milliseconds: 150 * ticks++)),
+              ),
+              log.add,
+            ).then<BootFailure>(
+              (_) => fail('expected a BootFailure'),
+              onError: (Object e) => e as BootFailure,
+            );
+
+        expect(
+          failure.reason,
+          '`xcrun simctl list -j` timed out after 450ms over 3 attempts',
+        );
+        expect(spawner.started, hasLength(3));
+        expect(spawner.killed, hasLength(3));
+        expect(
+          log.where((line) => line.contains('retrying as attempt')),
+          hasLength(2),
+          reason: 'attempts 2 and 3 each log their retry',
+        );
+      });
+
+      test('a slow boot answers on retry', () async {
+        final inner = listingSpawner({
+          ios265: [device('iPhone 17', 'udid-b')],
+        }, extra: bootStubs('udid-b'));
+        final spawner = SlowFirstCall('xcrun simctl boot udid-b', inner);
+        final log = <String>[];
+        var ticks = 0;
+        final epoch = DateTime(2026, 1, 1);
+        final udid = await bootAndReport(
+          BootOptions(
+            spawner: spawner,
+            bootstatusTimeout: const Duration(seconds: 10),
+            log: log.add,
+            bootBounds: const RetryBounds(
+              first: Duration(milliseconds: 50),
+              overall: Duration(seconds: 10),
+            ),
+            now: () => epoch.add(Duration(milliseconds: 150 * ticks++)),
+          ),
+          log.add,
+        );
+
+        expect(udid, 'udid-b');
+        expect(spawner.calls, 2, reason: 'one hang, then one answer');
+        expect(
+          log.where((line) => line.contains('retrying as attempt 2')),
+          hasLength(1),
+        );
+      });
+
+      test('a refused list fails at once without retrying', () async {
+        final spawner = FakeSpawner({
+          listKey(): const CannedResult(
+            exitCode: 1,
+            stderrText: 'Unable to list devices\n',
+          ),
+        });
+        final log = <String>[];
+        await expectLater(
+          bootAndReport(
+            BootOptions(
+              spawner: spawner,
+              bootstatusTimeout: const Duration(seconds: 10),
+              log: log.add,
+              listBounds: const RetryBounds(
+                first: Duration(milliseconds: 50),
+                overall: Duration(seconds: 10),
+              ),
+            ),
+            log.add,
+          ),
+          throwsA(
+            isA<BootFailure>().having(
+              (e) => e.reason,
+              'reason',
+              allOf(contains('exited 1'), contains('simctl list -j')),
+            ),
+          ),
+        );
+        expect(spawner.started, hasLength(1));
+        expect(log.where((line) => line.contains('retrying')), isEmpty);
+      });
     });
   });
 }

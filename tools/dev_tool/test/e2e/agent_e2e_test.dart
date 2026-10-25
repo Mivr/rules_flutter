@@ -642,6 +642,7 @@ void main() {
             params: {
               'appId': appId,
             },
+            timeout: e2eColdBuildTimeout,
           );
           expect(
             restart['error'],
@@ -668,7 +669,7 @@ void main() {
             reason: 'restart resets the counter state',
           );
         },
-        timeout: const Timeout(Duration(minutes: 3)),
+        timeout: const Timeout(Duration(minutes: 25)),
       );
 
       // An agent driving an app whose window is not visible must still get an
@@ -853,6 +854,7 @@ void main() {
             params: {
               'appId': appId,
             },
+            timeout: e2eColdBuildTimeout,
           );
           expect(
             restart['error'],
@@ -881,7 +883,7 @@ void main() {
                 'before: was $built, now ${after['result']}',
           );
         },
-        timeout: const Timeout(Duration(minutes: 3)),
+        timeout: const Timeout(Duration(minutes: 25)),
       );
 
       // An app that never goes idle must still be drivable. Every command waits
@@ -1343,6 +1345,7 @@ void main() {
           9,
           'app.restart',
           params: {'appId': appId},
+          timeout: e2eColdBuildTimeout,
         );
         expect(
           restart['error'],
@@ -1372,7 +1375,7 @@ void main() {
         );
         expect(postRestart['result']?['text'], 'web asset v1');
       },
-      timeout: const Timeout(Duration(minutes: 6)),
+      timeout: const Timeout(Duration(minutes: 25)),
     );
   });
 }

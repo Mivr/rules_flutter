@@ -27,7 +27,7 @@ void main() {
           // One bound covering both would time out a healthy cold run.
           await dt.waitForEvent(
             'app.start',
-            timeout: const Duration(minutes: 20),
+            timeout: e2eColdBuildTimeout,
           );
           await dt.waitForEvent(
             'app.started',

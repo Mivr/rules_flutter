@@ -164,6 +164,7 @@ void main() {
             1,
             'app.hotReload',
             params: {'appId': dt.appId},
+            timeout: e2eColdBuildTimeout,
           );
           expect(reload['error'], isNull, reason: '$reload');
           expect(
@@ -181,7 +182,7 @@ void main() {
         }
       },
       skip: notMac,
-      timeout: _timeout,
+      timeout: const Timeout(Duration(minutes: 25)),
     );
   }
 

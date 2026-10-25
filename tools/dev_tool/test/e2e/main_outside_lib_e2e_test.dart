@@ -75,7 +75,7 @@ void main() {
         1,
         'app.hotReload',
         params: {'appId': appId},
-        timeout: const Duration(minutes: 2),
+        timeout: e2eColdBuildTimeout,
       );
       expect(
         reply['result']?['runningCode'],
@@ -99,7 +99,7 @@ void main() {
       2,
       'app.restart',
       params: {'appId': appId},
-      timeout: const Duration(minutes: 4),
+      timeout: e2eColdBuildTimeout,
     );
     expect(
       restart['result']?['succeeded'],
@@ -121,7 +121,7 @@ void main() {
         device: 'macos',
       ),
       skip: !Platform.isMacOS ? 'macOS only' : null,
-      timeout: const Timeout(Duration(minutes: 10)),
+      timeout: const Timeout(Duration(minutes: 25)),
     );
 
     test(
@@ -131,7 +131,7 @@ void main() {
         target: ':app_test_driver',
         device: 'chrome',
       ),
-      timeout: const Timeout(Duration(minutes: 10)),
+      timeout: const Timeout(Duration(minutes: 25)),
     );
   });
 }

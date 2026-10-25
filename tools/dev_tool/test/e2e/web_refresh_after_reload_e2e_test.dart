@@ -118,7 +118,7 @@ void main() {
         final reload = await dt.sendCommand(
           1,
           'app.hotReload',
-          timeout: const Duration(minutes: 3),
+          timeout: e2eColdBuildTimeout,
         );
         expect(
           reload['result']?['succeeded'],
@@ -145,7 +145,7 @@ void main() {
 
         await dt.sendCommand(9, 'daemon.shutdown');
       },
-      timeout: const Timeout(Duration(minutes: 10)),
+      timeout: const Timeout(Duration(minutes: 25)),
     );
   });
 }

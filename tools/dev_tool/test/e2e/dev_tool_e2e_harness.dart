@@ -72,6 +72,16 @@ String e2eWorkspace(String name) {
   return p.normalize(p.join(Directory.current.path, '..', '..', 'e2e', name));
 }
 
+/// How long a cold build may take on a cold CI runner, and therefore how long
+/// every wait that includes one gets.
+///
+/// Measured cold, the workspace copy's own Bazel build is still emitting
+/// actions past the old 300 s bound, so the `app.start` build waits and every
+/// rebuild-triggering `app.hotReload`/`app.restart` use this instead of a
+/// literal or the 60 s default. A timeout here still reports what arrived, as
+/// before — only the bound changes, not the arrival reporting.
+const Duration e2eColdBuildTimeout = Duration(minutes: 20);
+
 /// The repo root, from a test process whose cwd is `tools/dev_tool/`.
 String get _repoRoot => p.normalize(p.join(Directory.current.path, '..', '..'));
 
