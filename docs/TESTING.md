@@ -634,7 +634,7 @@ cd e2e/web_example && bazel test //...
 cd e2e/integration_web && bazel test //...  # Linux-only (hermetic chrome-headless-shell)
 cd e2e/integration_linux && bazel test //...  # Linux-only (hermetic Xvfb + GTK3/Mesa runtime)
 cd e2e/integration_android && bazel test //...  # Linux-only with /dev/kvm (hermetic headless Android emulator)
-cd e2e/integration_ios && bazel test //...  # macOS-only (iOS simulator); Linux runs the portable Dart-side build test only
+cd e2e/integration_ios && bazel test //...  # macOS-only (iOS simulator); Linux runs the portable Dart-side build and analysis tests only
 cd e2e/linux_example && bazel test //...    # Linux-only (target_compatible_with)
 cd e2e/cross_compile_example && bazel test //...    # Linux-only (target_compatible_with)
 cd e2e/windows_example && bazel test //...  # Windows-only (target_compatible_with)
@@ -710,7 +710,7 @@ cd e2e/windows_example && bazel test //...  # Windows-only (target_compatible_wi
 | integration_web | End-to-end web `flutter_integration_test` running a real counter + asset app in hermetic `chrome-headless-shell` |
 | integration_linux | End-to-end Linux desktop `flutter_integration_test` running a counter + asset app and a native C++ method-channel plugin under hermetic `Xvfb` + GTK3/Mesa `llvmpipe` |
 | integration_android | End-to-end Android `flutter_integration_test` running a counter + asset app and a Kotlin method-channel plugin in a hermetic headless Android emulator with KVM |
-| integration_ios | End-to-end iOS simulator `flutter_integration_test` running a counter + asset app and a Swift method-channel plugin on a booted simulator (macOS-only targets skip elsewhere; the Dart-side build test runs everywhere) |
+| integration_ios | End-to-end iOS simulator `flutter_integration_test` running a counter + asset app and a Swift method-channel plugin on a booted simulator (macOS-only targets skip elsewhere; the Dart-side build and analysis tests run everywhere) |
 | multi_window_example | Multi-window macOS + multi-scene iOS builds with FlutterEngineGroup; macOS bundle verification |
 | android_example | Android APK build (3 approaches: flutter_android_app, Bazel-generated manifest, custom manifest) + APK content verification + web build |
 | linux_example | Linux desktop app (2 approaches: flutter_linux_app, Bazel-generated runner) + bundle structure verification |

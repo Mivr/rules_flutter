@@ -25,7 +25,8 @@ class CounterApp extends StatelessWidget {
   }
 }
 
-/// Counter screen displaying the tap count, bundled asset, and Swift-reported bundle id.
+/// Counter screen displaying the tap count, bundled asset, and the
+/// Swift-reported bundle id.
 class CounterHomePage extends StatefulWidget {
   /// Creates the counter home page.
   const CounterHomePage({super.key});

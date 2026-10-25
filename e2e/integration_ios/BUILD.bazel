@@ -1,6 +1,6 @@
 load("@bazel_skylib//rules:build_test.bzl", "build_test")
 load("@rules_dart//dart:defs.bzl", "dart_analysis_config", "dart_analysis_options", "dart_analysis_test")
-load("@rules_flutter//flutter:defs.bzl", "flutter_integration_test")
+load("@rules_flutter//flutter:defs.bzl", "flutter_integration_test", "flutter_test")
 
 exports_files(["pubspec.lock"])
 
@@ -53,12 +53,57 @@ build_test(
     ],
 )
 
-# `manual`, so `bazel test //...` never gives it to the analysis aspect; this
-# checks it anyway.
+# Host-side lint fixtures for the macOS-only suites: a `flutter_test` owns
+# `srcs` (its package's `lib/`) plus one `main` outside it — exactly the
+# lib/main.dart + integration_test/*.dart split the simulator suites compile.
+# Tagged `manual` and never run: `bazel test //...` skips them and nothing
+# names them, because on a host the plugin channel has no native side and the
+# asset bundle is absent, so they would fail. They exist so the Linux analysis
+# test below lints the macOS-only Dart on every OS. Like the suites, they must
+# not depend on the macOS-only app.
+flutter_test(
+    name = "app_test_lint",
+    package_name = "integration_ios",
+    srcs = ["lib/main.dart"],
+    main = "integration_test/app_test.dart",
+    tags = ["manual"],
+    deps = [
+        "//ios_greeting_plugin",
+        "@deps//:flutter",
+        "@deps//:flutter_test",
+        "@deps//:integration_test",
+        "@rules_flutter//flutter:material_icons",
+    ],
+)
+
+flutter_test(
+    name = "app_test_red_lint",
+    package_name = "integration_ios",
+    srcs = ["lib/main.dart"],
+    main = "integration_test/red_test.dart",
+    tags = ["manual"],
+    deps = [
+        "//ios_greeting_plugin",
+        "@deps//:flutter",
+        "@deps//:flutter_test",
+        "@deps//:integration_test",
+        "@rules_flutter//flutter:material_icons",
+    ],
+)
+
+# The macOS-only Dart (lib/, integration_test/) cannot be named by
+# `bazel test //...` on Linux: the app, debug-app and test targets skip off
+# macOS via `target_compatible_with`, so the `.bazelrc` analysis aspect never
+# reaches them there. The lint fixtures above are portable and carry the same
+# sources, so this lints them on every OS; the plugin's own library target
+# covers its lib/.
 dart_analysis_test(
-    name = "app_test_red_analysis",
-    target_compatible_with = ["@platforms//os:macos"],
-    targets = [":app_test_red"],
+    name = "ios_dart_analysis_test",
+    targets = [
+        ":app_test_lint",
+        ":app_test_red_lint",
+        "//ios_greeting_plugin",
+    ],
 )
 
 # The workspace's lint ruleset, bundled with the pub package whose YAML its
