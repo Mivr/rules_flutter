@@ -2448,7 +2448,9 @@ class IOSSimulatorDevice extends Device {
     }
 
     // Boot sim (idempotent — no-op if already booted).
+    stderr.writeln('DIAG ${DateTime.now().toUtc().toIso8601String()} sim.launch.begin udid=$udid path=$installPath');
     await _runProcess('xcrun', ['simctl', 'boot', udid]);
+    stderr.writeln('DIAG ${DateTime.now().toUtc().toIso8601String()} sim.launch.boot_done');
 
     // Install.
     final installResult = await _runProcess('xcrun', [
@@ -2473,6 +2475,7 @@ class IOSSimulatorDevice extends Device {
     // all depend on — contingent on those exclusion clauses continuing to
     // spare the announcement. Two narrow streams fail independently and
     // visibly; one broad stream fails silently.
+    stderr.writeln('DIAG ${DateTime.now().toUtc().toIso8601String()} sim.launch.installed');
     final discoveryLog = await _startHelper('xcrun', [
       'simctl',
       'spawn',
@@ -2483,6 +2486,7 @@ class IOSSimulatorDevice extends Device {
       'eventMessage contains "Observatory" or eventMessage contains "Dart VM service"',
     ]);
 
+    stderr.writeln('DIAG ${DateTime.now().toUtc().toIso8601String()} sim.launch.discovery_stream_spawned pid=${discoveryLog.pid}');
     final appName = p.basename(installPath).replaceAll('.app', '');
     final outputLog = await _startHelper('xcrun', [
       'simctl',
@@ -2496,6 +2500,7 @@ class IOSSimulatorDevice extends Device {
       iosSimulatorLogPredicate(appName),
     ]);
 
+    stderr.writeln('DIAG ${DateTime.now().toUtc().toIso8601String()} sim.launch.output_stream_spawned pid=${outputLog.pid}');
     // Unified logging carries no stdout/stderr split, so nothing is flagged as
     // an error channel here.
     final logs = _startProcessLogs(
@@ -2511,6 +2516,7 @@ class IOSSimulatorDevice extends Device {
     // Refuse before `simctl launch` puts an app on the simulator that nobody
     // will stop, rather than starting one only to terminate it below.
     _throwIfLaunchAbandoned();
+    stderr.writeln('DIAG ${DateTime.now().toUtc().toIso8601String()} sim.launch.simctl_launch_start bundle=$bundleId');
     final launchResult = await _runProcess('xcrun', [
       'simctl', 'launch', udid, bundleId,
       // Anything after the bundle id is passed to the app as argv, which is
@@ -2520,6 +2526,7 @@ class IOSSimulatorDevice extends Device {
     if (launchResult.exitCode != 0) {
       throw StateError('simctl launch failed: ${launchResult.stderr}');
     }
+    stderr.writeln('DIAG ${DateTime.now().toUtc().toIso8601String()} sim.launch.simctl_launch_done rc=${launchResult.exitCode} out=${(launchResult.stdout as String).trim()}');
     _inFlightOwnsApp = true;
 
     // Discover VM service URI from the dedicated discovery stream. A release
@@ -2532,6 +2539,7 @@ class IOSSimulatorDevice extends Device {
           )
         : (uri: null, gaveUpNote: null);
 
+    stderr.writeln('DIAG ${DateTime.now().toUtc().toIso8601String()} sim.launch.discovery_done uri=${discovery.uri}');
     // The shutdown may have arrived while discovery ran: refuse the launch
     // rather than hand back an app nobody will stop.
     _throwIfLaunchAbandoned();

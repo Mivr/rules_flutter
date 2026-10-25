@@ -504,6 +504,7 @@ class VmServiceClient {
       }
     }
     _setMainIsolate(found ?? _mainIsolateId ?? vm.isolates?.firstOrNull?.id);
+    stderr.writeln('DIAG ${DateTime.now().toUtc().toIso8601String()} vm.connect uri=$serviceUri isolates=${(vm.isolates ?? []).map((i) => '${i.name}=${i.id}').join(',')} main=$_mainIsolateId');
 
     // Register the Extension stream so Flutter.Error / Flutter.Frame
     // events flow; the per-reload verdict listener is attached in
@@ -517,6 +518,7 @@ class VmServiceClient {
     await _ensureStream(EventStreams.kIsolate);
     await _isolateEvents?.cancel();
     _isolateEvents = _service!.onIsolateEvent.listen(_onIsolateEvent);
+    stderr.writeln('DIAG ${DateTime.now().toUtc().toIso8601String()} vm.isolate_stream_subscribed main=$_mainIsolateId');
 
     if (createDevFS) await _createDevFS();
 
@@ -551,6 +553,7 @@ class VmServiceClient {
   void _watchForClose(VmService service, int attempt, DateTime establishedAt) {
     unawaited(
       service.onDone.then((_) async {
+        stderr.writeln('DIAG ${DateTime.now().toUtc().toIso8601String()} vm.socket_done attempt=$attempt current=$_connectAttempt hungUp=$_hungUp');
         if (_hungUp) return;
         // Nothing here asks whether the app has already been reported gone.
         // [_reconnect] is the only door to a dial and it refuses once it has, so
@@ -742,6 +745,9 @@ class VmServiceClient {
   /// as does the VM — so the exit is what opens the window.
   void _onIsolateEvent(Event event) {
     final id = event.isolate?.id;
+    if (event.kind != EventKind.kServiceExtensionAdded) {
+      stderr.writeln('DIAG ${DateTime.now().toUtc().toIso8601String()} vm.isolate_event kind=${event.kind} id=$id name=${event.isolate?.name} main=$_mainIsolateId');
+    }
     if (id == null) return;
     switch (event.kind) {
       case EventKind.kIsolateExit:
@@ -1793,6 +1799,7 @@ class VmServiceClient {
   }) async {
     final service = _service;
     final isolateId = _mainIsolateId;
+    stderr.writeln('DIAG ${DateTime.now().toUtc().toIso8601String()} vm.first_frame_wait service=${service != null} isolate=$isolateId timeout=$timeout');
     if (service == null || isolateId == null) return false;
 
     final wait = _FirstFrameWait();

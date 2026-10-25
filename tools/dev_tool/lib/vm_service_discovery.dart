@@ -337,7 +337,10 @@ Future<VmServiceDiscovery> waitForVmServiceUriFromProcess(
   Future<void>? abandoned,
 }) async {
   final logs = AppLogStream();
-  final pump = pumpProcessLines(log, logs);
+  final pump = pumpProcessLines(log, logs, transform: (l) {
+    stderr.writeln('DIAG ${DateTime.now().toUtc().toIso8601String()} discovery.line pid=${log.pid} $l');
+    return l;
+  });
   // The helper is this stream's only source, so a helper that dies takes the
   // stream with it and the wait ends at once instead of sitting out its bound
   // on a process that will never say anything again.

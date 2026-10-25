@@ -166,6 +166,14 @@ class DevToolProcess {
 
   DevToolProcess(this.process) {
     unawaited(process.exitCode.then((_) => _exited = true));
+    final diagDir = Platform.environment['E2E_DIAG_DIR'];
+    final diagFile = diagDir == null
+        ? null
+        : File(p.join(diagDir, 'devtool-${process.pid}.log'));
+    void diag(String ch, String line) => diagFile?.writeAsStringSync(
+      '${DateTime.now().toUtc().toIso8601String()} $ch $line\n',
+      mode: FileMode.append,
+    );
     _stdoutSub = process.stdout
         .transform(utf8.decoder)
         .transform(const LineSplitter())
@@ -183,6 +191,7 @@ class DevToolProcess {
           // first — which reads as an unexplained timeout.
           final start = line.indexOf('[{');
           if (start >= 0 && line.endsWith('}]')) {
+            diag('O', line);
             if (start > 0) nonProtocolStdoutLines.add(line.substring(0, start));
             try {
               final list = json.decode(line.substring(start)) as List;
@@ -202,6 +211,7 @@ class DevToolProcess {
         .transform(utf8.decoder)
         .transform(const LineSplitter())
         .listen((line) {
+          diag('E', line);
           stderrLines.add(line);
           _stderrController.add(line);
         });
@@ -1191,6 +1201,13 @@ Future<DevToolProcess> _spawnDevTool({
               workingDirectory: workspace,
               environment: {...Platform.environment, 'LOG_FORMAT': 'json'},
             );
+      final diagDir = Platform.environment['E2E_DIAG_DIR'];
+      if (diagDir != null) {
+        File(p.join(diagDir, 'devtool-${process.pid}.log')).writeAsStringSync(
+          '${DateTime.now().toUtc().toIso8601String()} ARGS $workspace $target $args\n',
+          mode: FileMode.append,
+        );
+      }
       return DevToolProcess(process);
     },
     dispose: (tool) => tool.dispose(),
