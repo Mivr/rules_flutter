@@ -23,6 +23,7 @@ import 'macho_ranges.dart'
         auditOutputRanges,
         describeStripCommand,
         notePayloadRange,
+        rangeWithinFile,
         rangesIntersect,
         relocatedNoteCommand,
         segmentNameOf;
@@ -472,13 +473,13 @@ void _collectNotePayload(
 ) {
   final range = notePayloadRange(lc);
   if (range.size == 0) return;
-  if (range.offset + range.size > inputBytes.length) {
+  if (!rangeWithinFile(range.offset, range.size, inputBytes.length)) {
     throw FormatException(
       'Load command 0x${lc.cmd.toRadixString(16)} points past the '
       'end of the file.',
     );
   }
-  if (range.offset + range.size <= linkeditOff) return;
+  if (rangeWithinFile(range.offset, range.size, linkeditOff)) return;
   if (range.offset < linkeditOff) {
     throw FormatException(
       'Cannot strip local symbols: load command '
@@ -610,7 +611,7 @@ void _checkRangeOutsideLinkedit(
   String what,
 ) {
   if (size == 0) return;
-  if (offset + size > linkeditOff) {
+  if (!rangeWithinFile(offset, size, linkeditOff)) {
     throw FormatException(
       'Cannot strip local symbols: $what reaches into __LINKEDIT.',
     );
@@ -631,7 +632,7 @@ int _layoutLinkeditPayloads(
   var end = linkeditOff;
   for (final payload in payloads) {
     if (payload.oldOffset < linkeditOff ||
-        payload.oldOffset + payload.oldSize > fileLength) {
+        !rangeWithinFile(payload.oldOffset, payload.oldSize, fileLength)) {
       throw const FormatException(
         'Cannot strip local symbols: a linkedit payload lies outside '
         '__LINKEDIT.',
@@ -707,16 +708,18 @@ class _StripPlan {
 
   /// Throws when any load command names a file range past the end of the
   /// input: a range the input never had is a range the rewrite cannot account
-  /// for, on either path, so the strip fails loudly naming the command. This
-  /// runs before either layout because the compacting rewrite can emit an
-  /// output longer than its input (signature alignment padding), which would
+  /// for, on either path, so the strip fails loudly naming the command. The
+  /// containment test is overflow-safe: u64 fields at or above 2^63 read as
+  /// negative, and smaller values can still sum past 2^63 and wrap. This runs
+  /// before either layout because the compacting rewrite can emit an output
+  /// longer than its input (signature alignment padding), which would
   /// otherwise launder a past-the-end input range into looking valid to the
   /// output audit.
   void _throwOnInputRangesPastEnd() {
     for (final lc in commands) {
       for (final range in accountedRangesOf(lc)) {
         if (range.size == 0) continue;
-        if (range.offset + range.size > input.length) {
+        if (!rangeWithinFile(range.offset, range.size, input.length)) {
           throw FormatException(
             'Cannot strip local symbols: ${describeStripCommand(lc)} points '
             'past the end of the file.',
@@ -765,6 +768,7 @@ class _StripPlan {
         remapped?.indirectOffset ?? 0,
         null,
         null,
+        input.length,
       ),
     );
     auditOutputRanges(
@@ -900,6 +904,7 @@ class _StripPlan {
         indirectPayload?.newOffset ?? 0,
         moved,
         (linkedit, newLinkeditSize),
+        input.length,
       ),
     );
     auditOutputRanges(
@@ -913,13 +918,15 @@ class _StripPlan {
   /// `LC_SYMTAB` from [geometry], the regrouped `LC_DYSYMTAB`, moved table
   /// data offsets from [movedOffsets] (null keeps every offset: the in-place
   /// rewrite), and a resized `__LINKEDIT` segment when [resizedLinkedit] is
-  /// given.
+  /// given. [fileLength] is the input file's length: a note payload must name
+  /// bytes inside it before its offset is relocated.
   List<LoadCommand> _commandsFor(
     ({int symoff, int nsyms, int stroff, int strsize}) geometry,
     _RemappedDysymtab? remapped,
     int newIndirectOff,
     Map<int, int>? movedOffsets,
     (LoadCommand, int)? resizedLinkedit,
+    int fileLength,
   ) {
     final updated = <LoadCommand>[];
     var seenSymtab = false;
@@ -962,7 +969,7 @@ class _StripPlan {
         continue;
       }
       if (movedOffsets != null && lc.cmd == lcNote) {
-        updated.add(relocatedNoteCommand(lc, movedOffsets));
+        updated.add(relocatedNoteCommand(lc, movedOffsets, fileLength));
         continue;
       }
       updated.add(lc);

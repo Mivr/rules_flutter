@@ -3159,6 +3159,154 @@ void main() {
         );
       });
     });
+
+    group('stripHostileU64 (round 3)', () {
+      /// A 40-byte `LC_NOTE` naming [offset]/[size]: notes ride a strip
+      /// untouched outside `__LINKEDIT`, so a hostile u64 pair must be refused
+      /// by the input-side check naming the command. `setInt64` authors the
+      /// top-bit values `setUint64` cannot take: they read back negative.
+      Uint8List noteCommand(int offset, int size) {
+        final note = Uint8List(40);
+        final nbd = ByteData.sublistView(note);
+        nbd.setUint32(0, macho.lcNote, Endian.little);
+        nbd.setUint32(4, 40, Endian.little);
+        note.setRange(8, 24, ascii.encode('com.apple.test\x00\x00'));
+        nbd.setUint64(24, offset, Endian.little);
+        if (size < 0) {
+          nbd.setInt64(32, size, Endian.little);
+        } else {
+          nbd.setUint64(32, size, Endian.little);
+        }
+        return note;
+      }
+
+      /// A `__DATA` segment at [fileoff] with a hostile [filesize] authored
+      /// the same way.
+      Uint8List hostileDataSegment(int fileoff, int filesize) {
+        final seg = macho.buildLcSegment64((
+          segname: '__DATA',
+          vmaddr: 0x10000,
+          vmsize: 0x1000,
+          fileoff: fileoff,
+          filesize: 0x1000,
+          maxprot: 3,
+          initprot: 3,
+          nsects: 0,
+          flags: 0,
+        )).bytes;
+        if (filesize < 0) {
+          ByteData.sublistView(seg).setInt64(48, filesize, Endian.little);
+        } else {
+          ByteData.sublistView(seg).setUint64(48, filesize, Endian.little);
+        }
+        return seg;
+      }
+
+      void expectPastEnd(Uint8List bytes, Matcher name) {
+        expect(
+          () => macho.patchMachO(
+            bytes,
+            macho.PatchOptions(stripSymbols: true),
+          ),
+          throwsA(
+            isA<FormatException>().having(
+              (e) => e.message,
+              'message',
+              allOf(contains('past the end'), name),
+            ),
+          ),
+        );
+      }
+
+      test('rangeWithinFile is overflow-safe and unsigned-correct', () {
+        expect(macho.rangeWithinFile(0x100, 64, 0x2000), isTrue);
+        expect(macho.rangeWithinFile(0x100, 0, 0x2000), isTrue);
+        // A top-bit size reads back negative: outside every file.
+        expect(
+          macho.rangeWithinFile(0x100, -0x8000000000000000, 0x2000),
+          isFalse,
+        );
+        // A top-bit offset reads back negative: outside every file.
+        expect(
+          macho.rangeWithinFile(-0x8000000000000000, 64, 0x2000),
+          isFalse,
+        );
+        // Each part fits below 2^63, but the sum wraps negative: a naive
+        // `offset + size <= length` sum would call this inside the file.
+        expect(
+          macho.rangeWithinFile(0x100, 0x7FFFFFFFFFFFFFFF, 0x2000),
+          isFalse,
+        );
+        expect(
+          macho.rangeWithinFile(0x7FFFFFFFFFFFF000, 0x2000, 0x2000),
+          isFalse,
+        );
+        // Adjacent-to-end and empty-at-end ranges stay valid.
+        expect(macho.rangeWithinFile(0x2000, 0, 0x2000), isTrue);
+        expect(macho.rangeWithinFile(0x1FF0, 16, 0x2000), isTrue);
+      });
+
+      test(
+        'strip refuses a note with a top-bit size on the compacting path',
+        () {
+          final input = _buildStripIntegrityDylib(dyldInfoOnly: false);
+          final boobyTrapped = _withAppendedCommand(
+            input.bytes,
+            noteCommand(0x100, -0x8000000000000000),
+          );
+          expectPastEnd(boobyTrapped, contains('0x31'));
+        },
+      );
+
+      test('strip refuses a note with a top-bit size on the in-place path', () {
+        final input = _buildNoLinkeditDylib(bindInGap: false);
+        final boobyTrapped = _withAppendedCommand(
+          input.bytes,
+          noteCommand(0x100, -0x8000000000000000),
+        );
+        expectPastEnd(boobyTrapped, contains('0x31'));
+      });
+
+      test('strip refuses a note whose offset and size sum past 2^63 on the '
+          'compacting path', () {
+        final input = _buildStripIntegrityDylib(dyldInfoOnly: false);
+        final boobyTrapped = _withAppendedCommand(
+          input.bytes,
+          noteCommand(0x100, 0x7FFFFFFFFFFFFFFF),
+        );
+        expectPastEnd(boobyTrapped, contains('0x31'));
+      });
+
+      test('strip refuses a note whose offset and size sum past 2^63 on the '
+          'in-place path', () {
+        final input = _buildNoLinkeditDylib(bindInGap: false);
+        final boobyTrapped = _withAppendedCommand(
+          input.bytes,
+          noteCommand(0x100, 0x7FFFFFFFFFFFFFFF),
+        );
+        expectPastEnd(boobyTrapped, contains('0x31'));
+      });
+
+      test('strip refuses a segment with a top-bit filesize on the compacting '
+          'path', () {
+        final input = _buildStripIntegrityDylib(dyldInfoOnly: false);
+        final boobyTrapped = _withAppendedCommand(
+          input.bytes,
+          hostileDataSegment(0x1000, -0x8000000000000000),
+        );
+        expectPastEnd(boobyTrapped, contains('__DATA'));
+      });
+
+      test('strip refuses a segment with a top-bit filesize on the in-place '
+          'path', () {
+        final input = _buildNoLinkeditDylib(bindInGap: false);
+        final boobyTrapped = _withAppendedCommand(
+          input.bytes,
+          hostileDataSegment(0x1000, -0x8000000000000000),
+        );
+        expectPastEnd(boobyTrapped, contains('__DATA'));
+      });
+    });
   });
 
   group('CLI', () {

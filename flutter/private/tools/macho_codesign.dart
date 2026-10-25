@@ -17,7 +17,7 @@ import 'dart:typed_data';
 
 import 'macho_constants.dart';
 import 'macho_parse.dart' show LoadCommand, fileRangesOf, parseLoadCommands;
-import 'macho_ranges.dart' show notePayloadRange;
+import 'macho_ranges.dart' show notePayloadRange, rangeWithinFile;
 import 'macho_stub.dart' show sha256;
 
 /// `CS_CodeDirectory` versions carrying a `codeLimit64` word at offset 56.
@@ -186,7 +186,7 @@ class _ResignPlan {
           ? _withDatasize(lc, freshSize)
           : i == linkeditIndex
           ? _resizedLinkedit(lc, out.length)
-          : _shiftedRanges(lc, oldSigEnd, shrink);
+          : _shiftedRanges(lc, oldSigEnd, shrink, bytes.length);
       out.setRange(commandOff, commandOff + lc.cmdsize, patched);
       commandOff += lc.cmdsize;
     }
@@ -435,12 +435,20 @@ Uint8List _resizedLinkedit(LoadCommand lc, int fileLength) {
 /// range at or past [oldSigEnd] shifted down by [shrink] bytes. A well-formed
 /// `LC_NOTE` at or past [oldSigEnd] shifts its u64 data offset the same way:
 /// the splice above moves its payload with the tail, so leaving the offset
-/// would dangle it past the shrunk signature. A truncated note command is
-/// left alone: the strip refuses those before any resign, and a bare retag
-/// keeps ignoring what it cannot parse.
-Uint8List _shiftedRanges(LoadCommand lc, int oldSigEnd, int shrink) {
+/// would dangle it past the shrunk signature. A truncated note command, or
+/// one whose payload is not inside the [fileLength]-byte file it names (u64
+/// fields at or above 2^63 read as negative and smaller values can still
+/// wrap, so the containment test is overflow-safe), is left alone: the strip
+/// refuses those before any resign, and a bare retag keeps ignoring what it
+/// cannot parse.
+Uint8List _shiftedRanges(
+  LoadCommand lc,
+  int oldSigEnd,
+  int shrink,
+  int fileLength,
+) {
   if (shrink == 0) return lc.bytes;
-  if (lc.cmd == lcNote) return _shiftedNote(lc, oldSigEnd, shrink);
+  if (lc.cmd == lcNote) return _shiftedNote(lc, oldSigEnd, shrink, fileLength);
   final refs = fileRangesOf(lc);
   var dirty = false;
   for (final ref in refs) {
@@ -460,12 +468,18 @@ Uint8List _shiftedRanges(LoadCommand lc, int oldSigEnd, int shrink) {
 /// Returns [lc]'s (`LC_NOTE`) bytes with its u64 data offset shifted down by
 /// [shrink] bytes when its payload sits at or past [oldSigEnd]. Anything
 /// else comes back unchanged: payloads before the splice do not move, empty
-/// payloads have no offset, and truncated commands stay exactly as a retag
-/// found them.
-Uint8List _shiftedNote(LoadCommand lc, int oldSigEnd, int shrink) {
+/// payloads have no offset, and truncated or past-the-end commands stay
+/// exactly as a retag found them.
+Uint8List _shiftedNote(
+  LoadCommand lc,
+  int oldSigEnd,
+  int shrink,
+  int fileLength,
+) {
   if (lc.bytes.length < 40) return lc.bytes;
   final range = notePayloadRange(lc);
   if (range.size == 0 || range.offset < oldSigEnd) return lc.bytes;
+  if (!rangeWithinFile(range.offset, range.size, fileLength)) return lc.bytes;
   final patched = Uint8List.fromList(lc.bytes);
   ByteData.sublistView(
     patched,

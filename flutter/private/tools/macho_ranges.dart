@@ -91,6 +91,19 @@ bool rangesIntersect(int aOff, int aSize, int bOff, int bSize) {
   return aOff < bOff + bSize && bOff < aOff + aSize;
 }
 
+/// Whether the file range (`offset`, `size`) lies wholly inside a file of
+/// [length] bytes, computed overflow-safe and unsigned-correct: u64 command
+/// fields at or above 2^63 read as negative through `ByteData.getUint64`,
+/// and an offset and size that are each below 2^63 can still sum past it and
+/// wrap negative, so callers must never form `offset + size`. A negative
+/// part is outside every file; otherwise `offset` must not pass [length]
+/// and `size` must fit the remainder, which cannot overflow.
+bool rangeWithinFile(int offset, int size, int length) {
+  if (size < 0 || offset < 0) return false;
+  if (offset > length) return false;
+  return size <= length - offset;
+}
+
 /// The segment name of [lc], or the empty string when [lc] is not a readable
 /// `LC_SEGMENT_64` command.
 String segmentNameOf(LoadCommand lc) {
@@ -305,18 +318,31 @@ CommandRange notePayloadRange(LoadCommand lc) {
 }
 
 /// Returns [lc] (`LC_NOTE`) with its u64 data offset relocated through
-/// [movedOffsets]. An empty payload has no offset to move and comes back
-/// unchanged, as does a payload the rewrite did not move: only notes reaching
-/// into `__LINKEDIT` are collected for the move, and the bytes before
-/// `__LINKEDIT` are copied verbatim, so an unmoved payload still names the
-/// same bytes.
+/// [movedOffsets] when the payload was collected for the move. An empty
+/// payload has no offset to move and comes back unchanged, as does a payload
+/// the rewrite did not move: only notes reaching into `__LINKEDIT` are
+/// collected for the move, and the bytes before `__LINKEDIT` are copied
+/// verbatim, so an unmoved payload still names the same bytes.
 ///
-/// Throws [FormatException] when the command is malformed. A payload the
-/// rewrite moved always has a new offset (collection is total), so a missing
-/// entry means the payload survived verbatim rather than reused bytes.
-LoadCommand relocatedNoteCommand(LoadCommand lc, Map<int, int> movedOffsets) {
+/// Throws [FormatException] naming the command when it is malformed or its
+/// payload is not inside the [fileLength]-byte file it names: u64 fields at
+/// or above 2^63 read as negative and smaller values can still wrap, so the
+/// containment test is overflow-safe. A payload the rewrite moved always has
+/// a new offset (collection is total), so a missing entry means the payload
+/// survived verbatim rather than reused bytes.
+LoadCommand relocatedNoteCommand(
+  LoadCommand lc,
+  Map<int, int> movedOffsets,
+  int fileLength,
+) {
   final range = notePayloadRange(lc);
   if (range.size == 0) return lc;
+  if (!rangeWithinFile(range.offset, range.size, fileLength)) {
+    throw FormatException(
+      'Cannot strip local symbols: load command '
+      '0x${lc.cmd.toRadixString(16)} points past the end of the file.',
+    );
+  }
   final fresh = movedOffsets[range.offset];
   if (fresh == null) return lc;
   final bytes = Uint8List.fromList(lc.bytes);
@@ -370,7 +396,7 @@ void _auditCommandRanges(
 ) {
   for (final range in accountedRangesOf(lc)) {
     if (range.size == 0) continue;
-    if (range.offset < 0 || range.offset + range.size > layout.fileLength) {
+    if (!rangeWithinFile(range.offset, range.size, layout.fileLength)) {
       throw FormatException(
         'Cannot strip local symbols: ${describeStripCommand(lc)} points '
         'past the end of the file.',
