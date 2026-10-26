@@ -188,6 +188,52 @@ def _swiftpm_under_docc(rel):
             return True
     return False
 
+def _swiftpm_keep_existing(identity, target_name, kind, entries, rel_dir, tree):
+    """Drop entries naming nothing on disk, fail entries escaping the dir.
+
+    Args:
+        identity: The SwiftPM package identity.
+        target_name: The target holding the entries, for messages.
+        kind: "`exclude:`" or "`sources:`", for messages.
+        entries: The manifest entry strings.
+        rel_dir: The repo-relative target directory.
+        tree: The `struct(files, dirs)` listing from
+            `_swiftpm_list_target_tree`.
+
+    Returns:
+        `struct(ok, error, kept)`: the repo-relative paths that exist.
+    """
+    kept = []
+    for entry in entries:
+        bad = _swiftpm_check_entry(identity, target_name, entry, kind)
+        if bad:
+            return struct(ok = False, error = bad, kept = [])
+        full = rel_dir + "/" + entry
+        if full in tree.files or full in tree.dirs:
+            kept.append(full)
+    return struct(ok = True, error = "", kept = kept)
+
+def _swiftpm_classify_source(identity, target_name, full, rel):
+    """Sort one listed file into Swift sources, skips and refusals.
+
+    Args:
+        identity: The SwiftPM package identity.
+        target_name: The target holding the file, for messages.
+        full: The repo-relative file path.
+        rel: The target-relative file path.
+
+    Returns:
+        `struct(ok, error, keep)`: `keep` when the file is a Swift source.
+    """
+    if _swiftpm_under_docc(rel):
+        return struct(ok = True, error = "", keep = False)
+    basename = full[full.rfind("/") + 1:]
+    if basename.endswith(".swift"):
+        return struct(ok = True, error = "", keep = True)
+    if swiftpm_is_code_file(basename):
+        return struct(ok = False, error = _swiftpm_repo_fail(identity, "target {target} holds a C-family source, header or module map with no Bazel translation ({path})".format(target = repr(target_name), path = repr(full))), keep = False)
+    return struct(ok = True, error = "", keep = False)
+
 def swiftpm_select_target_sources(identity, target, rel_dir, files, dirs):
     """Select one reached target's explicit Swift sources, purely.
 
@@ -211,38 +257,26 @@ def swiftpm_select_target_sources(identity, target, rel_dir, files, dirs):
     Returns:
         `struct(ok, error, srcs)`: the sorted repo-relative `.swift` paths.
     """
-    excluded = []
-    for entry in target.exclude:
-        bad = _swiftpm_check_entry(identity, target.name, entry, "`exclude:`")
-        if bad:
-            return struct(ok = False, error = bad, srcs = [])
-        full = rel_dir + "/" + entry
-        if full in files or full in dirs:
-            excluded.append(full)
+    excluded = _swiftpm_keep_existing(identity, target.name, "`exclude:`", target.exclude, rel_dir, struct(files = files, dirs = dirs))
+    if not excluded.ok:
+        return struct(ok = False, error = excluded.error, srcs = [])
     listed = None
     if target.sources != None:
-        listed = []
-        for entry in target.sources:
-            bad = _swiftpm_check_entry(identity, target.name, entry, "`sources:`")
-            if bad:
-                return struct(ok = False, error = bad, srcs = [])
-            full = rel_dir + "/" + entry
-            if full in files or full in dirs:
-                listed.append(full)
+        narrowed = _swiftpm_keep_existing(identity, target.name, "`sources:`", target.sources, rel_dir, struct(files = files, dirs = dirs))
+        if not narrowed.ok:
+            return struct(ok = False, error = narrowed.error, srcs = [])
+        listed = narrowed.kept
     srcs = []
     for full in files.keys():
-        if _swiftpm_is_under(full, excluded):
+        if _swiftpm_is_under(full, excluded.kept):
             continue
         if listed != None and not _swiftpm_is_under(full, listed):
             continue
-        rel = full[len(rel_dir) + 1:]
-        if _swiftpm_under_docc(rel):
-            continue
-        basename = full[full.rfind("/") + 1:]
-        if basename.endswith(".swift"):
+        decided = _swiftpm_classify_source(identity, target.name, full, full[len(rel_dir) + 1:])
+        if not decided.ok:
+            return struct(ok = False, error = decided.error, srcs = [])
+        if decided.keep:
             srcs.append(full)
-        elif swiftpm_is_code_file(basename):
-            return struct(ok = False, error = _swiftpm_repo_fail(identity, "target {target} holds a C-family source, header or module map with no Bazel translation ({path})".format(target = repr(target.name), path = repr(full))), srcs = [])
     if not srcs:
         return struct(ok = False, error = _swiftpm_repo_fail(identity, "target {target} reaches zero Swift files".format(target = repr(target.name))), srcs = [])
     return struct(ok = True, error = "", srcs = sorted(srcs))
