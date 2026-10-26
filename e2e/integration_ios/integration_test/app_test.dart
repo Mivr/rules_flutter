@@ -38,7 +38,7 @@ void main() {
     await tester.pumpWidget(const CounterApp());
 
     // The rule-assigned `ios_bundle_id` default for this target.
-    const expectedBundleId = 'com.example.integration-ios.app-test';
+    const expectedBundleId = 'com.example.app.app-test.h1715444662';
     for (var i = 0; i < 10; i++) {
       await tester.pump(const Duration(milliseconds: 100));
       if (find.text(expectedBundleId).evaluate().isNotEmpty) {
