@@ -1,7 +1,7 @@
 """Unit tests for the `Package.swift` manifest parser."""
 
 load("@bazel_skylib//lib:unittest.bzl", "asserts", "unittest")
-load("//flutter/private:swiftpm_manifest.bzl", "parse_swiftpm_package")
+load("//flutter/private:swiftpm_manifest.bzl", "parse_swiftpm_package", "parse_swiftpm_plugin_package")
 
 _BIGINT = """// swift-tools-version:6.0
 //
@@ -213,9 +213,22 @@ def _parses_a_plugin_template_manifest_test_impl(ctx):
     asserts.equals(env, [], parsed.model.pkg_deps)
     return unittest.end(env)
 
+def _plugin_parser_skips_target_settings_test_impl(ctx):
+    env = unittest.begin(ctx)
+    manifest = "// swift-tools-version: 5.9\nimport PackageDescription\nlet package = Package(name: \"P\", products: [.library(name: \"P\", targets: [\"P\"])], dependencies: [.package(url: \"https://example.com/Dep.git\", exact: \"1.0.0\")], targets: [.target(name: \"P\", dependencies: [.product(name: \"D\", package: \"Dep\")], resources: [.process(\"PrivacyInfo.xcprivacy\")], swiftSettings: [.define(\"FOO\")], cSettings: [.define(\"BAR\")], cxxSettings: [.define(\"BAZ\")], linkerSettings: [.linkedLibrary(\"z\")], plugins: [.plugin(name: \"Pl\", package: \"Dep\")])])\n"
+    strict = parse_swiftpm_package("plugin", manifest)
+    asserts.true(env, not strict.ok)
+    asserts.true(env, "no Bazel translation" in strict.error)
+    lenient = parse_swiftpm_plugin_package("plugin", manifest)
+    asserts.true(env, lenient.ok)
+    asserts.equals(env, 1, len(lenient.model.targets[0].deps))
+    asserts.equals(env, "D", lenient.model.targets[0].deps[0].name)
+    return unittest.end(env)
+
 _parses_the_bigint_manifest_test = unittest.make(_parses_the_bigint_manifest_test_impl)
 _parses_every_supported_shape_test = unittest.make(_parses_every_supported_shape_test_impl)
 _parses_a_plugin_template_manifest_test = unittest.make(_parses_a_plugin_template_manifest_test_impl)
+_plugin_parser_skips_target_settings_test = unittest.make(_plugin_parser_skips_target_settings_test_impl)
 _refusal_names_identity_file_and_line_test = unittest.make(_refusal_names_identity_file_and_line_test_impl)
 _tools_line_refusals_test = unittest.make(_tools_line_refusals_test_impl)
 _statement_refusals_test = unittest.make(_statement_refusals_test_impl)
@@ -227,6 +240,7 @@ def swiftpm_manifest_test_suite(name):
         _parses_the_bigint_manifest_test,
         _parses_every_supported_shape_test,
         _parses_a_plugin_template_manifest_test,
+        _plugin_parser_skips_target_settings_test,
         _parses_condition_arguments_test,
         _condition_refusals_test,
         _refusal_names_identity_file_and_line_test,

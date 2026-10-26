@@ -448,7 +448,7 @@ def _swiftpm_apply_target_deps(identity, kwarg, acc):
         acc["deps"].append(dep.dep)
     return struct(ok = True, error = "")
 
-def _swiftpm_apply_target_kwarg(identity, kind, kwarg, acc):
+def _swiftpm_apply_target_kwarg(identity, kind, kwarg, acc, lenient):
     """Fold one `.target(...)` keyword argument into the accumulator.
 
     Args:
@@ -456,6 +456,11 @@ def _swiftpm_apply_target_kwarg(identity, kind, kwarg, acc):
         kind: The target head (`target`).
         kwarg: The parsed keyword argument.
         acc: The accumulator dict (mutated in place).
+        lenient: When True, skip target settings with no Bazel
+            translation (`resources`, `swiftSettings`, ...) instead of
+            refusing them. The pub plugin spoke reads only the
+            `.package(...)` declarations and the plugin target's
+            `dependencies`, so such settings never change its output.
 
     Returns:
         `struct(ok, error)`.
@@ -474,12 +479,14 @@ def _swiftpm_apply_target_kwarg(identity, kind, kwarg, acc):
             return struct(ok = False, error = _swiftpm_fail(identity, kwarg.line, listed.detail))
         acc[key] = listed.items
     elif key in _SWIFTPM_REFUSED_TARGET_KEYS:
+        if lenient:
+            return struct(ok = True, error = "")
         return struct(ok = False, error = _swiftpm_fail(identity, kwarg.line, _swiftpm_target_kwarg_error(acc["name"] if acc["name"] else kind, key)))
     else:
         return struct(ok = False, error = _swiftpm_fail(identity, kwarg.line, "unknown `.{kind}(...)` argument `{key}`".format(kind = kind, key = key)))
     return struct(ok = True, error = "")
 
-def _swiftpm_parse_target_kwargs(identity, kind, args, line):
+def _swiftpm_parse_target_kwargs(identity, kind, args, line, lenient):
     """Parse a regular `.target(...)` call.
 
     Args:
@@ -487,6 +494,7 @@ def _swiftpm_parse_target_kwargs(identity, kind, args, line):
         kind: The target head (`target`).
         args: The tokens between the call's parens.
         line: The call's line.
+        lenient: When True, skip untranslatable target settings.
 
     Returns:
         `struct(ok, error, target)`: `target` holds `kind`, `name`,
@@ -498,19 +506,20 @@ def _swiftpm_parse_target_kwargs(identity, kind, args, line):
         return struct(ok = False, error = _swiftpm_fail(identity, line, kwargs.detail), target = None)
     acc = {"name": "", "deps": [], "path": "", "exclude": [], "sources": None}
     for kwarg in kwargs.kwargs:
-        applied = _swiftpm_apply_target_kwarg(identity, kind, kwarg, acc)
+        applied = _swiftpm_apply_target_kwarg(identity, kind, kwarg, acc, lenient)
         if not applied.ok:
             return struct(ok = False, error = applied.error, target = None)
     if not acc["name"]:
         return struct(ok = False, error = _swiftpm_fail(identity, line, "a `.{kind}(...)` target without a `name:`".format(kind = kind)), target = None)
     return struct(ok = True, error = "", target = struct(kind = kind, name = acc["name"], deps = acc["deps"], path = acc["path"], exclude = acc["exclude"], sources = acc["sources"], line = line))
 
-def _swiftpm_parse_target_element(identity, element):
+def _swiftpm_parse_target_element(identity, element, lenient):
     """Parse one `targets` array element of any target kind.
 
     Args:
         identity: The SwiftPM package identity.
         element: The element's token list.
+        lenient: When True, skip untranslatable target settings.
 
     Returns:
         `struct(ok, error, target)`: regular `.target` declarations keep
@@ -525,7 +534,7 @@ def _swiftpm_parse_target_element(identity, element):
     if not head.ok or not head.dotted:
         return struct(ok = False, error = _swiftpm_fail(identity, line, "expected a target (`.target(...)`, `.testTarget(...)` or a special target kind)"), target = None)
     if head.name == "target":
-        return _swiftpm_parse_target_kwargs(identity, head.name, head.args, line)
+        return _swiftpm_parse_target_kwargs(identity, head.name, head.args, line, lenient)
     if head.name in ["testTarget", "executableTarget", "binaryTarget", "systemLibrary", "plugin", "macro"]:
         named = _swiftpm_parse_special_target_name(identity, head.name, head.args, line)
         if not named.ok:
@@ -652,7 +661,7 @@ def _swiftpm_parse_package_dep_element(identity, element):
         return struct(ok = False, error = _swiftpm_fail(identity, line, "a `.package(...)` dependency needs one of `url:`, `id:` or `path:`"), dep = None)
     return struct(ok = True, error = "", dep = struct(name = fields.get("name", ""), ref = ref, ref_kind = ref_kind, line = line))
 
-def _swiftpm_apply_package_array(identity, kwarg, acc, key):
+def _swiftpm_apply_package_array(identity, kwarg, acc, key, lenient):
     """Fold a `products:`/`dependencies:`/`targets:` array into the model.
 
     Args:
@@ -660,6 +669,7 @@ def _swiftpm_apply_package_array(identity, kwarg, acc, key):
         kwarg: The parsed keyword argument.
         acc: The accumulator dict (mutated in place).
         key: Which array this is.
+        lenient: When True, skip untranslatable target settings.
 
     Returns:
         `struct(ok, error)`.
@@ -680,19 +690,20 @@ def _swiftpm_apply_package_array(identity, kwarg, acc, key):
                 return struct(ok = False, error = parsed.error)
             acc["pkg_deps"].append(parsed.dep)
         else:
-            parsed = _swiftpm_parse_target_element(identity, element)
+            parsed = _swiftpm_parse_target_element(identity, element, lenient)
             if not parsed.ok:
                 return struct(ok = False, error = parsed.error)
             acc["targets"].append(parsed.target)
     return struct(ok = True, error = "")
 
-def _swiftpm_apply_package_kwarg(identity, kwarg, acc):
+def _swiftpm_apply_package_kwarg(identity, kwarg, acc, lenient):
     """Fold one `Package(...)` keyword argument into the model.
 
     Args:
         identity: The SwiftPM package identity.
         kwarg: The parsed keyword argument.
         acc: The accumulator dict (mutated in place).
+        lenient: When True, skip untranslatable target settings.
 
     Returns:
         `struct(ok, error)`.
@@ -701,7 +712,7 @@ def _swiftpm_apply_package_kwarg(identity, kwarg, acc):
     if key == "name" or key == "platforms" or key == "cLanguageStandard" or key == "cxxLanguageStandard":
         return struct(ok = True, error = "")
     if key == "products" or key == "dependencies" or key == "targets":
-        return _swiftpm_apply_package_array(identity, kwarg, acc, key)
+        return _swiftpm_apply_package_array(identity, kwarg, acc, key, lenient)
     if key == "swiftLanguageVersions" or key == "swiftLanguageModes":
         parsed = _swiftpm_parse_modes(kwarg.value)
         if not parsed.ok:
@@ -710,13 +721,14 @@ def _swiftpm_apply_package_kwarg(identity, kwarg, acc):
         return struct(ok = True, error = "")
     return struct(ok = False, error = _swiftpm_fail(identity, kwarg.line, "unknown `Package(...)` argument `{key}`".format(key = key)))
 
-def _swiftpm_parse_package_kwargs(identity, args, line):
+def _swiftpm_parse_package_kwargs(identity, args, line, lenient):
     """Parse the `Package(...)` argument list into a model.
 
     Args:
         identity: The SwiftPM package identity.
         args: The tokens between the call's parens.
         line: The `let package` line.
+        lenient: When True, skip untranslatable target settings.
 
     Returns:
         `struct(ok, error, model)` without tools version or line info.
@@ -726,12 +738,12 @@ def _swiftpm_parse_package_kwargs(identity, args, line):
         return struct(ok = False, error = _swiftpm_fail(identity, line, kwargs.detail), model = None)
     acc = {"products": [], "targets": [], "pkg_deps": [], "modes": []}
     for kwarg in kwargs.kwargs:
-        applied = _swiftpm_apply_package_kwarg(identity, kwarg, acc)
+        applied = _swiftpm_apply_package_kwarg(identity, kwarg, acc, lenient)
         if not applied.ok:
             return struct(ok = False, error = applied.error, model = None)
     return struct(ok = True, error = "", model = struct(products = acc["products"], targets = acc["targets"], pkg_deps = acc["pkg_deps"], modes = acc["modes"]))
 
-def _swiftpm_parse_statement(identity, seg, acc):
+def _swiftpm_parse_statement(identity, seg, acc, lenient):
     """Fold one top-level statement into the parse accumulator.
 
     Args:
@@ -739,6 +751,7 @@ def _swiftpm_parse_statement(identity, seg, acc):
         seg: The statement's token list.
         acc: The accumulator struct (`has_package`, `products`,
             `targets`, `pkg_deps`, `modes`).
+        lenient: When True, skip untranslatable target settings.
 
     Returns:
         `struct(ok, error, acc)`.
@@ -755,7 +768,7 @@ def _swiftpm_parse_statement(identity, seg, acc):
         head = _swiftpm_call_head(seg[3:])
         if not head.ok or head.dotted or head.name != "Package":
             return struct(ok = False, error = _swiftpm_fail(identity, line, "`let package` must be one literal `Package(...)` call"), acc = acc)
-        parsed = _swiftpm_parse_package_kwargs(identity, head.args, line)
+        parsed = _swiftpm_parse_package_kwargs(identity, head.args, line, lenient)
         if not parsed.ok:
             return struct(ok = False, error = parsed.error, acc = acc)
         return struct(ok = True, error = "", acc = struct(
@@ -795,12 +808,14 @@ def _swiftpm_check_duplicates(identity, products, targets):
             seen_targets[target.name] = True
     return ""
 
-def parse_swiftpm_package(identity, text):
-    """Parse a `Package.swift` manifest into the translator's model.
+def _swiftpm_parse_text(identity, text, lenient):
+    """Parse a manifest, optionally skipping untranslatable target settings.
 
     Args:
         identity: The SwiftPM package identity, for messages.
         text: The manifest text.
+        lenient: When True, skip target settings with no Bazel
+            translation instead of refusing them.
 
     Returns:
         `struct(ok, error, model)`: `model` holds `tools_major`,
@@ -824,7 +839,7 @@ def parse_swiftpm_package(identity, text):
             return struct(ok = False, error = _swiftpm_fail(identity, tok.line, "string interpolation is not supported"), model = None)
     acc = struct(has_package = False, products = [], targets = [], pkg_deps = [], modes = [])
     for seg in _swiftpm_split_statements(lexed.tokens):
-        folded = _swiftpm_parse_statement(identity, seg, acc)
+        folded = _swiftpm_parse_statement(identity, seg, acc, lenient)
         if not folded.ok:
             return struct(ok = False, error = folded.error, model = None)
         acc = folded.acc
@@ -841,3 +856,42 @@ def parse_swiftpm_package(identity, text):
         pkg_deps = acc.pkg_deps,
         modes = acc.modes,
     ))
+
+def parse_swiftpm_package(identity, text):
+    """Parse a `Package.swift` manifest into the translator's model.
+
+    The strict entry point the hub's SwiftPM package spokes use:
+    every untranslatable target setting fails the fetch.
+
+    Args:
+        identity: The SwiftPM package identity, for messages.
+        text: The manifest text.
+
+    Returns:
+        `struct(ok, error, model)`: `model` holds `tools_major`,
+        `tools_minor`, `products`, `targets`, `pkg_deps` and `modes`.
+    """
+    return _swiftpm_parse_text(identity, text, False)
+
+def parse_swiftpm_plugin_package(identity, text):
+    """Parse a plugin's `Package.swift` for the pub spoke's product links.
+
+    The lenient entry point the pub plugin spoke uses: target settings
+    with no Bazel translation (`resources`, `swiftSettings`, ...) are
+    skipped, because the spoke keeps its own source, header and
+    privacy-manifest detection and reads only the manifest's
+    `.package(...)` declarations and the plugin target's `dependencies`
+    (with their `condition:`). Anything making the dependency list
+    itself unknowable (an unreadable `dependencies:` entry, a variable
+    or interpolation inside it, `#if`, an unreadable `.package(...)`)
+    still fails.
+
+    Args:
+        identity: The pub plugin name, for messages.
+        text: The manifest text.
+
+    Returns:
+        `struct(ok, error, model)`: `model` holds `tools_major`,
+        `tools_minor`, `products`, `targets`, `pkg_deps` and `modes`.
+    """
+    return _swiftpm_parse_text(identity, text, True)

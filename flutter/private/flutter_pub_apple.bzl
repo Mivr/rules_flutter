@@ -13,7 +13,7 @@ SwiftPM product links a plugin's `Package.swift` declares. Split out of
 
 load(":flutter_pub_walk.bzl", "PUB_WALK_BOUND", "has_files_under_walk")
 load(":starlark_literal.bzl", "starlark_string_literal")
-load(":swiftpm_manifest.bzl", "parse_swiftpm_package")
+load(":swiftpm_manifest.bzl", "parse_swiftpm_plugin_package")
 load(":swiftpm_resolved.bzl", "swiftpm_spoke_name")
 load(":swiftpm_translate.bzl", "swiftpm_locate_package_dep")
 
@@ -543,6 +543,28 @@ def _apple_is_flutterframework_skip(dep, pkg_deps):
             return decl.ref_kind == "path"
     return False
 
+def _apple_keeps_product_dep(dep, pkg_deps, platform):
+    """True when this platform links one plugin-target product dep.
+
+    Drops the products the spoke never links: a `condition:` excluding
+    this platform and the template's `FlutterFramework` path product
+    (the rules link Flutter themselves). Same-package dependencies
+    never reach here: only `.product` references are passed in.
+
+    Args:
+        dep: The parsed product dependency reference.
+        pkg_deps: The manifest's parsed `.package(...)` declarations.
+        platform: `"ios"` or `"macos"`, for condition filtering.
+
+    Returns:
+        True when the spoke links this product on this platform.
+    """
+    if getattr(dep, "condition", None) != None and platform not in dep.condition.platforms:
+        return False
+    if _apple_is_flutterframework_skip(dep, pkg_deps):
+        return False
+    return True
+
 def _apple_swiftpm_dep_labels(plugin_name, manifest_dir, dep, pkg_deps, platform, pins):
     """Resolve one plugin-target product dep to spoke labels.
 
@@ -561,9 +583,7 @@ def _apple_swiftpm_dep_labels(plugin_name, manifest_dir, dep, pkg_deps, platform
         `struct(ok, error, labels)`: `labels` holds zero (skipped) or one
         `@<hub>__swiftpm-<identity>//:<product>` label.
     """
-    if getattr(dep, "condition", None) != None and platform not in dep.condition.platforms:
-        return struct(ok = True, error = "", labels = [])
-    if _apple_is_flutterframework_skip(dep, pkg_deps):
+    if not _apple_keeps_product_dep(dep, pkg_deps, platform):
         return struct(ok = True, error = "", labels = [])
     located = swiftpm_locate_package_dep(plugin_name, dep.package, pkg_deps)
     if not located.ok:
@@ -582,14 +602,21 @@ def _apple_swiftpm_dep_labels(plugin_name, manifest_dir, dep, pkg_deps, platform
 def select_apple_swiftpm_deps(plugin_name, manifest_text, manifest_dir, srcs_dirs, platform, pins):
     """Read one plugin manifest's SwiftPM product links for one platform.
 
-    Parses the manifest with step 1's parser, finds the plugin target the
-    spoke builds, and resolves its `.product(name:package:)` dependencies
-    (matched as in step 1) to the hub's pinned repositories, keeping only
-    the products whose `condition:` allows this platform. Same-package
-    dependencies and the template's `FlutterFramework` path product are
-    skipped. A manifest the parser cannot read fails only when its text
-    declares a package dependency at all (contains `.package(`): a
-    dependency-free manifest keeps building exactly as today.
+    Parses the manifest with the lenient plugin entry point (target
+    settings with no Bazel translation, such as `resources` or
+    `swiftSettings`, are skipped: the spoke keeps its own source,
+    header and privacy-manifest detection), finds the plugin target the
+    spoke builds, and resolves its `.product(name:package:)`
+    dependencies (matched as in step 1) to the hub's pinned
+    repositories, keeping only the products whose `condition:` allows
+    this platform. Same-package dependencies and the template's
+    `FlutterFramework` path product are skipped, so a manifest from
+    Flutter's plugin template links nothing. A manifest the parser
+    cannot read fails only when its text declares a package dependency
+    at all (contains `.package(`): a dependency-free manifest keeps
+    building exactly as today. The resolved-file refusal applies only
+    when a product this platform actually links needs a SwiftPM
+    package, and names that package.
 
     Args:
         plugin_name: The pub plugin name, for messages.
@@ -604,7 +631,7 @@ def select_apple_swiftpm_deps(plugin_name, manifest_text, manifest_dir, srcs_dir
         `struct(ok, error, labels)`: the spoke dep labels in manifest
         order, deduplicated.
     """
-    parsed = parse_swiftpm_package(plugin_name, manifest_text)
+    parsed = parse_swiftpm_plugin_package(plugin_name, manifest_text)
     if not parsed.ok:
         if ".package(" not in manifest_text:
             return struct(ok = True, error = "", labels = [])
@@ -612,7 +639,7 @@ def select_apple_swiftpm_deps(plugin_name, manifest_text, manifest_dir, srcs_dir
     target = _apple_swiftpm_plugin_target(parsed.model, manifest_dir, srcs_dirs)
     if target == None:
         return struct(ok = True, error = "", labels = [])
-    products = [dep for dep in target.deps if dep.kind == "product"]
+    products = [dep for dep in target.deps if dep.kind == "product" and _apple_keeps_product_dep(dep, parsed.model.pkg_deps, platform)]
     if not products:
         return struct(ok = True, error = "", labels = [])
     if not pins.resolved:

@@ -50,6 +50,49 @@ let package = Package(
 )
 """
 
+_TEMPLATE_MANIFEST = """// swift-tools-version: 5.9
+import PackageDescription
+
+let package = Package(
+    name: "spm_bigint_plugin",
+    platforms: [.iOS("12.0")],
+    products: [.library(name: "spm_bigint_plugin", targets: ["spm_bigint_plugin"])],
+    dependencies: [
+        .package(name: "FlutterFramework", path: "../FlutterFramework"),
+    ],
+    targets: [
+        .target(
+            name: "spm_bigint_plugin",
+            dependencies: [.product(name: "FlutterFramework", package: "FlutterFramework")],
+            resources: [.process("PrivacyInfo.xcprivacy")],
+            swiftSettings: [.define("SPM_TEST")],
+        ),
+    ],
+)
+"""
+
+_TEMPLATE_BIGINT_MANIFEST = """// swift-tools-version: 5.9
+import PackageDescription
+
+let package = Package(
+    name: "spm_bigint_plugin",
+    platforms: [.iOS("12.0")],
+    products: [.library(name: "spm_bigint_plugin", targets: ["spm_bigint_plugin"])],
+    dependencies: [
+        .package(name: "FlutterFramework", path: "../FlutterFramework"),
+        .package(url: "https://github.com/attaswift/BigInt.git", exact: "6.0.1"),
+    ],
+    targets: [
+        .target(
+            name: "spm_bigint_plugin",
+            dependencies: [.product(name: "FlutterFramework", package: "FlutterFramework"), .product(name: "BigInt", package: "BigInt")],
+            resources: [.process("Resources")],
+            swiftSettings: [.define("SPM_TEST")],
+        ),
+    ],
+)
+"""
+
 def _pins(pinned = ["bigint"], unpinned = {}, resolved = "//:Package.resolved"):
     return struct(resolved = resolved, pinned = pinned, unpinned = unpinned, hub = "deps")
 
@@ -103,6 +146,106 @@ def _flutterframework_product_is_skipped_test_impl(ctx):
     )
     asserts.true(env, selected.ok)
     asserts.equals(env, ["@deps__swiftpm-bigint//:BigInt"], selected.labels)
+    return unittest.end(env)
+
+def _template_manifest_builds_without_link_test_impl(ctx):
+    env = unittest.begin(ctx)
+    with_resolved = select_apple_swiftpm_deps(
+        "spm_bigint_plugin",
+        _TEMPLATE_MANIFEST,
+        "ios/spm_bigint_plugin",
+        ["ios/spm_bigint_plugin/Sources/spm_bigint_plugin"],
+        "ios",
+        _pins(),
+    )
+    asserts.true(env, with_resolved.ok)
+    asserts.equals(env, [], with_resolved.labels)
+    without_resolved = select_apple_swiftpm_deps(
+        "spm_bigint_plugin",
+        _TEMPLATE_MANIFEST,
+        "ios/spm_bigint_plugin",
+        ["ios/spm_bigint_plugin/Sources/spm_bigint_plugin"],
+        "ios",
+        _pins(resolved = ""),
+    )
+    asserts.true(env, without_resolved.ok)
+    asserts.equals(env, [], without_resolved.labels)
+    return unittest.end(env)
+
+def _template_settings_leave_links_unchanged_test_impl(ctx):
+    env = unittest.begin(ctx)
+    with_settings = select_apple_swiftpm_deps(
+        "spm_bigint_plugin",
+        _TEMPLATE_BIGINT_MANIFEST,
+        "ios/spm_bigint_plugin",
+        ["ios/spm_bigint_plugin/Sources/spm_bigint_plugin"],
+        "ios",
+        _pins(),
+    )
+    asserts.true(env, with_settings.ok)
+    asserts.equals(env, ["@deps__swiftpm-bigint//:BigInt"], with_settings.labels)
+    without_settings = select_apple_swiftpm_deps(
+        "spm_bigint_plugin",
+        _FRAMEWORK_MANIFEST,
+        "ios/spm_bigint_plugin",
+        ["ios/spm_bigint_plugin/Sources/spm_bigint_plugin"],
+        "ios",
+        _pins(),
+    )
+    asserts.true(env, without_settings.ok)
+    asserts.equals(env, with_settings.labels, without_settings.labels)
+    return unittest.end(env)
+
+def _flutterframework_first_names_real_package_test_impl(ctx):
+    env = unittest.begin(ctx)
+    selected = select_apple_swiftpm_deps(
+        "spm_bigint_plugin",
+        _TEMPLATE_BIGINT_MANIFEST,
+        "ios/spm_bigint_plugin",
+        ["ios/spm_bigint_plugin/Sources/spm_bigint_plugin"],
+        "ios",
+        _pins(resolved = ""),
+    )
+    asserts.true(env, not selected.ok)
+    asserts.true(env, "spm_bigint_plugin" in selected.error)
+    asserts.true(env, "ios/spm_bigint_plugin/Package.swift" in selected.error)
+    asserts.true(env, "BigInt" in selected.error)
+    asserts.true(env, "FlutterFramework" not in selected.error)
+    return unittest.end(env)
+
+def _conditional_dependencies_still_refused_test_impl(ctx):
+    env = unittest.begin(ctx)
+    conditional = _BIGINT_MANIFEST.replace(
+        'dependencies: [.package(url: "https://github.com/attaswift/BigInt.git", exact: "6.0.1")]',
+        'dependencies: [\n        #if os(iOS)\n        .package(url: "https://github.com/attaswift/BigInt.git", exact: "6.0.1"),\n        #endif\n    ]',
+    )
+    selected = select_apple_swiftpm_deps(
+        "spm_bigint_plugin",
+        conditional,
+        "ios/spm_bigint_plugin",
+        ["ios/spm_bigint_plugin/Sources/spm_bigint_plugin"],
+        "ios",
+        _pins(),
+    )
+    asserts.true(env, not selected.ok)
+    asserts.true(env, "spm_bigint_plugin" in selected.error)
+    asserts.true(env, "Package.swift" in selected.error)
+
+    variable = _BIGINT_MANIFEST.replace(
+        'url: "https://github.com/attaswift/BigInt.git"',
+        "url: bigIntUrl",
+    )
+    selected = select_apple_swiftpm_deps(
+        "spm_bigint_plugin",
+        variable,
+        "ios/spm_bigint_plugin",
+        ["ios/spm_bigint_plugin/Sources/spm_bigint_plugin"],
+        "ios",
+        _pins(),
+    )
+    asserts.true(env, not selected.ok)
+    asserts.true(env, "spm_bigint_plugin" in selected.error)
+    asserts.true(env, "Package.swift" in selected.error)
     return unittest.end(env)
 
 def _undeclared_package_fails_test_impl(ctx):
@@ -266,6 +409,10 @@ def _deps_render_on_both_backends_test_impl(ctx):
 _products_resolve_to_pinned_labels_test = unittest.make(_products_resolve_to_pinned_labels_test_impl)
 _conditions_filter_per_platform_test = unittest.make(_conditions_filter_per_platform_test_impl)
 _flutterframework_product_is_skipped_test = unittest.make(_flutterframework_product_is_skipped_test_impl)
+_template_manifest_builds_without_link_test = unittest.make(_template_manifest_builds_without_link_test_impl)
+_template_settings_leave_links_unchanged_test = unittest.make(_template_settings_leave_links_unchanged_test_impl)
+_flutterframework_first_names_real_package_test = unittest.make(_flutterframework_first_names_real_package_test_impl)
+_conditional_dependencies_still_refused_test = unittest.make(_conditional_dependencies_still_refused_test_impl)
 _undeclared_package_fails_test = unittest.make(_undeclared_package_fails_test_impl)
 _path_package_fails_test = unittest.make(_path_package_fails_test_impl)
 _unpinned_package_fails_test = unittest.make(_unpinned_package_fails_test_impl)
@@ -282,6 +429,10 @@ def flutter_pub_apple_test_suite(name):
         _products_resolve_to_pinned_labels_test,
         _conditions_filter_per_platform_test,
         _flutterframework_product_is_skipped_test,
+        _template_manifest_builds_without_link_test,
+        _template_settings_leave_links_unchanged_test,
+        _flutterframework_first_names_real_package_test,
+        _conditional_dependencies_still_refused_test,
         _undeclared_package_fails_test,
         _path_package_fails_test,
         _unpinned_package_fails_test,
