@@ -31,6 +31,8 @@ load("//flutter/private:flutter_pub_path.bzl", "foreign_lock_path_error", "is_ab
 load("//flutter/private:flutter_sdk_package.bzl", "flutter_sdk_package")
 load("//flutter/private:pub_lock_sdks.bzl", "hosted_package_sha256", "parse_lock_sdk_constraints", "version_below_lower_bound")
 load("//flutter/private:rules_dart_floor.bzl", "check_rules_dart_floor")
+load("//flutter/private:swiftpm_package.bzl", "swiftpm_package")
+load("//flutter/private:swiftpm_resolved.bzl", "check_swiftpm_config_present", "check_swiftpm_dicts", "classify_swiftpm_pin", "read_swiftpm_pins", "swiftpm_spoke_name")
 load("//flutter/private:toolchain_selection.bzl", "select_toolchain_source")
 load("//flutter/private:versions.bzl", "custom_engine_base_url", "custom_source_url", "flutter_source_sha256", "merge_custom_versions", "unknown_version_message")
 load("//flutter/private:xtool_darwin_sdk_repo.bzl", "resolve_darwin_sdk_from_modules")
@@ -169,6 +171,37 @@ _flutter_pub = tag_class(
                   "must not fail the spoke fetch as unknown. This is a " +
                   "declaration you make deliberately; it is never a default.",
             default = [],
+        ),
+        "swift_package_resolved": attr.label(
+            doc = "Label of the Xcode `Package.resolved` file pinning the " +
+                  "app's SwiftPM dependencies " +
+                  "(`ios/.../xcshareddata/swiftpm/Package.resolved`). Each " +
+                  "pin becomes a `<hub>__swiftpm-<identity>` spoke holding " +
+                  "the pinned sources and a BUILD file translated from its " +
+                  "`Package.swift`. Unset (the default) means no SwiftPM " +
+                  "spokes. See the README section \"iOS native (SwiftPM) " +
+                  "dependencies\".",
+            allow_single_file = True,
+        ),
+        "swift_package_sha256": attr.string_dict(
+            doc = "SwiftPM package identity -> SHA-256 hex digest of the " +
+                  "pinned source archive (the `github.com/<owner>/<repo>/archive/" +
+                  "`revision`.tar.gz` the pin resolves to). Every pin needs " +
+                  "an entry: a pin without one fails its spoke fetch before " +
+                  "any download, and computing the digest with " +
+                  "`sha256sum` over the downloaded archive is the fix.",
+            default = {},
+        ),
+        "swift_package_build_files": attr.string_dict(
+            doc = "SwiftPM package identity -> absolute Bazel label " +
+                  "(`@...` or `//...`) of a hand-written BUILD file " +
+                  "replacing the generated one for that package. The " +
+                  "override skips the manifest translation only: the " +
+                  "pinned archive still downloads, so the identity keeps " +
+                  "needing its `swift_package_sha256` entry. It is the " +
+                  "escape hatch for packages whose manifest uses " +
+                  "constructs with no Bazel translation. Empty by default.",
+            default = {},
         ),
     },
     doc = "Resolves a `pubspec.lock` into one spoke repository per package " +
@@ -592,6 +625,59 @@ def _create_sdk_spokes(hub_name, sdk_flutter, all_package_names, toolchain_info,
             source_strip_prefix = source_strip_prefix(flutter_version, sdk_source_url),
         )
 
+def _create_swiftpm_spokes(hub_name, pub_tag, module_ctx):
+    """Creates one `swiftpm_package` spoke per SwiftPM pin.
+
+    Reads the `swift_package_resolved` file, validates the sha256 and
+    build-file dicts against it, and creates a
+    `<hub>__swiftpm-<identity>` repo per pin. Unpinned entries still get a
+    repo: it fails at fetch time (before any download) naming the
+    `swift_package_sha256` fix. A `swift_package_build_files` entry swaps
+    the generated BUILD file for a hand-written one.
+
+    Args:
+        hub_name: The hub repository name.
+        pub_tag: The `flutter.pub` tag.
+        module_ctx: The module context, for reading the resolved file.
+    """
+    config_error = check_swiftpm_config_present(
+        str(pub_tag.swift_package_resolved) if pub_tag.swift_package_resolved else None,
+        pub_tag.swift_package_sha256,
+        pub_tag.swift_package_build_files,
+    )
+    if config_error:
+        fail(config_error)
+    if not pub_tag.swift_package_resolved:
+        return
+    resolved_label = str(pub_tag.swift_package_resolved)
+    pins = read_swiftpm_pins(module_ctx.read(pub_tag.swift_package_resolved), resolved_label)
+    if not pins.ok:
+        fail(pins.error)
+    dicts_error = check_swiftpm_dicts(
+        pub_tag.swift_package_sha256,
+        pub_tag.swift_package_build_files,
+        [pin.identity for pin in pins.pins],
+        resolved_label,
+    )
+    if dicts_error:
+        fail(dicts_error)
+    pin_identities = sorted([pin.identity for pin in pins.pins])
+    for pin in pins.pins:
+        classified = classify_swiftpm_pin(pin, pub_tag.swift_package_sha256, hub_name, resolved_label)
+        build_file = pub_tag.swift_package_build_files.get(pin.identity, "")
+        if build_file and not (build_file.startswith("@") or build_file.startswith("//")):
+            fail("flutter.pub(" + repr(hub_name) + "): swift_package_build_files[" + repr(pin.identity) + "] must be an absolute label (`@...` or `//...`), got " + repr(build_file) + ".")
+        swiftpm_package(
+            name = swiftpm_spoke_name(hub_name, pin.identity),
+            identity = pin.identity,
+            hub_name = hub_name,
+            pin_identities = pin_identities,
+            archive_url = classified.url,
+            sha256 = classified.sha256,
+            unpinned_error = classified.error,
+            build_file = build_file,
+        )
+
 def _register_pub_hub(module_ctx, pub_tag, selected_info, merged, user_overlay_roots):
     """Resolves one `flutter.pub` tag into spoke repos plus the hub repo."""
     hub_name = pub_tag.name
@@ -613,6 +699,7 @@ def _register_pub_hub(module_ctx, pub_tag, selected_info, merged, user_overlay_r
     _create_hosted_spokes(hub_name, hosted, all_package_names, user_overlay_roots, pub_tag, ignore_hooks)
     _create_path_spokes(hub_name, path_pkgs, all_package_names, user_overlay_roots, ignore_hooks)
     _create_sdk_spokes(hub_name, sdk_flutter, all_package_names, toolchain_info, merged, toolchain_info.version)
+    _create_swiftpm_spokes(hub_name, pub_tag, module_ctx)
 
     # Create hub repo with aliases for all packages plus the
     # Android plugin-libs aggregator. flutter.pub() always uses

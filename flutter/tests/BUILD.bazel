@@ -54,6 +54,9 @@ load(":rules_dart_floor_test.bzl", "rules_dart_floor_test_suite")
 load(":shader_compile_test.bzl", "shader_compile_test_suite")
 load(":shader_keys_test.bzl", "shader_keys_test_suite")
 load(":starlark_literal_test.bzl", "starlark_literal_test_suite")
+load(":swiftpm_manifest_test.bzl", "swiftpm_manifest_test_suite")
+load(":swiftpm_resolved_test.bzl", "swiftpm_resolved_test_suite")
+load(":swiftpm_translate_test.bzl", "swiftpm_translate_test_suite")
 load(":toolchain_selection_test.bzl", "toolchain_selection_test_suite")
 load(":toolchain_test.bzl", "toolchain_test_suite")
 load(":toolchains_repo_test.bzl", "toolchains_repo_test_suite")
@@ -265,6 +268,12 @@ build_test(
 validation_test_suite(name = "validation_test")
 
 starlark_literal_test_suite(name = "starlark_literal_test")
+
+swiftpm_manifest_test_suite(name = "swiftpm_manifest_test")
+
+swiftpm_resolved_test_suite(name = "swiftpm_resolved_test")
+
+swiftpm_translate_test_suite(name = "swiftpm_translate_test")
 
 gen_l10n_test_suite(name = "gen_l10n_test")
 

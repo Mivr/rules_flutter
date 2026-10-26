@@ -183,6 +183,24 @@ jobs:
           xml="$(bazel info bazel-testlogs)/app_test_red/test.xml"
           grep -F '<testsuite name="integration_test/red_test.dart"' "$xml"
           grep -F '<failure' "$xml"
+      # The SwiftPM red path behind the pinned download: `deps_unpinned`
+      # uses the same lock and `Package.resolved` but no
+      # `swift_package_sha256`, so querying its BigInt spoke fails before
+      # any download. The output goes to a file: the step requires a
+      # non-zero exit, then greps the refusal text the README documents.
+      # No `continue-on-error`: a passing query fails the job.
+      - name: SwiftPM unpinned red path (e2e/integration_ios)
+        if: matrix.workspace == 'integration_ios'
+        working-directory: e2e/integration_ios
+        run: |
+          status=0
+          bazel query @deps_unpinned__swiftpm-bigint//:all >swiftpm_unpinned_output.log 2>&1 || status=$?
+          cat swiftpm_unpinned_output.log
+          if [ "$status" -eq 0 ]; then
+            echo "expected the unpinned SwiftPM query to fail, but it passed"
+            exit 1
+          fi
+          grep -F 'has no `swift_package_sha256["bigint"]` entry' swiftpm_unpinned_output.log
       - name: Report cache sizes
         if: always()
         run: du -sh ~/.cache/bazel-disk ~/.cache/bazel-repo 2>/dev/null || true
