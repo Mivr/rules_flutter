@@ -140,12 +140,49 @@ def _bad_pin_shapes_test_impl(ctx):
     pins = read_swiftpm_pins('{"pins": [{"identity": "BigInt", "kind": "remoteSourceControl", "location": "https://github.com/a/b", "state": {"revision": "' + _BIGINT_REV + '"}}], "version": 3}', "//ios:Package.resolved")
     asserts.true(env, not pins.ok)
     asserts.true(env, "identity" in pins.error)
-    pins = read_swiftpm_pins('{"pins": [{"identity": "bigint", "kind": "remoteSourceControl", "state": {"revision": "' + _BIGINT_REV + '"}}], "version": 3}', "//ios:Package.resolved")
-    asserts.true(env, not pins.ok)
-    asserts.true(env, "location" in pins.error)
-    pins = read_swiftpm_pins('{"pins": [{"identity": "bigint", "kind": "remoteSourceControl", "location": "https://github.com/a/b", "state": {}}], "version": 3}', "//ios:Package.resolved")
-    asserts.true(env, not pins.ok)
-    asserts.true(env, "revision" in pins.error)
+    return unittest.end(env)
+
+def _unpinned_shapes_read_ok_test_impl(ctx):
+    env = unittest.begin(ctx)
+    # Missing or malformed kind, location and revision read fine: every pin
+    # gets its repository, and the spoke fetch refuses it before any download.
+    cases = [
+        '{"identity": "bigint", "location": "https://github.com/a/b", "state": {"revision": "' + _BIGINT_REV + '"}}',
+        '{"identity": "bigint", "kind": "remoteSourceControl", "state": {"revision": "' + _BIGINT_REV + '"}}',
+        '{"identity": "bigint", "kind": "remoteSourceControl", "location": "https://github.com/a/b", "state": {}}',
+        '{"identity": "bigint", "kind": "remoteSourceControl", "location": "https://github.com/a/b", "state": {"revision": "main"}}',
+        '{"identity": "bigint", "kind": "remoteSourceControl", "location": "https://github.com/a/b", "state": {"revision": null}}',
+        '{"identity": "bigint", "kind": "remoteSourceControl", "location": "https://github.com/a/b"}',
+        '{"identity": "bigint", "kind": 7, "location": "https://github.com/a/b", "state": {"revision": "' + _BIGINT_REV + '"}}',
+    ]
+    for raw in cases:
+        pins = read_swiftpm_pins('{"pins": [' + raw + '], "version": 3}', "//ios:Package.resolved")
+        asserts.true(env, pins.ok)
+        asserts.equals(env, 1, len(pins.pins))
+        asserts.equals(env, "bigint", pins.pins[0].identity)
+    return unittest.end(env)
+
+def _unpinned_shapes_fail_at_fetch_test_impl(ctx):
+    env = unittest.begin(ctx)
+    no_kind = read_swiftpm_pins('{"pins": [{"identity": "bigint", "location": "https://github.com/a/b", "state": {"revision": "' + _BIGINT_REV + '"}}], "version": 3}', "//ios:Package.resolved").pins[0]
+    classified = classify_swiftpm_pin(no_kind, {"bigint": _BIGINT_SHA}, "deps", "//ios:Package.resolved")
+    asserts.true(env, not classified.ok)
+    asserts.true(env, "remoteSourceControl" in classified.error)
+    asserts.true(env, "deps__swiftpm-bigint" in classified.error)
+    asserts.true(env, "//ios:Package.resolved" in classified.error)
+    no_location = read_swiftpm_pins('{"pins": [{"identity": "bigint", "kind": "remoteSourceControl", "state": {"revision": "' + _BIGINT_REV + '"}}], "version": 3}', "//ios:Package.resolved").pins[0]
+    classified = classify_swiftpm_pin(no_location, {"bigint": _BIGINT_SHA}, "deps", "//ios:Package.resolved")
+    asserts.true(env, not classified.ok)
+    asserts.true(env, "not a GitHub repository" in classified.error)
+    no_revision = read_swiftpm_pins('{"pins": [{"identity": "bigint", "kind": "remoteSourceControl", "location": "https://github.com/a/b", "state": {}}], "version": 3}', "//ios:Package.resolved").pins[0]
+    classified = classify_swiftpm_pin(no_revision, {"bigint": _BIGINT_SHA}, "deps", "//ios:Package.resolved")
+    asserts.true(env, not classified.ok)
+    asserts.true(env, "revision" in classified.error)
+    asserts.true(env, "//ios:Package.resolved" in classified.error)
+    bad_revision = struct(identity = "bigint", kind = "remoteSourceControl", location = "https://github.com/a/b", revision = "main")
+    classified = classify_swiftpm_pin(bad_revision, {"bigint": _BIGINT_SHA}, "deps", "//ios:Package.resolved")
+    asserts.true(env, not classified.ok)
+    asserts.true(env, "revision" in classified.error)
     return unittest.end(env)
 
 def _classify_pinned_test_impl(ctx):
@@ -199,11 +236,12 @@ def _config_checks_test_impl(ctx):
     asserts.true(env, "swift_package_sha256" in check_swiftpm_config_present(None, {"a": "b"}, {}))
     asserts.true(env, "swift_package_build_files" in check_swiftpm_config_present(None, {}, {"a": "b"}))
     asserts.equals(env, "", check_swiftpm_config_present("//ios:Package.resolved", {}, {}))
+    # `swift_package_build_files` values are Labels Bazel resolved in the
+    # module that wrote the tag, so only the keys are checked here.
     asserts.equals(env, "", check_swiftpm_dicts({"bigint": _BIGINT_SHA}, {"bigint": "//:BigInt.BUILD"}, ["bigint"], "//ios:Package.resolved"))
     asserts.true(env, "pinned nowhere" in check_swiftpm_dicts({"other": _BIGINT_SHA}, {}, ["bigint"], "//ios:Package.resolved"))
     asserts.true(env, "pinned nowhere" in check_swiftpm_dicts({}, {"other": "//:B"}, ["bigint"], "//ios:Package.resolved"))
     asserts.true(env, "64 lowercase hex" in check_swiftpm_dicts({"bigint": "xyz"}, {}, ["bigint"], "//ios:Package.resolved"))
-    asserts.true(env, "absolute label" in check_swiftpm_dicts({}, {"bigint": "relative/BUILD"}, ["bigint"], "//ios:Package.resolved"))
     return unittest.end(env)
 
 _validators_test = unittest.make(_validators_test_impl)
@@ -212,6 +250,8 @@ _reads_v2_and_v3_test = unittest.make(_reads_v2_and_v3_test_impl)
 _refuses_v1_test = unittest.make(_refuses_v1_test_impl)
 _bad_json_names_the_file_test = unittest.make(_bad_json_names_the_file_test_impl)
 _bad_pin_shapes_test = unittest.make(_bad_pin_shapes_test_impl)
+_unpinned_shapes_read_ok_test = unittest.make(_unpinned_shapes_read_ok_test_impl)
+_unpinned_shapes_fail_at_fetch_test = unittest.make(_unpinned_shapes_fail_at_fetch_test_impl)
 _classify_pinned_test = unittest.make(_classify_pinned_test_impl)
 _classify_unpinned_names_the_fix_test = unittest.make(_classify_unpinned_names_the_fix_test_impl)
 _classify_bad_revision_and_location_test = unittest.make(_classify_bad_revision_and_location_test_impl)
@@ -227,6 +267,8 @@ def swiftpm_resolved_test_suite(name):
         _refuses_v1_test,
         _bad_json_names_the_file_test,
         _bad_pin_shapes_test,
+        _unpinned_shapes_read_ok_test,
+        _unpinned_shapes_fail_at_fetch_test,
         _classify_pinned_test,
         _classify_unpinned_names_the_fix_test,
         _classify_bad_revision_and_location_test,

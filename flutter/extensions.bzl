@@ -192,15 +192,19 @@ _flutter_pub = tag_class(
                   "`sha256sum` over the downloaded archive is the fix.",
             default = {},
         ),
-        "swift_package_build_files": attr.string_dict(
-            doc = "SwiftPM package identity -> absolute Bazel label " +
-                  "(`@...` or `//...`) of a hand-written BUILD file " +
-                  "replacing the generated one for that package. The " +
-                  "override skips the manifest translation only: the " +
-                  "pinned archive still downloads, so the identity keeps " +
-                  "needing its `swift_package_sha256` entry. It is the " +
-                  "escape hatch for packages whose manifest uses " +
-                  "constructs with no Bazel translation. Empty by default.",
+        "swift_package_build_files": attr.string_keyed_label_dict(
+            doc = "SwiftPM package identity -> label of a hand-written BUILD " +
+                  "file replacing the generated one for that package. Each " +
+                  "label resolves in the module that writes this tag (like " +
+                  "`lock` and `swift_package_resolved`), so `//third_party:" +
+                  "pkg.BUILD` in the root MODULE.bazel names the root " +
+                  "module's file. The override skips the manifest " +
+                  "translation only: the pinned archive still downloads, so " +
+                  "the identity keeps needing its `swift_package_sha256` " +
+                  "entry. It is the escape hatch for packages whose " +
+                  "manifest uses constructs with no Bazel translation. " +
+                  "Empty by default.",
+            allow_files = True,
             default = {},
         ),
     },
@@ -664,9 +668,6 @@ def _create_swiftpm_spokes(hub_name, pub_tag, module_ctx):
     pin_identities = sorted([pin.identity for pin in pins.pins])
     for pin in pins.pins:
         classified = classify_swiftpm_pin(pin, pub_tag.swift_package_sha256, hub_name, resolved_label)
-        build_file = pub_tag.swift_package_build_files.get(pin.identity, "")
-        if build_file and not (build_file.startswith("@") or build_file.startswith("//")):
-            fail("flutter.pub(" + repr(hub_name) + "): swift_package_build_files[" + repr(pin.identity) + "] must be an absolute label (`@...` or `//...`), got " + repr(build_file) + ".")
         swiftpm_package(
             name = swiftpm_spoke_name(hub_name, pin.identity),
             identity = pin.identity,
@@ -675,7 +676,7 @@ def _create_swiftpm_spokes(hub_name, pub_tag, module_ctx):
             archive_url = classified.url,
             sha256 = classified.sha256,
             unpinned_error = classified.error,
-            build_file = build_file,
+            build_file = pub_tag.swift_package_build_files.get(pin.identity),
         )
 
 def _register_pub_hub(module_ctx, pub_tag, selected_info, merged, user_overlay_roots):

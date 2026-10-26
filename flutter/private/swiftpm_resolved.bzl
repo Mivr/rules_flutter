@@ -532,7 +532,9 @@ def read_swiftpm_pins(content, label):
 
     Returns:
         `struct(ok, error, pins)`: `pins` lists `struct(identity, kind,
-        location, revision)`.
+        location, revision)`. A pin that is not pinned keeps its (possibly
+        empty) kind, location and revision: every pin gets a repository, and
+        the spoke fetch refuses it before any download.
     """
     bad = _swiftpm_check_json(content, label)
     if bad:
@@ -559,12 +561,16 @@ def read_swiftpm_pins(content, label):
         revision = state.get("revision", "") if type(state) == "dict" else ""
         if type(identity) != "string" or not is_swiftpm_identity(identity):
             return struct(ok = False, error = "{label} holds a pin with an unusable identity ({identity}): identities are lowercase letters, digits, `.`, `_` and `-`.".format(label = label, identity = repr(identity)), pins = [])
+        # A pin that is not pinned (wrong kind, non-GitHub location, missing
+        # or malformed revision, missing sha256) still gets its repository:
+        # the spoke fetch fails before any download, naming the fix. Only the
+        # identity must parse here — without it no spoke can be named.
         if type(kind) != "string":
-            return struct(ok = False, error = "{label} holds a pin {pin} with no `kind`.".format(label = label, pin = repr(identity)), pins = [])
-        if type(location) != "string" or not location:
-            return struct(ok = False, error = "{label} holds a pin {pin} with no `location`.".format(label = label, pin = repr(identity)), pins = [])
-        if type(revision) != "string" or not revision:
-            return struct(ok = False, error = "{label} holds a pin {pin} with no `state.revision`.".format(label = label, pin = repr(identity)), pins = [])
+            kind = ""
+        if type(location) != "string":
+            location = ""
+        if type(revision) != "string":
+            revision = ""
         pins.append(struct(identity = identity, kind = kind, location = location, revision = revision))
     return struct(ok = True, error = "", pins = pins)
 
@@ -648,13 +654,14 @@ def check_swiftpm_dicts(sha256_by_identity, build_files, pin_identities, resolve
 
     Args:
         sha256_by_identity: The `swift_package_sha256` dict.
-        build_files: The `swift_package_build_files` dict.
+        build_files: The `swift_package_build_files` label dict (keys are
+            identities; values are Labels Bazel resolved in the module that
+            wrote the tag, so no label-shape check remains).
         pin_identities: Every identity pinned in the resolved file.
         resolved_label: The resolved label, for messages.
 
     Returns:
-        "" or the first failure: unknown dict keys, malformed digests,
-        or non-absolute override labels.
+        "" or the first failure: unknown dict keys or malformed digests.
     """
     pinned = {identity: True for identity in pin_identities}
     for identity in sorted(sha256_by_identity.keys()):
@@ -665,9 +672,4 @@ def check_swiftpm_dicts(sha256_by_identity, build_files, pin_identities, resolve
     for identity in sorted(build_files.keys()):
         if identity not in pinned:
             return "flutter.pub: `swift_package_build_files[{identity}]` names a package pinned nowhere in {label}.".format(identity = repr(identity), label = resolved_label)
-        target = build_files[identity]
-        if "\n" in target or "\\" in target or "\"" in target:
-            return "flutter.pub: `swift_package_build_files[{identity}]` is not a Bazel label.".format(identity = repr(identity))
-        if not target.startswith("@") and not target.startswith("//"):
-            return "flutter.pub: `swift_package_build_files[{identity}]` must be an absolute label (`@...` or `//...`), got {target}.".format(identity = repr(identity), target = repr(target))
     return ""

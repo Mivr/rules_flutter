@@ -236,7 +236,7 @@ def _swiftpm_package_impl(ctx):
         fail(ctx.attr.unpinned_error)
     pinned_download_and_extract(ctx, url = ctx.attr.archive_url, sha256 = ctx.attr.sha256)
     if ctx.attr.build_file:
-        ctx.file("BUILD.bazel", ctx.read(ctx.path(Label(ctx.attr.build_file))))
+        ctx.file("BUILD.bazel", ctx.read(ctx.path(ctx.attr.build_file)))
         return
     root = _swiftpm_package_root(ctx, identity)
     if not root.ok:
@@ -267,7 +267,7 @@ swiftpm_package = repository_rule(
     doc = "One fetched SwiftPM spoke: the pinned GitHub archive plus a BUILD file translated from its plain `Package.swift`, or the `swift_package_build_files` override.",
     attrs = {
         "archive_url": attr.string(doc = "The pinned archive URL to download (always downloaded, even with a build_file override)."),
-        "build_file": attr.string(default = "", doc = "Absolute label string of a hand-written BUILD file replacing the generated one; skips the manifest translation only, not the download."),
+        "build_file": attr.label(allow_single_file = True, doc = "Label of a hand-written BUILD file replacing the generated one; Bazel resolves it in the module that wrote the flutter.pub tag. None (the default) translates the manifest. Skips the translation only, not the download."),
         "hub_name": attr.string(mandatory = True, doc = "The flutter.pub hub name, for cross-package dep labels."),
         "identity": attr.string(mandatory = True, doc = "The SwiftPM package identity (the spoke suffix)."),
         "pin_identities": attr.string_list(doc = "Every identity pinned in Package.resolved, for dependency resolution."),
