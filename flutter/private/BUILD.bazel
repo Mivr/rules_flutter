@@ -716,3 +716,8 @@ exports_files(
         "//flutter:__subpackages__",
     ],
 )
+
+exports_files(
+    ["engine_artifacts.BUILD.tpl"],
+    visibility = ["//visibility:public"],
+)
