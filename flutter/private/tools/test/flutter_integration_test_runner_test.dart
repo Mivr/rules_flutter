@@ -14,7 +14,7 @@ import '../test_support.dart' as support;
 class _FakePlatformLauncher implements runner.PlatformLauncher {
   _FakePlatformLauncher({required this.onStart});
 
-  final Future<Process> Function(int harnessPort) onStart;
+  final Future<Process> Function(runner.HarnessBinding binding) onStart;
   bool disposed = false;
 
   @override
@@ -27,7 +27,8 @@ class _FakePlatformLauncher implements runner.PlatformLauncher {
   String get suiteCompiler => 'dart2js';
 
   @override
-  Future<Process> startTarget(int harnessPort) => onStart(harnessPort);
+  Future<Process> startTarget(runner.HarnessBinding binding) =>
+      onStart(binding);
 
   @override
   Future<void> handleHttpRequest(HttpRequest request) async {
@@ -305,10 +306,8 @@ void main() {
         WebSocket? clientWs;
         try {
           final launcher = _FakePlatformLauncher(
-            onStart: (port) async {
-              clientWs = await WebSocket.connect(
-                'ws://127.0.0.1:$port${runner.integrationWebSocketPath}',
-              );
+            onStart: (binding) async {
+              clientWs = await WebSocket.connect(binding.url);
               clientWs!.listen((raw) {
                 final list = json.decode(raw as String) as List<dynamic>;
                 final id = (list[0] as num).toInt();
@@ -380,10 +379,8 @@ void main() {
         WebSocket? clientWs;
         try {
           final launcher = _FakePlatformLauncher(
-            onStart: (port) async {
-              clientWs = await WebSocket.connect(
-                'ws://127.0.0.1:$port${runner.integrationWebSocketPath}',
-              );
+            onStart: (binding) async {
+              clientWs = await WebSocket.connect(binding.url);
               clientWs!.listen((raw) {
                 final list = json.decode(raw as String) as List<dynamic>;
                 final id = (list[0] as num).toInt();
@@ -467,10 +464,8 @@ void main() {
         WebSocket? clientWs;
         try {
           final launcher = _FakePlatformLauncher(
-            onStart: (port) async {
-              clientWs = await WebSocket.connect(
-                'ws://127.0.0.1:$port${runner.integrationWebSocketPath}',
-              );
+            onStart: (binding) async {
+              clientWs = await WebSocket.connect(binding.url);
               clientWs!.listen((raw) {
                 final list = json.decode(raw as String) as List<dynamic>;
                 final id = (list[0] as num).toInt();
@@ -513,6 +508,115 @@ void main() {
         }
       },
     );
+
+    test(
+      'refuses a tokenless and a wrong-token dial-back, adopts the legitimate one',
+      () async {
+        const token = '0123456789abcdef0123456789abcdef';
+        final tmpDir = Directory.systemTemp.createTempSync(
+          'integration_token_',
+        );
+        final xmlFile = File('${tmpDir.path}/test.xml');
+        WebSocket? clientWs;
+        try {
+          final launcher = _FakePlatformLauncher(
+            onStart: (binding) async {
+              final base =
+                  'ws://127.0.0.1:${binding.port}${runner.integrationWebSocketPath}';
+              // Another run's app (no token, then a wrong one) dials first:
+              // both upgrades are refused and never adopted.
+              await expectLater(
+                WebSocket.connect(base),
+                throwsA(isA<WebSocketException>()),
+              );
+              await expectLater(
+                WebSocket.connect('$base?token=wrong-token'),
+                throwsA(isA<WebSocketException>()),
+              );
+              clientWs = await WebSocket.connect(binding.url);
+              clientWs!.listen((raw) {
+                final list = json.decode(raw as String) as List<dynamic>;
+                final id = (list[0] as num).toInt();
+                final payload = list[1] as Map<String, dynamic>;
+                if (id == 0 && payload['type'] == 'initial') {
+                  clientWs!.add(
+                    json.encode([
+                      0,
+                      {
+                        'type': 'success',
+                        'root': {
+                          'type': 'group',
+                          'name': '',
+                          'entries': [
+                            {
+                              'type': 'test',
+                              'name': 'token run reports only its app',
+                              'channel': 2,
+                              'metadata': {'skip': false},
+                            },
+                          ],
+                        },
+                      },
+                    ]),
+                  );
+                } else if (id == 3 && payload['command'] == 'run') {
+                  final replyChannel = (payload['channel'] as num).toInt() + 1;
+                  clientWs!.add(
+                    json.encode([
+                      replyChannel,
+                      {'type': 'complete'},
+                    ]),
+                  );
+                }
+              });
+              return Process.start(Platform.resolvedExecutable, ['--version']);
+            },
+          );
+
+          final code = await runner.runIntegrationSuite(
+            runner.IntegrationSuiteRun(
+              launcher: launcher,
+              testPath: 'integration_test/app_test.dart',
+              selection: TestSelection(),
+              xmlOutput: xmlFile.path,
+              bazelTestTimeout: '60',
+            ),
+            harnessToken: token,
+          );
+          expect(code, 0);
+          expect(
+            xmlFile.readAsStringSync(),
+            contains('token run reports only its app'),
+          );
+        } finally {
+          await clientWs?.close();
+          if (tmpDir.existsSync()) {
+            tmpDir.deleteSync(recursive: true);
+          }
+        }
+      },
+    );
+
+    test('mints a random 128-bit token per run by default', () {
+      final first = runner.generateHarnessToken();
+      final second = runner.generateHarnessToken();
+      expect(first, hasLength(32));
+      expect(RegExp('^[0-9a-f]{32}\$').hasMatch(first), isTrue);
+      expect(second, isNot(first));
+      final binding = runner.HarnessBinding(port: 4242, token: first);
+      expect(
+        binding.url,
+        'ws://127.0.0.1:4242'
+        '${runner.integrationWebSocketPath}?token=$first',
+      );
+      expect(runner.harnessTokenOf(Uri.parse(binding.url)), first);
+      expect(
+        runner.harnessTokenOf(
+          Uri.parse('ws://127.0.0.1:4242${runner.integrationWebSocketPath}'),
+        ),
+        isNull,
+      );
+    });
   });
 
   group('integrationRunFailed', () {

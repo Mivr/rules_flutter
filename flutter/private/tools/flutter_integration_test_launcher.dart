@@ -7,11 +7,56 @@ library;
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math';
 
 import 'test_support.dart';
 
 /// WebSocket upgrade path the in-app bootstrap dials on the harness server.
+///
+/// The run's token travels as its `token` query parameter; a dial-back
+/// without this run's token is refused and never adopted.
 const String integrationWebSocketPath = '/__flutter_integration_ws__';
+
+/// Query parameter carrying the run's token on the harness WebSocket URL.
+const String integrationTokenQueryParam = 'token';
+
+/// Everything a platform launcher needs to reach this run's harness: the
+/// server's loopback port plus the run's random token.
+///
+/// The values travel together so launchers never take a bare port (whose URL
+/// would miss the token) or a bare token (whose server they could not find).
+class HarnessBinding {
+  const HarnessBinding({required this.port, required this.token});
+
+  /// The harness HTTP/WebSocket server's loopback port.
+  final int port;
+
+  /// The run's random token; only a dial-back carrying it is adopted.
+  final String token;
+
+  /// The WebSocket URL the target dials, carrying [token] for the harness.
+  String get url =>
+      'ws://127.0.0.1:$port$integrationWebSocketPath?$integrationTokenQueryParam=$token';
+}
+
+/// Generates a random per-run harness token: 128 bits from [Random.secure],
+/// hex-encoded.
+///
+/// Public, like [decodeDeclaredEnv], because the runner and its tests reach
+/// it directly: the runner mints one token per run, and the tests mint fixed
+/// ones for deterministic dial-backs.
+String generateHarnessToken() {
+  final random = Random.secure();
+  final bytes = List<int>.generate(16, (_) => random.nextInt(256));
+  return bytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
+}
+
+/// The harness token carried by [uri]'s query, or null when absent.
+///
+/// Public, like [decodeDeclaredEnv], because the runner's dial-back check and
+/// its tests reach it directly.
+String? harnessTokenOf(Uri uri) =>
+    uri.queryParameters[integrationTokenQueryParam];
 
 /// Decodes the JSON-encoded declared environment forwarded by
 /// `flutter_integration_test.bzl` (`FLUTTER_INTEGRATION_TEST_DECLARED_ENV`).
@@ -56,7 +101,7 @@ resolveForwarding(EnvForwarding forwarding) {
 /// Abstraction over how a target platform starts the compiled app and serves
 /// any platform-specific HTTP endpoints on the harness [HttpServer].
 abstract class PlatformLauncher {
-  /// Platform identifier (`'web'`, `'linux'`, `'android'`).
+  /// Platform identifier (`'web'`, `'linux'`, `'android'`, `'ios'`).
   String get platformName;
 
   /// Runtime identifier for `package:test_api` `SuitePlatform`.
@@ -68,8 +113,9 @@ abstract class PlatformLauncher {
   /// Handles a non-WebSocket HTTP request arriving on the harness server.
   Future<void> handleHttpRequest(HttpRequest request);
 
-  /// Starts the target process against a harness listening on [harnessPort].
-  Future<Process> startTarget(int harnessPort);
+  /// Starts the target process against [binding]'s harness, dialling back
+  /// over its token-carrying URL.
+  Future<Process> startTarget(HarnessBinding binding);
 
   /// Cleans up any temporary directories created for the target process.
   Future<void> dispose();

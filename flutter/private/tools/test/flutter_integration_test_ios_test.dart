@@ -155,6 +155,14 @@ Future<Process> captureLaunch(
   return Process.start(Platform.resolvedExecutable, ['--version']);
 }
 
+/// The per-run token the launcher tests dial with: every harness URL below
+/// carries it, pinning that launchers forward the run's token.
+const _testToken = '0123456789abcdef0123456789abcdef';
+
+/// The binding the launcher tests start their target with.
+launcher.HarnessBinding _testBinding() =>
+    const launcher.HarnessBinding(port: 4242, token: _testToken);
+
 /// Boots through [spawner] against an `.app` directory input (no extraction),
 /// capturing the launch.
 Future<({ios.IosPlatformLauncher launcher, Map<String, Object?> launch})>
@@ -172,7 +180,7 @@ bootAppDir(
     launchProcess: (exe, args, env) => captureLaunch(launch, exe, args, env),
     bounds: bounds ?? const ios.IosLauncherBounds(),
   );
-  await underTest.startTarget(4242);
+  await underTest.startTarget(_testBinding());
   return (launcher: underTest, launch: launch);
 }
 
@@ -274,7 +282,7 @@ void main() {
               captureLaunch(launch, exe, args, env),
         );
 
-        await underTest.startTarget(4242);
+        await underTest.startTarget(_testBinding());
 
         // The calls happen in order: listing, boot, bootstatus, install of the
         // extracted app, get_app_container resolving the data container, then
@@ -313,11 +321,11 @@ void main() {
         expect(
           File('$containerDir/tmp/flutter_integration_test_harness_url')
               .readAsStringSync(),
-          'ws://127.0.0.1:4242${launcher.integrationWebSocketPath}',
+          'ws://127.0.0.1:4242${launcher.integrationWebSocketPath}?token=$_testToken',
         );
         expect(launch['environment'], {
           'SIMCTL_CHILD_FLUTTER_INTEGRATION_TEST_HARNESS_URL':
-              'ws://127.0.0.1:4242${launcher.integrationWebSocketPath}',
+              'ws://127.0.0.1:4242${launcher.integrationWebSocketPath}?token=$_testToken',
         });
 
         await underTest.dispose();
@@ -374,7 +382,7 @@ void main() {
           },
         );
 
-        await underTest.startTarget(4242);
+        await underTest.startTarget(_testBinding());
 
         expect(
           fileExistedAtLaunch,
@@ -384,7 +392,7 @@ void main() {
         expect(
           File('$containerDir/tmp/flutter_integration_test_harness_url')
               .readAsStringSync(),
-          'ws://127.0.0.1:4242${launcher.integrationWebSocketPath}',
+          'ws://127.0.0.1:4242${launcher.integrationWebSocketPath}?token=$_testToken',
         );
         final installIndex = spawner.started.indexWhere(
           (s) => s.startsWith('xcrun simctl install '),
@@ -425,7 +433,7 @@ void main() {
         );
 
         await expectLater(
-          underTest.startTarget(4242),
+          underTest.startTarget(_testBinding()),
           throwsA(
             isA<StateError>().having(
               (e) => e.message,
@@ -468,7 +476,7 @@ void main() {
         );
 
         await expectLater(
-          underTest.startTarget(4242),
+          underTest.startTarget(_testBinding()),
           throwsA(
             isA<StateError>().having(
               (e) => e.message,
@@ -528,7 +536,7 @@ void main() {
         );
 
         await expectLater(
-          underTest.startTarget(4242),
+          underTest.startTarget(_testBinding()),
           throwsA(
             isA<StateError>().having(
               (e) => e.message,
@@ -574,7 +582,7 @@ void main() {
         );
 
         await expectLater(
-          underTest.startTarget(4242),
+          underTest.startTarget(_testBinding()),
           throwsA(
             isA<StateError>().having(
               (e) => e.message,
@@ -610,7 +618,7 @@ void main() {
       );
 
       await expectLater(
-        underTest.startTarget(4242),
+        underTest.startTarget(_testBinding()),
         throwsA(
           isA<StateError>().having(
             (e) => e.message,
@@ -651,7 +659,7 @@ void main() {
       );
 
       await expectLater(
-        underTest.startTarget(4242),
+        underTest.startTarget(_testBinding()),
         throwsA(
           isA<StateError>().having(
             (e) => e.message,
@@ -684,7 +692,7 @@ void main() {
       );
 
       await expectLater(
-        underTest.startTarget(4242),
+        underTest.startTarget(_testBinding()),
         throwsA(
           isA<StateError>().having(
             (e) => e.message,
@@ -722,7 +730,7 @@ void main() {
       );
 
       await expectLater(
-        underTest.startTarget(4242),
+        underTest.startTarget(_testBinding()),
         throwsA(
           isA<StateError>().having(
             (e) => e.message,
@@ -754,7 +762,7 @@ void main() {
           const CannedSimctl();
 
       await expectLater(
-        underTest.startTarget(4242),
+        underTest.startTarget(_testBinding()),
         throwsA(
           isA<StateError>().having(
             (e) => e.message,

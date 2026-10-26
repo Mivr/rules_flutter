@@ -289,11 +289,11 @@ class IosPlatformLauncher implements PlatformLauncher {
   String get suiteCompiler => 'kernel';
 
   @override
-  Future<Process> startTarget(int harnessPort) async {
+  Future<Process> startTarget(HarnessBinding binding) async {
     final udid = await _bootDevice();
     final appDir = _resolveAppDir();
     await _installApp(udid, appDir);
-    final harnessUrl = 'ws://127.0.0.1:$harnessPort$integrationWebSocketPath';
+    final harnessUrl = binding.url;
     await _writeHarnessUrlFile(udid, harnessUrl);
     return _launchApp(udid, harnessUrl);
   }

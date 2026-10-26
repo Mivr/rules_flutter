@@ -495,8 +495,10 @@ class AndroidPlatformLauncher implements PlatformLauncher {
 
   /// Launches the app's `FlutterActivity` with the harness URL as its
   /// entrypoint args. Returns the harness URL the app dials.
-  Future<String> _startFlutterActivity(String serial, int harnessPort) async {
-    final harnessUrl = 'ws://127.0.0.1:$harnessPort$integrationWebSocketPath';
+  Future<String> _startFlutterActivity(
+    String serial,
+    String harnessUrl,
+  ) async {
     final startResult = await _runAdb(
       serial,
       <String>[
@@ -556,7 +558,7 @@ class AndroidPlatformLauncher implements PlatformLauncher {
   }
 
   @override
-  Future<Process> startTarget(int harnessPort) async {
+  Future<Process> startTarget(HarnessBinding binding) async {
     verifyKvmAvailable(kvmPath);
 
     if (!File(emulatorBinary).existsSync()) {
@@ -613,14 +615,14 @@ class AndroidPlatformLauncher implements PlatformLauncher {
     final bootDeadline = DateTime.now().add(bootTimeout);
     await _waitForEmulatorBoot(serial, emulatorLogs, bootDeadline);
 
-    await _forwardHarnessPorts(serial, harnessPort);
+    await _forwardHarnessPorts(serial, binding.port);
     await _installApk(serial);
     await _configureDeviceTimezone(serial);
 
     // Clear logcat buffers prior to launching the activity.
     await _runAdb(serial, const <String>['logcat', '-b', 'all', '-c']);
 
-    await _startFlutterActivity(serial, harnessPort);
+    await _startFlutterActivity(serial, binding.url);
     return _startLogcat(serial, runtimeEnv);
   }
 
