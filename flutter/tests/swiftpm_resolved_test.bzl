@@ -144,6 +144,7 @@ def _bad_pin_shapes_test_impl(ctx):
 
 def _unpinned_shapes_read_ok_test_impl(ctx):
     env = unittest.begin(ctx)
+
     # Missing or malformed kind, location and revision read fine: every pin
     # gets its repository, and the spoke fetch refuses it before any download.
     cases = [
@@ -236,6 +237,7 @@ def _config_checks_test_impl(ctx):
     asserts.true(env, "swift_package_sha256" in check_swiftpm_config_present(None, {"a": "b"}, {}))
     asserts.true(env, "swift_package_build_files" in check_swiftpm_config_present(None, {}, {"a": "b"}))
     asserts.equals(env, "", check_swiftpm_config_present("//ios:Package.resolved", {}, {}))
+
     # `swift_package_build_files` values are Labels Bazel resolved in the
     # module that wrote the tag, so only the keys are checked here.
     asserts.equals(env, "", check_swiftpm_dicts({"bigint": _BIGINT_SHA}, {"bigint": "//:BigInt.BUILD"}, ["bigint"], "//ios:Package.resolved"))

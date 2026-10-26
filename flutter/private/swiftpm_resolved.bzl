@@ -561,6 +561,7 @@ def read_swiftpm_pins(content, label):
         revision = state.get("revision", "") if type(state) == "dict" else ""
         if type(identity) != "string" or not is_swiftpm_identity(identity):
             return struct(ok = False, error = "{label} holds a pin with an unusable identity ({identity}): identities are lowercase letters, digits, `.`, `_` and `-`.".format(label = label, identity = repr(identity)), pins = [])
+
         # A pin that is not pinned (wrong kind, non-GitHub location, missing
         # or malformed revision, missing sha256) still gets its repository:
         # the spoke fetch fails before any download, naming the fix. Only the
