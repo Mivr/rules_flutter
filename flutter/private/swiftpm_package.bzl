@@ -264,6 +264,7 @@ def _swiftpm_package_impl(ctx):
 
 swiftpm_package = repository_rule(
     implementation = _swiftpm_package_impl,
+    doc = "One fetched SwiftPM spoke: the pinned GitHub archive plus a BUILD file translated from its plain `Package.swift`, or the `swift_package_build_files` override.",
     attrs = {
         "archive_url": attr.string(doc = "The pinned archive URL to download (always downloaded, even with a build_file override)."),
         "build_file": attr.string(default = "", doc = "Absolute label string of a hand-written BUILD file replacing the generated one; skips the manifest translation only, not the download."),

@@ -70,6 +70,68 @@ def swiftpm_spoke_name(hub_name, identity):
     """
     return hub_name + "__swiftpm-" + identity
 
+def _swiftpm_bad_location():
+    """The `swiftpm_github_parts` failure for a non-GitHub location.
+
+    Returns:
+        The failure struct with reason `"location"`.
+    """
+    return struct(ok = False, owner = "", repo = "", reason = "location")
+
+def _swiftpm_https_parts(rest):
+    """Split the host-and-path remainder of an `https://` location.
+
+    Args:
+        rest: The location past the `https://` scheme.
+
+    Returns:
+        `struct(ok, owner, repo, reason)`.
+    """
+    slash = rest.find("/")
+    if slash < 0:
+        return _swiftpm_bad_location()
+    if rest[:slash].lower() != "github.com":
+        return _swiftpm_bad_location()
+    path = rest[slash + 1:]
+    first = path.find("/")
+    if first < 0 or path.find("/", first + 1) >= 0:
+        return _swiftpm_bad_location()
+    owner = path[:first]
+    repo = path[first + 1:]
+    if repo.endswith(".git"):
+        repo = repo[:len(repo) - 4]
+    if not owner or not repo:
+        return _swiftpm_bad_location()
+    return struct(ok = True, owner = owner, repo = repo, reason = "")
+
+def _swiftpm_scp_parts(rest):
+    """Split the remainder of a `git@` scp-like location.
+
+    Args:
+        rest: The location past the `git@` prefix.
+
+    Returns:
+        `struct(ok, owner, repo, reason)`: reason `"ssh"` marks a
+        `git@github.com` location without the `.git` suffix.
+    """
+    colon = rest.find(":")
+    if colon < 0:
+        return _swiftpm_bad_location()
+    if rest[:colon].lower() != "github.com":
+        return _swiftpm_bad_location()
+    path = rest[colon + 1:]
+    if not path.endswith(".git"):
+        return struct(ok = False, owner = "", repo = "", reason = "ssh")
+    path = path[:len(path) - 4]
+    first = path.find("/")
+    if first < 0 or path.find("/", first + 1) >= 0:
+        return _swiftpm_bad_location()
+    owner = path[:first]
+    repo = path[first + 1:]
+    if not owner or not repo:
+        return _swiftpm_bad_location()
+    return struct(ok = True, owner = owner, repo = repo, reason = "")
+
 def swiftpm_github_parts(location):
     """Split a pin location into a GitHub owner/repo.
 
@@ -87,45 +149,53 @@ def swiftpm_github_parts(location):
         `"location"` (not a GitHub repository location at all).
     """
     if location[:8].lower() == "https://":
-        rest = location[len("https://"):]
-        slash = rest.find("/")
-        if slash < 0:
-            return struct(ok = False, owner = "", repo = "", reason = "location")
-        host = rest[:slash]
-        path = rest[slash + 1:]
-        if host.lower() != "github.com":
-            return struct(ok = False, owner = "", repo = "", reason = "location")
-        first = path.find("/")
-        if first < 0 or path.find("/", first + 1) >= 0:
-            return struct(ok = False, owner = "", repo = "", reason = "location")
-        owner = path[:first]
-        repo = path[first + 1:]
-        if repo.endswith(".git"):
-            repo = repo[:len(repo) - 4]
-        if not owner or not repo:
-            return struct(ok = False, owner = "", repo = "", reason = "location")
-        return struct(ok = True, owner = owner, repo = repo, reason = "")
+        return _swiftpm_https_parts(location[len("https://"):])
     if location.startswith("git@"):
-        rest = location[len("git@"):]
-        colon = rest.find(":")
-        if colon < 0:
-            return struct(ok = False, owner = "", repo = "", reason = "location")
-        host = rest[:colon]
-        path = rest[colon + 1:]
-        if host.lower() != "github.com":
-            return struct(ok = False, owner = "", repo = "", reason = "location")
-        if not path.endswith(".git"):
-            return struct(ok = False, owner = "", repo = "", reason = "ssh")
-        path = path[:len(path) - 4]
-        first = path.find("/")
-        if first < 0 or path.find("/", first + 1) >= 0:
-            return struct(ok = False, owner = "", repo = "", reason = "location")
-        owner = path[:first]
-        repo = path[first + 1:]
-        if not owner or not repo:
-            return struct(ok = False, owner = "", repo = "", reason = "location")
-        return struct(ok = True, owner = owner, repo = repo, reason = "")
-    return struct(ok = False, owner = "", repo = "", reason = "location")
+        return _swiftpm_scp_parts(location[len("git@"):])
+    return _swiftpm_bad_location()
+
+def _swiftpm_json_scan_gap(char):
+    """Whether one character is JSON whitespace outside strings.
+
+    Args:
+        char: The single character.
+
+    Returns:
+        Whether it is a space, tab, carriage return or newline.
+    """
+    return char == " " or char == "\t" or char == "\r" or char == "\n"
+
+def _swiftpm_json_scan_one(text, i, line):
+    """Scan the single token starting at one index.
+
+    Args:
+        text: The full text.
+        i: The index of the token's first character (never whitespace).
+        line: The line the token starts on.
+
+    Returns:
+        `struct(ok, detail, kind, next, line)`: `kind` is "" when the
+        character starts no token.
+    """
+    char = text[i]
+    if char == "{" or char == "}" or char == "[" or char == "]" or char == "," or char == ":":
+        return struct(ok = True, detail = "", kind = char, next = i + 1, line = line)
+    if char == "\"":
+        parsed = _swiftpm_json_string(text, i, line)
+        if not parsed.ok:
+            return struct(ok = False, detail = parsed.detail, kind = "", next = i, line = line)
+        return struct(ok = True, detail = "", kind = "str", next = parsed.next, line = parsed.line)
+    if char == "-" or ("0" <= char and char <= "9"):
+        parsed = _swiftpm_json_number(text, i)
+        if not parsed.ok:
+            return struct(ok = False, detail = parsed.detail, kind = "", next = i, line = line)
+        return struct(ok = True, detail = "", kind = "num", next = parsed.next, line = line)
+    if ("a" <= char and char <= "z") or ("A" <= char and char <= "Z"):
+        parsed = _swiftpm_json_literal(text, i)
+        if not parsed.ok:
+            return struct(ok = False, detail = parsed.detail, kind = "", next = i, line = line)
+        return struct(ok = True, detail = "", kind = "lit", next = parsed.next, line = line)
+    return struct(ok = False, detail = "unexpected character {char}".format(char = repr(char)), kind = "", next = i, line = line)
 
 def _swiftpm_json_tokenize(text):
     """Tokenize JSON text without decoding it.
@@ -144,37 +214,67 @@ def _swiftpm_json_tokenize(text):
     for _ in range(n + 1):
         if i >= n:
             break
-        char = text[i]
-        if char == "\n":
-            line += 1
+        if _swiftpm_json_scan_gap(text[i]):
+            if text[i] == "\n":
+                line += 1
             i += 1
-        elif char == " " or char == "\t" or char == "\r":
-            i += 1
-        elif char == "{" or char == "}" or char == "[" or char == "]" or char == "," or char == ":":
-            tokens.append(struct(kind = char, line = line))
-            i += 1
-        elif char == "\"":
-            parsed = _swiftpm_json_string(text, i, line)
-            if not parsed.ok:
-                return struct(ok = False, detail = parsed.detail, tokens = [])
-            tokens.append(struct(kind = "str", line = line))
-            i = parsed.next
-            line = parsed.line
-        elif char == "-" or ("0" <= char and char <= "9"):
-            parsed = _swiftpm_json_number(text, i)
-            if not parsed.ok:
-                return struct(ok = False, detail = parsed.detail, tokens = [])
-            tokens.append(struct(kind = "num", line = line))
-            i = parsed.next
-        elif ("a" <= char and char <= "z") or ("A" <= char and char <= "Z"):
-            parsed = _swiftpm_json_literal(text, i)
-            if not parsed.ok:
-                return struct(ok = False, detail = parsed.detail, tokens = [])
-            tokens.append(struct(kind = "lit", line = line))
-            i = parsed.next
-        else:
-            return struct(ok = False, detail = "unexpected character {char}".format(char = repr(char)), tokens = [])
+            continue
+        scanned = _swiftpm_json_scan_one(text, i, line)
+        if not scanned.ok:
+            return struct(ok = False, detail = scanned.detail, tokens = [])
+        tokens.append(struct(kind = scanned.kind, line = line))
+        i = scanned.next
+        line = scanned.line
     return struct(ok = True, detail = "", tokens = tokens)
+
+def _swiftpm_json_is_hex(char):
+    """Whether one character is an ASCII hex digit.
+
+    Args:
+        char: The single character.
+
+    Returns:
+        True for `0-9`, `a-f` and `A-F`.
+    """
+    return ("0" <= char and char <= "9") or ("a" <= char and char <= "f") or ("A" <= char and char <= "F")
+
+def _swiftpm_json_unicode(text, i, n):
+    """Skip the four hex digits of a `\\u` escape.
+
+    Args:
+        text: The full text.
+        i: The index of the `u`.
+        n: The text length.
+
+    Returns:
+        `struct(ok, detail, next)`: `next` is past the fourth digit.
+    """
+    for j in range(1, 5):
+        if i + j >= n:
+            return struct(ok = False, detail = "a bad `\\u` escape", next = i)
+        if not _swiftpm_json_is_hex(text[i + j]):
+            return struct(ok = False, detail = "a bad `\\u` escape", next = i)
+    return struct(ok = True, detail = "", next = i + 5)
+
+def _swiftpm_json_escape(text, i, n):
+    """Skip one backslash escape inside a JSON string.
+
+    Args:
+        text: The full text.
+        i: The index of the backslash.
+        n: The text length.
+
+    Returns:
+        `struct(ok, detail, next)`: `next` is past the escape.
+    """
+    if i + 1 >= n:
+        return struct(ok = False, detail = "an unterminated string", next = i)
+    esc = text[i + 1]
+    if esc == "u":
+        return _swiftpm_json_unicode(text, i + 1, n)
+    if esc == "\"" or esc == "\\" or esc == "/" or esc == "b" or esc == "f" or esc == "n" or esc == "r" or esc == "t":
+        return struct(ok = True, detail = "", next = i + 2)
+    return struct(ok = False, detail = "a bad escape {esc}".format(esc = repr("\\" + esc)), next = i + 1)
 
 def _swiftpm_json_string(text, start, line):
     """Skip one JSON string literal.
@@ -199,24 +299,32 @@ def _swiftpm_json_string(text, start, line):
         if char == "\n":
             return struct(ok = False, detail = "an unterminated string", next = i, line = line)
         if char == "\\":
-            i += 1
-            if i >= n:
-                return struct(ok = False, detail = "an unterminated string", next = i, line = line)
-            esc = text[i]
-            if esc == "u":
-                for j in range(1, 5):
-                    if i + j >= n:
-                        return struct(ok = False, detail = "a bad `\\u` escape", next = i, line = line)
-                    hex = text[i + j]
-                    if not (("0" <= hex and hex <= "9") or ("a" <= hex and hex <= "f") or ("A" <= hex and hex <= "F")):
-                        return struct(ok = False, detail = "a bad `\\u` escape", next = i, line = line)
-                i += 4
-            elif esc == "\"" or esc == "\\" or esc == "/" or esc == "b" or esc == "f" or esc == "n" or esc == "r" or esc == "t":
-                pass
-            else:
-                return struct(ok = False, detail = "a bad escape {esc}".format(esc = repr("\\" + esc)), next = i, line = line)
+            skipped = _swiftpm_json_escape(text, i, n)
+            if not skipped.ok:
+                return struct(ok = False, detail = skipped.detail, next = skipped.next, line = line)
+            i = skipped.next
+            continue
         i += 1
     return struct(ok = False, detail = "an unterminated string", next = i, line = line)
+
+def _swiftpm_json_digits(text, i, n):
+    """Skip one run of ASCII digits.
+
+    Args:
+        text: The full text.
+        i: The index the run starts at.
+        n: The text length.
+
+    Returns:
+        `struct(next, count)`: the index past the run and its length.
+    """
+    count = 0
+    for _ in range(n - i):
+        if i >= n or text[i] < "0" or text[i] > "9":
+            break
+        i += 1
+        count += 1
+    return struct(next = i, count = count)
 
 def _swiftpm_json_number(text, start):
     """Skip one JSON number literal.
@@ -237,34 +345,22 @@ def _swiftpm_json_number(text, start):
     if text[i] == "0":
         i += 1
     elif "1" <= text[i] and text[i] <= "9":
-        for _ in range(n - i):
-            if i >= n or text[i] < "0" or text[i] > "9":
-                break
-            i += 1
+        i = _swiftpm_json_digits(text, i, n).next
     else:
         return struct(ok = False, detail = "a bad number", next = i)
     if i < n and text[i] == ".":
-        i += 1
-        digits = 0
-        for _ in range(n - i):
-            if i >= n or text[i] < "0" or text[i] > "9":
-                break
-            i += 1
-            digits += 1
-        if digits == 0:
-            return struct(ok = False, detail = "a bad number", next = i)
+        frac = _swiftpm_json_digits(text, i + 1, n)
+        if frac.count == 0:
+            return struct(ok = False, detail = "a bad number", next = frac.next)
+        i = frac.next
     if i < n and (text[i] == "e" or text[i] == "E"):
         i += 1
         if i < n and (text[i] == "+" or text[i] == "-"):
             i += 1
-        digits = 0
-        for _ in range(n - i):
-            if i >= n or text[i] < "0" or text[i] > "9":
-                break
-            i += 1
-            digits += 1
-        if digits == 0:
-            return struct(ok = False, detail = "a bad number", next = i)
+        exp = _swiftpm_json_digits(text, i, n)
+        if exp.count == 0:
+            return struct(ok = False, detail = "a bad number", next = exp.next)
+        i = exp.next
     return struct(ok = True, detail = "", next = i)
 
 def _swiftpm_json_literal(text, start):
@@ -302,6 +398,77 @@ def _swiftpm_json_after_value(stack, counts):
     counts[len(counts) - 1] += 1
     return "sep"
 
+def _swiftpm_json_check_val(tok, stack, counts):
+    """Consume one token where a value is expected.
+
+    Args:
+        tok: The token.
+        stack: The open containers (`{`/`[`; mutated in place).
+        counts: The per-frame completed values (mutated in place).
+
+    Returns:
+        `struct(ok, detail, state)`: the next state.
+    """
+    if tok.kind == "str" or tok.kind == "num" or tok.kind == "lit":
+        return struct(ok = True, detail = "", state = _swiftpm_json_after_value(stack, counts))
+    if tok.kind == "{":
+        stack.append("{")
+        counts.append(0)
+        return struct(ok = True, detail = "", state = "key")
+    if tok.kind == "[":
+        stack.append("[")
+        counts.append(0)
+        return struct(ok = True, detail = "", state = "val")
+    if tok.kind == "]" and stack and stack[len(stack) - 1] == "[" and counts[len(counts) - 1] == 0:
+        stack.pop()
+        counts.pop()
+        return struct(ok = True, detail = "", state = _swiftpm_json_after_value(stack, counts))
+    return struct(ok = False, detail = "expected a value", state = "")
+
+def _swiftpm_json_check_key(tok, stack, counts):
+    """Consume one token where an object key is expected.
+
+    Args:
+        tok: The token.
+        stack: The open containers (mutated in place).
+        counts: The per-frame completed values (mutated in place).
+
+    Returns:
+        `struct(ok, detail, state)`: the next state.
+    """
+    if tok.kind == "str":
+        return struct(ok = True, detail = "", state = "colon")
+    if tok.kind == "}" and stack and stack[len(stack) - 1] == "{" and counts[len(counts) - 1] == 0:
+        stack.pop()
+        counts.pop()
+        return struct(ok = True, detail = "", state = _swiftpm_json_after_value(stack, counts))
+    return struct(ok = False, detail = "expected an object key", state = "")
+
+def _swiftpm_json_check_sep(tok, stack, counts):
+    """Consume one token where a separator or closing bracket is expected.
+
+    Args:
+        tok: The token.
+        stack: The open containers (mutated in place).
+        counts: The per-frame completed values (mutated in place).
+
+    Returns:
+        `struct(ok, detail, state)`: the next state.
+    """
+    if tok.kind == ",":
+        if stack[len(stack) - 1] == "{":
+            return struct(ok = True, detail = "", state = "key")
+        return struct(ok = True, detail = "", state = "val")
+    if tok.kind == "]" and stack[len(stack) - 1] == "[":
+        stack.pop()
+        counts.pop()
+        return struct(ok = True, detail = "", state = _swiftpm_json_after_value(stack, counts))
+    if tok.kind == "}" and stack[len(stack) - 1] == "{":
+        stack.pop()
+        counts.pop()
+        return struct(ok = True, detail = "", state = _swiftpm_json_after_value(stack, counts))
+    return struct(ok = False, detail = "expected a `,` or a closing bracket", state = "")
+
 def _swiftpm_json_check_tokens(tokens):
     """Check one token stream against the JSON value grammar.
 
@@ -319,54 +486,21 @@ def _swiftpm_json_check_tokens(tokens):
     state = "val"
     for tok in tokens:
         if state == "val":
-            if tok.kind == "str" or tok.kind == "num" or tok.kind == "lit":
-                state = _swiftpm_json_after_value(stack, counts)
-            elif tok.kind == "{":
-                stack.append("{")
-                counts.append(0)
-                state = "key"
-            elif tok.kind == "[":
-                stack.append("[")
-                counts.append(0)
-                state = "val"
-            elif tok.kind == "]" and stack and stack[len(stack) - 1] == "[" and counts[len(counts) - 1] == 0:
-                stack.pop()
-                counts.pop()
-                state = _swiftpm_json_after_value(stack, counts)
-            else:
-                return struct(ok = False, detail = "expected a value")
+            stepped = _swiftpm_json_check_val(tok, stack, counts)
         elif state == "key":
-            if tok.kind == "str":
-                state = "colon"
-            elif tok.kind == "}" and stack and stack[len(stack) - 1] == "{" and counts[len(counts) - 1] == 0:
-                stack.pop()
-                counts.pop()
-                state = _swiftpm_json_after_value(stack, counts)
-            else:
-                return struct(ok = False, detail = "expected an object key")
+            stepped = _swiftpm_json_check_key(tok, stack, counts)
         elif state == "colon":
             if tok.kind == ":":
-                state = "val"
+                stepped = struct(ok = True, detail = "", state = "val")
             else:
-                return struct(ok = False, detail = "expected a `:`")
+                stepped = struct(ok = False, detail = "expected a `:`", state = "")
         elif state == "sep":
-            if tok.kind == ",":
-                if stack[len(stack) - 1] == "{":
-                    state = "key"
-                else:
-                    state = "val"
-            elif tok.kind == "]" and stack[len(stack) - 1] == "[":
-                stack.pop()
-                counts.pop()
-                state = _swiftpm_json_after_value(stack, counts)
-            elif tok.kind == "}" and stack[len(stack) - 1] == "{":
-                stack.pop()
-                counts.pop()
-                state = _swiftpm_json_after_value(stack, counts)
-            else:
-                return struct(ok = False, detail = "expected a `,` or a closing bracket")
+            stepped = _swiftpm_json_check_sep(tok, stack, counts)
         else:
             return struct(ok = False, detail = "trailing content after the top-level value")
+        if not stepped.ok:
+            return struct(ok = False, detail = stepped.detail)
+        state = stepped.state
     if state == "end":
         return struct(ok = True, detail = "")
     return struct(ok = False, detail = "an incomplete document")

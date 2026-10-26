@@ -378,6 +378,59 @@ def _swiftpm_target_kwarg_error(target_name, key):
     """
     return "target {target} uses `{key}`, which has no Bazel translation".format(target = repr(target_name), key = key)
 
+def _swiftpm_apply_target_deps(identity, kwarg, acc):
+    """Fold a `.target(...)` `dependencies:` array into the accumulator.
+
+    Args:
+        identity: The SwiftPM package identity.
+        kwarg: The parsed keyword argument.
+        acc: The accumulator dict (mutated in place).
+
+    Returns:
+        `struct(ok, error)`.
+    """
+    array = _swiftpm_array_parts(kwarg.value)
+    if not array.ok:
+        return struct(ok = False, error = _swiftpm_fail(identity, kwarg.line, array.detail))
+    for element in array.elements:
+        dep = _swiftpm_parse_target_dep(element)
+        if not dep.ok:
+            element_line = element[0].line if element else kwarg.line
+            return struct(ok = False, error = _swiftpm_fail(identity, element_line, dep.detail))
+        acc["deps"].append(dep.dep)
+    return struct(ok = True, error = "")
+
+def _swiftpm_apply_target_kwarg(identity, kind, kwarg, acc):
+    """Fold one `.target(...)` keyword argument into the accumulator.
+
+    Args:
+        identity: The SwiftPM package identity.
+        kind: The target head (`target`).
+        kwarg: The parsed keyword argument.
+        acc: The accumulator dict (mutated in place).
+
+    Returns:
+        `struct(ok, error)`.
+    """
+    key = kwarg.key
+    if key == "name" or key == "path":
+        one = _swiftpm_single_string(kwarg.value)
+        if not one.ok:
+            return struct(ok = False, error = _swiftpm_fail(identity, kwarg.line, one.detail))
+        acc[key] = one.text
+    elif key == "dependencies":
+        return _swiftpm_apply_target_deps(identity, kwarg, acc)
+    elif key == "exclude" or key == "sources":
+        listed = _swiftpm_string_list(kwarg.value)
+        if not listed.ok:
+            return struct(ok = False, error = _swiftpm_fail(identity, kwarg.line, listed.detail))
+        acc[key] = listed.items
+    elif key in _SWIFTPM_REFUSED_TARGET_KEYS:
+        return struct(ok = False, error = _swiftpm_fail(identity, kwarg.line, _swiftpm_target_kwarg_error(acc["name"] if acc["name"] else kind, key)))
+    else:
+        return struct(ok = False, error = _swiftpm_fail(identity, kwarg.line, "unknown `.{kind}(...)` argument `{key}`".format(kind = kind, key = key)))
+    return struct(ok = True, error = "")
+
 def _swiftpm_parse_target_kwargs(identity, kind, args, line):
     """Parse a regular `.target(...)` call.
 
@@ -395,50 +448,14 @@ def _swiftpm_parse_target_kwargs(identity, kind, args, line):
     kwargs = _swiftpm_split_kwargs(args)
     if not kwargs.ok:
         return struct(ok = False, error = _swiftpm_fail(identity, line, kwargs.detail), target = None)
-    name = ""
-    deps = []
-    path = ""
-    exclude = []
-    sources = None
+    acc = {"name": "", "deps": [], "path": "", "exclude": [], "sources": None}
     for kwarg in kwargs.kwargs:
-        key = kwarg.key
-        if key == "name":
-            one = _swiftpm_single_string(kwarg.value)
-            if not one.ok:
-                return struct(ok = False, error = _swiftpm_fail(identity, kwarg.line, one.detail), target = None)
-            name = one.text
-        elif key == "dependencies":
-            array = _swiftpm_array_parts(kwarg.value)
-            if not array.ok:
-                return struct(ok = False, error = _swiftpm_fail(identity, kwarg.line, array.detail), target = None)
-            for element in array.elements:
-                dep = _swiftpm_parse_target_dep(element)
-                if not dep.ok:
-                    element_line = element[0].line if element else kwarg.line
-                    return struct(ok = False, error = _swiftpm_fail(identity, element_line, dep.detail), target = None)
-                deps.append(dep.dep)
-        elif key == "path":
-            one = _swiftpm_single_string(kwarg.value)
-            if not one.ok:
-                return struct(ok = False, error = _swiftpm_fail(identity, kwarg.line, one.detail), target = None)
-            path = one.text
-        elif key == "exclude":
-            listed = _swiftpm_string_list(kwarg.value)
-            if not listed.ok:
-                return struct(ok = False, error = _swiftpm_fail(identity, kwarg.line, listed.detail), target = None)
-            exclude = listed.items
-        elif key == "sources":
-            listed = _swiftpm_string_list(kwarg.value)
-            if not listed.ok:
-                return struct(ok = False, error = _swiftpm_fail(identity, kwarg.line, listed.detail), target = None)
-            sources = listed.items
-        elif key in _SWIFTPM_REFUSED_TARGET_KEYS:
-            return struct(ok = False, error = _swiftpm_fail(identity, kwarg.line, _swiftpm_target_kwarg_error(name if name else kind, key)), target = None)
-        else:
-            return struct(ok = False, error = _swiftpm_fail(identity, kwarg.line, "unknown `.{kind}(...)` argument `{key}`".format(kind = kind, key = key)), target = None)
-    if not name:
+        applied = _swiftpm_apply_target_kwarg(identity, kind, kwarg, acc)
+        if not applied.ok:
+            return struct(ok = False, error = applied.error, target = None)
+    if not acc["name"]:
         return struct(ok = False, error = _swiftpm_fail(identity, line, "a `.{kind}(...)` target without a `name:`".format(kind = kind)), target = None)
-    return struct(ok = True, error = "", target = struct(kind = kind, name = name, deps = deps, path = path, exclude = exclude, sources = sources, line = line))
+    return struct(ok = True, error = "", target = struct(kind = kind, name = acc["name"], deps = acc["deps"], path = acc["path"], exclude = acc["exclude"], sources = acc["sources"], line = line))
 
 def _swiftpm_parse_target_element(identity, element):
     """Parse one `targets` array element of any target kind.
@@ -587,6 +604,64 @@ def _swiftpm_parse_package_dep_element(identity, element):
         return struct(ok = False, error = _swiftpm_fail(identity, line, "a `.package(...)` dependency needs one of `url:`, `id:` or `path:`"), dep = None)
     return struct(ok = True, error = "", dep = struct(name = fields.get("name", ""), ref = ref, ref_kind = ref_kind, line = line))
 
+def _swiftpm_apply_package_array(identity, kwarg, acc, key):
+    """Fold a `products:`/`dependencies:`/`targets:` array into the model.
+
+    Args:
+        identity: The SwiftPM package identity.
+        kwarg: The parsed keyword argument.
+        acc: The accumulator dict (mutated in place).
+        key: Which array this is.
+
+    Returns:
+        `struct(ok, error)`.
+    """
+    array = _swiftpm_array_parts(kwarg.value)
+    if not array.ok:
+        return struct(ok = False, error = _swiftpm_fail(identity, kwarg.line, array.detail))
+    for element in array.elements:
+        if key == "products":
+            parsed = _swiftpm_parse_library_element(identity, element)
+            if not parsed.ok:
+                return struct(ok = False, error = parsed.error)
+            if parsed.product != None:
+                acc["products"].append(parsed.product)
+        elif key == "dependencies":
+            parsed = _swiftpm_parse_package_dep_element(identity, element)
+            if not parsed.ok:
+                return struct(ok = False, error = parsed.error)
+            acc["pkg_deps"].append(parsed.dep)
+        else:
+            parsed = _swiftpm_parse_target_element(identity, element)
+            if not parsed.ok:
+                return struct(ok = False, error = parsed.error)
+            acc["targets"].append(parsed.target)
+    return struct(ok = True, error = "")
+
+def _swiftpm_apply_package_kwarg(identity, kwarg, acc):
+    """Fold one `Package(...)` keyword argument into the model.
+
+    Args:
+        identity: The SwiftPM package identity.
+        kwarg: The parsed keyword argument.
+        acc: The accumulator dict (mutated in place).
+
+    Returns:
+        `struct(ok, error)`.
+    """
+    key = kwarg.key
+    if key == "name" or key == "platforms" or key == "cLanguageStandard" or key == "cxxLanguageStandard":
+        return struct(ok = True, error = "")
+    if key == "products" or key == "dependencies" or key == "targets":
+        return _swiftpm_apply_package_array(identity, kwarg, acc, key)
+    if key == "swiftLanguageVersions" or key == "swiftLanguageModes":
+        parsed = _swiftpm_parse_modes(kwarg.value)
+        if not parsed.ok:
+            return struct(ok = False, error = _swiftpm_fail(identity, kwarg.line, parsed.detail))
+        acc["modes"].extend(parsed.modes)
+        return struct(ok = True, error = "")
+    return struct(ok = False, error = _swiftpm_fail(identity, kwarg.line, "unknown `Package(...)` argument `{key}`".format(key = key)))
+
 def _swiftpm_parse_package_kwargs(identity, args, line):
     """Parse the `Package(...)` argument list into a model.
 
@@ -601,50 +676,12 @@ def _swiftpm_parse_package_kwargs(identity, args, line):
     kwargs = _swiftpm_split_kwargs(args)
     if not kwargs.ok:
         return struct(ok = False, error = _swiftpm_fail(identity, line, kwargs.detail), model = None)
-    products = []
-    targets = []
-    pkg_deps = []
-    modes = []
+    acc = {"products": [], "targets": [], "pkg_deps": [], "modes": []}
     for kwarg in kwargs.kwargs:
-        key = kwarg.key
-        if key == "name" or key == "platforms" or key == "cLanguageStandard" or key == "cxxLanguageStandard":
-            pass
-        elif key == "products":
-            array = _swiftpm_array_parts(kwarg.value)
-            if not array.ok:
-                return struct(ok = False, error = _swiftpm_fail(identity, kwarg.line, array.detail), model = None)
-            for element in array.elements:
-                product = _swiftpm_parse_library_element(identity, element)
-                if not product.ok:
-                    return struct(ok = False, error = product.error, model = None)
-                if product.product != None:
-                    products.append(product.product)
-        elif key == "dependencies":
-            array = _swiftpm_array_parts(kwarg.value)
-            if not array.ok:
-                return struct(ok = False, error = _swiftpm_fail(identity, kwarg.line, array.detail), model = None)
-            for element in array.elements:
-                dep = _swiftpm_parse_package_dep_element(identity, element)
-                if not dep.ok:
-                    return struct(ok = False, error = dep.error, model = None)
-                pkg_deps.append(dep.dep)
-        elif key == "targets":
-            array = _swiftpm_array_parts(kwarg.value)
-            if not array.ok:
-                return struct(ok = False, error = _swiftpm_fail(identity, kwarg.line, array.detail), model = None)
-            for element in array.elements:
-                target = _swiftpm_parse_target_element(identity, element)
-                if not target.ok:
-                    return struct(ok = False, error = target.error, model = None)
-                targets.append(target.target)
-        elif key == "swiftLanguageVersions" or key == "swiftLanguageModes":
-            parsed = _swiftpm_parse_modes(kwarg.value)
-            if not parsed.ok:
-                return struct(ok = False, error = _swiftpm_fail(identity, kwarg.line, parsed.detail), model = None)
-            modes.extend(parsed.modes)
-        else:
-            return struct(ok = False, error = _swiftpm_fail(identity, kwarg.line, "unknown `Package(...)` argument `{key}`".format(key = key)), model = None)
-    return struct(ok = True, error = "", model = struct(products = products, targets = targets, pkg_deps = pkg_deps, modes = modes))
+        applied = _swiftpm_apply_package_kwarg(identity, kwarg, acc)
+        if not applied.ok:
+            return struct(ok = False, error = applied.error, model = None)
+    return struct(ok = True, error = "", model = struct(products = acc["products"], targets = acc["targets"], pkg_deps = acc["pkg_deps"], modes = acc["modes"]))
 
 def _swiftpm_parse_statement(identity, seg, acc):
     """Fold one top-level statement into the parse accumulator.

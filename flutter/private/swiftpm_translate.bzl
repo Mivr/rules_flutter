@@ -185,6 +185,129 @@ def _swiftpm_resolve_same_dep(identity, targets, by_name, target_name, dep):
             return struct(ok = True, error = "", target = candidate)
     return struct(ok = False, error = "SwiftPM package {identity}: target {target} depends on unknown target {name}.".format(identity = repr(identity), target = repr(target_name), name = repr(dep.name)), target = None)
 
+def _swiftpm_check_product_targets(identity, model, by_name):
+    """Refuse products naming unknown or test targets.
+
+    Args:
+        identity: The SwiftPM package identity.
+        model: The parsed manifest model.
+        by_name: The parsed targets indexed by exact name.
+
+    Returns:
+        "" or the fetch failure.
+    """
+    for product in model.products:
+        for name in product.targets:
+            if name not in by_name:
+                return "SwiftPM package {identity}: product {product} names unknown target {name}.".format(identity = repr(identity), product = repr(product.name), name = repr(name))
+            if by_name[name].kind == "testTarget":
+                return "SwiftPM package {identity}: product {product} names test target {name}, which is ignored.".format(identity = repr(identity), product = repr(product.name), name = repr(name))
+    return ""
+
+def _swiftpm_product_dep_label(identity, hub_name, dep, pkg_deps, pin_identities):
+    """Resolve one `.product(name:package:)` dep to a spoke label.
+
+    Args:
+        identity: The SwiftPM package identity.
+        hub_name: The `flutter.pub` hub name, for dep labels.
+        dep: The parsed product dependency reference.
+        pkg_deps: The manifest's parsed `.package(...)` declarations.
+        pin_identities: The identities pinned in `Package.resolved`.
+
+    Returns:
+        `struct(ok, error, label)`.
+    """
+    located = _swiftpm_locate_package_dep(identity, dep.package, pkg_deps)
+    if not located.ok:
+        return struct(ok = False, error = located.error, label = "")
+    canonical = None
+    for pin_id in pin_identities:
+        if pin_id.lower() == located.dep_identity.lower():
+            canonical = pin_id
+            break
+    if canonical == None:
+        return struct(ok = False, error = "SwiftPM package {identity}: `.product(package: {package})` matches package {dep} which is not pinned in Package.resolved.".format(identity = repr(identity), package = repr(dep.package), dep = repr(located.dep_identity)), label = "")
+    return struct(ok = True, error = "", label = "@" + hub_name + "__swiftpm-" + canonical + "//:" + dep.name)
+
+def _swiftpm_target_edge(identity, model, target, by_name, pin_identities, hub_name):
+    """Resolve one target's dependencies to Bazel labels.
+
+    Args:
+        identity: The SwiftPM package identity.
+        model: The parsed manifest model.
+        target: The target struct.
+        by_name: The parsed targets indexed by exact name.
+        pin_identities: The identities pinned in `Package.resolved`.
+        hub_name: The `flutter.pub` hub name, for dep labels.
+
+    Returns:
+        `struct(ok, error, labels, followed)`: `followed` names the
+        same-package targets for the reachability walk.
+    """
+    labels = []
+    followed = []
+    for dep in target.deps:
+        if dep.kind == "same":
+            resolved = _swiftpm_resolve_same_dep(identity, model.targets, by_name, target.name, dep)
+            if not resolved.ok:
+                return struct(ok = False, error = resolved.error, labels = [], followed = [])
+            if resolved.target.kind == "testTarget":
+                return struct(ok = False, error = "SwiftPM package {identity}: target {target} depends on test target {name}, which is ignored.".format(identity = repr(identity), target = repr(target.name), name = repr(resolved.target.name)), labels = [], followed = [])
+            labels.append(":" + resolved.target.name + "_lib")
+            followed.append(resolved.target.name)
+        else:
+            located = _swiftpm_product_dep_label(identity, hub_name, dep, model.pkg_deps, pin_identities)
+            if not located.ok:
+                return struct(ok = False, error = located.error, labels = [], followed = [])
+            labels.append(located.label)
+    return struct(ok = True, error = "", labels = labels, followed = followed)
+
+def _swiftpm_walk_reachable(model, same_edges):
+    """Walk the targets each library product reaches.
+
+    Args:
+        model: The parsed manifest model.
+        same_edges: The per-target followed same-package target names.
+
+    Returns:
+        The reached-name dict.
+    """
+    reached = {}
+    stack = []
+    for product in model.products:
+        for name in product.targets:
+            if name not in reached:
+                reached[name] = True
+                stack.append(name)
+    for _ in range(len(model.targets) + 1):
+        if not stack:
+            break
+        current = stack.pop()
+        for name in same_edges.get(current, []):
+            if name not in reached:
+                reached[name] = True
+                stack.append(name)
+    return reached
+
+def _swiftpm_collect_reached(identity, model, reached):
+    """List the reached targets in manifest order, refusing specials.
+
+    Args:
+        identity: The SwiftPM package identity.
+        model: The parsed manifest model.
+        reached: The reached-name dict.
+
+    Returns:
+        `struct(ok, error, names)`.
+    """
+    names = []
+    for target in model.targets:
+        if target.name and target.name in reached:
+            if target.kind in ["executableTarget", "binaryTarget", "systemLibrary", "plugin", "macro"]:
+                return struct(ok = False, error = _swiftpm_special_kind_error(identity, target.kind, target.name), names = [])
+            names.append(target.name)
+    return struct(ok = True, error = "", names = names)
+
 def swiftpm_reachable_targets(identity, model, pin_identities, hub_name):
     """Resolve dependencies and walk the targets a product reaches.
 
@@ -211,71 +334,24 @@ def swiftpm_reachable_targets(identity, model, pin_identities, hub_name):
     for target in model.targets:
         if target.name:
             by_name[target.name] = target
-    for product in model.products:
-        for name in product.targets:
-            if name not in by_name:
-                return struct(ok = False, error = "SwiftPM package {identity}: product {product} names unknown target {name}.".format(identity = repr(identity), product = repr(product.name), name = repr(name)), names = [], edges = {})
-            if by_name[name].kind == "testTarget":
-                return struct(ok = False, error = "SwiftPM package {identity}: product {product} names test target {name}, which is ignored.".format(identity = repr(identity), product = repr(product.name), name = repr(name)), names = [], edges = {})
+    invalid = _swiftpm_check_product_targets(identity, model, by_name)
+    if invalid:
+        return struct(ok = False, error = invalid, names = [], edges = {})
     edges = {}
     same_edges = {}
     for target in model.targets:
         if not target.name or target.kind in ["executableTarget", "binaryTarget", "systemLibrary", "plugin", "macro"]:
             continue
-        labels = []
-        followed = []
-        failed = None
-        for dep in target.deps:
-            if dep.kind == "same":
-                resolved = _swiftpm_resolve_same_dep(identity, model.targets, by_name, target.name, dep)
-                if not resolved.ok:
-                    failed = resolved.error
-                    break
-                if resolved.target.kind == "testTarget":
-                    failed = "SwiftPM package {identity}: target {target} depends on test target {name}, which is ignored.".format(identity = repr(identity), target = repr(target.name), name = repr(resolved.target.name))
-                    break
-                labels.append(":" + resolved.target.name + "_lib")
-                followed.append(resolved.target.name)
-            else:
-                located = _swiftpm_locate_package_dep(identity, dep.package, model.pkg_deps)
-                if not located.ok:
-                    failed = located.error
-                    break
-                canonical = None
-                for pin_id in pin_identities:
-                    if pin_id.lower() == located.dep_identity.lower():
-                        canonical = pin_id
-                        break
-                if canonical == None:
-                    failed = "SwiftPM package {identity}: `.product(package: {package})` matches package {dep} which is not pinned in Package.resolved.".format(identity = repr(identity), package = repr(dep.package), dep = repr(located.dep_identity))
-                    break
-                labels.append("@" + hub_name + "__swiftpm-" + canonical + "//:" + dep.name)
-        if failed:
-            return struct(ok = False, error = failed, names = [], edges = {})
-        edges[target.name] = labels
-        same_edges[target.name] = followed
-    reached = {}
-    stack = []
-    for product in model.products:
-        for name in product.targets:
-            if name not in reached:
-                reached[name] = True
-                stack.append(name)
-    for _ in range(len(model.targets) + 1):
-        if not stack:
-            break
-        current = stack.pop()
-        for name in same_edges.get(current, []):
-            if name not in reached:
-                reached[name] = True
-                stack.append(name)
-    names = []
-    for target in model.targets:
-        if target.name and target.name in reached:
-            if target.kind in ["executableTarget", "binaryTarget", "systemLibrary", "plugin", "macro"]:
-                return struct(ok = False, error = _swiftpm_special_kind_error(identity, target.kind, target.name), names = [], edges = {})
-            names.append(target.name)
-    return struct(ok = True, error = "", names = names, edges = edges)
+        resolved = _swiftpm_target_edge(identity, model, target, by_name, pin_identities, hub_name)
+        if not resolved.ok:
+            return struct(ok = False, error = resolved.error, names = [], edges = {})
+        edges[target.name] = resolved.labels
+        same_edges[target.name] = resolved.followed
+    reached = _swiftpm_walk_reachable(model, same_edges)
+    collected = _swiftpm_collect_reached(identity, model, reached)
+    if not collected.ok:
+        return struct(ok = False, error = collected.error, names = [], edges = {})
+    return struct(ok = True, error = "", names = collected.names, edges = edges)
 
 def _swiftpm_copts_flag(mode):
     """The `-swift-version` flag value for one language mode."""
@@ -294,13 +370,11 @@ def _swiftpm_build_string(text):
     """
     return "\"" + text.replace("\\", "\\\\").replace("\"", "\\\"") + "\""
 
-def _swiftpm_emit_library(identity, hub_name, model, target, edges, files, mode):
+def _swiftpm_emit_library(identity, model, target, edges, files, mode):
     """Emit one `swift_library` for a reached target.
 
     Args:
         identity: The SwiftPM package identity.
-        hub_name: The `flutter.pub` hub name (unused; dep labels arrive
-            resolved in `edges`).
         model: The parsed manifest model.
         target: The target struct.
         edges: The dep label map from `swiftpm_reachable_targets`.
@@ -330,7 +404,7 @@ def _swiftpm_emit_library(identity, hub_name, model, target, edges, files, mode)
     lines.append(")")
     return "\n".join(lines)
 
-def swiftpm_emit_build(identity, hub_name, model, names, edges, files_by_target):
+def swiftpm_emit_build(identity, model, names, edges, files_by_target):
     """Emit the spoke BUILD file for one translated package.
 
     One `swift_library` per reached target (named `<target>_lib`), one
@@ -340,8 +414,6 @@ def swiftpm_emit_build(identity, hub_name, model, names, edges, files_by_target)
 
     Args:
         identity: The SwiftPM package identity.
-        hub_name: The `flutter.pub` hub name (unused; dep labels arrive
-            resolved in `edges`).
         model: The parsed manifest model.
         names: The reached target names from `swiftpm_reachable_targets`.
         edges: The dep label map from `swiftpm_reachable_targets`.
@@ -357,7 +429,7 @@ def swiftpm_emit_build(identity, hub_name, model, names, edges, files_by_target)
     for name in names:
         if name not in files_by_target:
             return struct(ok = False, error = "SwiftPM package {identity}: target {name} has no resolved sources.".format(identity = repr(identity), name = repr(name)), text = "")
-        blocks.append(_swiftpm_emit_library(identity, hub_name, model, by_name[name], edges, files_by_target[name], mode))
+        blocks.append(_swiftpm_emit_library(identity, model, by_name[name], edges, files_by_target[name], mode))
     for product in model.products:
         if len(product.targets) == 1:
             blocks.append("alias(\n    name = {name},\n    actual = {actual},\n    visibility = [\"//visibility:public\"],\n)".format(name = repr(product.name), actual = repr(":" + product.targets[0] + "_lib")))
@@ -382,7 +454,7 @@ def translate_swiftpm_package(identity, hub_name, model, pin_identities, files_b
     reached = swiftpm_reachable_targets(identity, model, pin_identities, hub_name)
     if not reached.ok:
         return struct(ok = False, error = reached.error, text = "", names = [])
-    emitted = swiftpm_emit_build(identity, hub_name, model, reached.names, reached.edges, files_by_target)
+    emitted = swiftpm_emit_build(identity, model, reached.names, reached.edges, files_by_target)
     if not emitted.ok:
         return struct(ok = False, error = emitted.error, text = "", names = [])
     return struct(ok = True, error = "", text = emitted.text, names = reached.names)
