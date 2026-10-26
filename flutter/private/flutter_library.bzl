@@ -48,10 +48,7 @@ def _entry_conditions(decoded_path, pkg_asset_platforms, pkg_asset_flavors):
         A `(platforms, flavors)` tuple of lists (empty = unconditional).
     """
     key = ":" + decoded_path
-    return (
-        list(pkg_asset_platforms.get(key, [])),
-        list(pkg_asset_flavors.get(key, [])),
-    )
+    return (list(pkg_asset_platforms.get(key, [])), list(pkg_asset_flavors.get(key, [])))
 
 def _normalize_attr_value(package_name, attr_name, value):
     """Normalize one `pkg_assets` / `pkg_shaders` / `font_files` / `fonts_json` value.
@@ -60,6 +57,7 @@ def _normalize_attr_value(package_name, attr_name, value):
     (spoke attrs); normalization is idempotent, so both land on the same
     decoded path and encoded bundle key. The decoded path joins the
     conditions dicts and the font file table; the key is what bundles.
+    For a package (`package_name != ""`), keys use `norm.pkg_key`.
 
     Args:
         package_name: The contribution's package name, for the failure.
@@ -73,7 +71,8 @@ def _normalize_attr_value(package_name, attr_name, value):
     norm = normalize_asset_uri(value)
     if not norm.ok:
         fail("package \"%s\": %s value %s uses a spelling that is not supported: %s" % (package_name, attr_name, repr(value), norm.reason))
-    return norm
+    key = norm.pkg_key if package_name != "" else norm.key
+    return struct(ok = norm.ok, segments = norm.segments, decoded = norm.decoded, key = key, pkg_key = norm.pkg_key, is_dir = norm.is_dir, reason = norm.reason)
 
 def build_pub_contributions(package_name, fonts_json, font_files_dict, pkg_assets_dict, pkg_shaders_dict, shader_includes = [], pkg_asset_platforms = {}, pkg_asset_flavors = {}):
     """Build pub_fonts/pub_assets/pub_shaders contribution structs from rule attrs.

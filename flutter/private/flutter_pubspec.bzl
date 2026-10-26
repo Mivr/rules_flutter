@@ -57,6 +57,13 @@ load(
     "validate_flutter_section",
     "validate_pubspec_root",
 )
+load(
+    ":flutter_pubspec_conditions.bzl",
+    "entry_condition_problems",
+    _VALID_ASSET_PLATFORMS = "VALID_ASSET_PLATFORMS",
+)
+
+VALID_ASSET_PLATFORMS = _VALID_ASSET_PLATFORMS
 
 def parse_pubspec(content):
     """Parse pubspec.yaml content into a Starlark dict.
@@ -517,116 +524,10 @@ def _parse_fonts(raw, lines, locator):
             out.append(family)
     return (out, problems)
 
-# The platform names an `assets` / `shaders` entry may carry, in flutter_tools'
-# `_kValidPluginPlatforms` order
-# (`packages/flutter_tools/lib/src/flutter_manifest.dart`): anything else is
-# an `Invalid platform(s)` refusal, worded like
-# `AssetsEntry._parsePlatformsSection`.
-VALID_ASSET_PLATFORMS = ("android", "ios", "web", "windows", "linux", "macos")
-
-def _parse_condition_list(raw_value, key):
-    """Validate one asset entry `flavors` / `platforms` value, flutter_tools style.
-
-    Mirrors `AssetsEntry._parseFlavorsSection` / `_parsePlatformsSection`
-    (`_parseList` in `flutter_manifest.dart`): an absent value reads as
-    null and is valid; anything else must be a list of strings. A scalar
-    `platforms: web` is one error, and every non-string element is
-    reported, not just the first, so the caller can wrap them the way
-    `parseFromYamlSafe` joins its section errors. A `platforms` list that
-    parses but names anything outside `VALID_ASSET_PLATFORMS` is one
-    `Invalid platform(s)` error, like `_parsePlatformsSection` reports.
-
-    Args:
-        raw_value: The value under the key (None when the key is absent).
-        key: `"flavors"` or `"platforms"`, for the problem detail.
-
-    Returns:
-        A `(values, problem)` tuple: the string list (empty when the
-        value errors) and "" or the newline-joined `Expected <key> to be
-        a list of String, but ...` details naming the key.
-    """
-    if raw_value == None:
-        return ([], "")
-    if type(raw_value) != "list":
-        return ([], "Expected {key} to be a list of String, but got {value} ({type}).".format(
-            key = key,
-            value = dart_str(raw_value),
-            type = dart_type(raw_value),
-        ))
-    values = []
-    bad = []
-    for index, item in enumerate(raw_value):
-        if type(item) != "string":
-            bad.append("Expected {key} to be a list of String, but element at index {index} was a {type}.".format(
-                key = key,
-                index = index,
-                type = dart_type(item),
-            ))
-        else:
-            values.append(item)
-    if bad:
-        return ([], "\n".join(bad))
-    if key == "platforms":
-        unknown = []
-        for value in values:
-            if value not in VALID_ASSET_PLATFORMS and value not in unknown:
-                unknown.append(value)
-        if unknown:
-            return ([], "Invalid platform(s): \"{unknown}\". Supported platforms are: \"{valid}\".".format(
-                unknown = ", ".join(unknown),
-                valid = ", ".join(VALID_ASSET_PLATFORMS),
-            ))
-    return (values, "")
-
-def _section_error(path, section, inner):
-    """Wrap a condition-list complaint the way flutter_tools wraps it.
-
-    Mirrors `AssetsEntry.parseFromYamlSafe`
-    (`packages/flutter_tools/lib/src/flutter_manifest.dart`): a bad
-    `flavors` / `platforms` / `transformers` value is `Unable to parse
-    assets section.\nIn {section} section of asset "{path}": {inner}`.
-    """
-    return "Unable to parse assets section.\nIn {section} section of asset \"{path}\": {inner}".format(
-        section = section,
-        path = path,
-        inner = inner,
-    )
-
-def _condition_problems(path, item, cond_key, lines, locator):
-    """Validate one asset entry `flavors` / `platforms` value as a refusal.
-
-    Args:
-        path: The entry path, for the problem path.
-        item: The raw entry mapping.
-        cond_key: `"flavors"` or `"platforms"`.
-        lines: The pubspec text split on newlines.
-        locator: The `["flutter", "assets", index]` path to the entry, for
-            the line.
-
-    Returns:
-        A `(values, problems)` tuple: the string list (possibly empty) and
-        the refusal structs (at most one) for `asset_errors`.
-    """
-    (values, detail) = _parse_condition_list(item.get(cond_key), cond_key)
-    if not detail:
-        return (values, [])
-    return (values, [_shape_problem(
-        path,
-        cond_key,
-        _section_error(path, cond_key, detail),
-        flutter_line_of(lines, locator + [cond_key]),
-    )])
-
 def _entry_condition_problems(path, item, lines, elocator):
-    """Validate one entry's `flavors` / `platforms` values as refusals.
+    """Validate one entry's `flavors` / `platforms` / `transformers` values.
 
-    Shared by the `assets` and `shaders` parsers: flutter_tools validates
-    both sections with the same `_validateAssets`
-    (`packages/flutter_tools/lib/src/flutter_manifest.dart`), so a shader
-    map entry whose conditions are malformed fails exactly like an asset
-    entry's do, with the same wrapped `Unable to parse assets section`
-    refusal. That includes a `platforms` value naming an unknown
-    platform (`_parsePlatformsSection` reports `Invalid platform(s)`).
+    Shared by `_parse_assets` and `_parse_shaders` (RT40-flutter:01, RT40-flutter:02).
 
     Args:
         path: The entry path, for the problem path.
@@ -635,12 +536,9 @@ def _entry_condition_problems(path, item, lines, elocator):
         elocator: The path to the entry, for the line.
 
     Returns:
-        A `(flavors, platforms, problems)` tuple: the string lists (empty
-        when the value errors) and the refusal structs for `asset_errors`.
+        A `(flavors, platforms, problems)` tuple.
     """
-    (flavors, flavor_problems) = _condition_problems(path, item, "flavors", lines, elocator)
-    (platforms, platform_problems) = _condition_problems(path, item, "platforms", lines, elocator)
-    return (flavors, platforms, flavor_problems + platform_problems)
+    return entry_condition_problems(path, item, lines, elocator, _shape_problem)
 
 def _parse_assets(raw, lines, locator, shown):
     """Parse the raw `flutter.assets` list, collecting malformed entries.
@@ -693,13 +591,6 @@ def _parse_assets(raw, lines, locator, shown):
             continue
         (flavors, platforms, condition_problems) = _entry_condition_problems(path, item, lines, elocator)
         problems.extend(condition_problems)
-        if "transformers" in item and item.get("transformers") != None:
-            problems.append(_shape_problem(
-                path,
-                "transformers",
-                "asset transformers are not supported by rules_flutter.",
-                flutter_line_of(lines, elocator + ["transformers"]),
-            ))
         entries.append(struct(path = path, is_map = is_map, flavors = flavors, platforms = platforms))
     return (entries, problems)
 
@@ -824,9 +715,10 @@ def parse_flutter_assets_block(content):
     it stays silent), an unexpected key in a font (checked
     whether or not the file entry carries `asset`), a `flavors` /
     `platforms` value that is not a list of strings, or a `platforms`
-    value naming an unknown platform, on an asset or a shader entry, an
-    entry carrying
-    `transformers`, a `flutter:` section that is neither a map nor null,
+    value naming an unknown platform, on an asset or a shader entry, a
+    malformed or non-empty `transformers` value (an empty list or null is
+    accepted) on an asset, shader, or deferred-component entry, a `flutter:`
+    section that is neither a map nor null,
     an empty `deferred-components` list (flutter_tools crashes reading
     one), and every other `flutter:` child flutter_tools `_validate` rejects
     (`uses-material-design`, `licenses`, `module`, `plugin`,

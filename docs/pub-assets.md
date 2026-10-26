@@ -32,7 +32,17 @@ separates and a `%XX` never decodes, while dot segments still resolve:
 - String-form entries decode `%XX` escapes, resolve `.` and `x/..`, then
   re-encode: `./a.png` bundles `a.png`; `a b.png` bundles as `a%20b.png`,
   the key the engine asks for. Non-ASCII names encode as UTF-8 (`%C3%A9`
-  in the key decodes to the file's accented letter).
+  in the key decodes to the file's accented letter). Trailing dot segments
+  resolve per RFC 3986 §5.2.4: `assets/.`, `assets/%2E`, `assets/b/..`, `a//.`,
+  `a//..`, `a/./.` preserve their directory trailing slash (`is_dir = True`,
+  `decoded` and `key` end with `/`), while entries collapsing to no non-empty
+  segment (`.`, `./`, `assets/..`, `%2E` in string form) refuse as naming no file,
+  and `..` escaping root refuses.
+- In string form (`is_map = False`), reserved character escapes (`! $ & ' ( ) * + , ; = @`)
+  remain uppercase `%XX` in the bundle key (`norm.key`), while unreserved characters
+  decode, matching `Uri.parse(entry).path`. When keyed as a package contribution
+  (`packages/<pkg>/...`), bundle keys re-encode from decoded segments (`norm.pkg_key`),
+  matching `flutter_tools` (`asset.dart:1428`, `998`).
 - Map-form entries read literally: `- path: a%20b.png` bundles the
   `a%20b.png` file (manifest `a%20b.png`, copy `a%2520b.png`), and
   `- path: g/./h.png` bundles `g/h.png`. The entry's shape travels from
@@ -123,8 +133,12 @@ byte-order mark moves no line. Accepted pubspecs parse exactly as before.
   platform (for example `platforms: [tvos]`), fails the fetch, naming the package, the entry
   and the key, as flutter_tools does. The check is shared by `assets` and
   `shaders` entries, the way flutter_tools validates both with one function.
-- An asset entry with a `transformers` key fails the fetch, naming the package
-  and the entry: asset transformers are not supported by rules_flutter.
+- An asset, shader, or deferred-component entry with `transformers` that is
+  absent, `null`, or an empty list (`[]`) is accepted as a valid no-op, matching
+  `flutter_tools`. A non-list `transformers` value, or a list containing any
+  non-map element, fails the fetch with the `flutter_tools` section error. A
+  non-empty list of transformer maps fails the fetch: asset transformers are not
+  supported by rules_flutter.
 - Any other unknown key in an entry mapping is ignored, the way flutter_tools
   ignores it.
 - A `uses-material-design` value that is not a bool (for example the string

@@ -70,9 +70,9 @@ def _dot_entries_resolve_test_impl(ctx):
     return unittest.end(env)
 
 def _escapes_decode_first_test_impl(ctx):
-    """Escapes decode first: `,` and `~` stay literal, lone `%` encodes."""
+    """Escapes decode first: unreserved decode, reserved stay encoded in key, lone % encodes."""
     env = unittest.begin(ctx)
-    _check_ok(env, "a%2Cb.png", "a,b.png", "a,b.png")
+    _check_ok(env, "a%2Cb.png", "a,b.png", "a%2Cb.png")
     _check_ok(env, "%7e.png", "~.png", "~.png")
     _check_ok(env, "a%.png", "a%.png", "a%25.png")
     _check_ok(env, "a%2.png", "a%2.png", "a%252.png")
@@ -976,6 +976,81 @@ def _mixed_without_overlap_bundles_test_impl(ctx):
     )
     return unittest.end(env)
 
+def _trailing_dot_directories_test_impl(ctx):
+    """Trailing dot segments resolve as directories per RFC 3986 §5.2.4."""
+    env = unittest.begin(ctx)
+    _check_ok(env, "assets/.", "assets/", "assets/", is_dir = True)
+    _check_ok(env, "assets/%2E", "assets/", "assets/", is_dir = True)
+    _check_ok(env, "assets/b/..", "assets/", "assets/", is_dir = True)
+    _check_ok(env, "a//.", "a/", "a//", is_dir = True)
+    _check_ok(env, "a//..", "a/", "a/", is_dir = True)
+    _check_ok(env, "a/./.", "a/", "a/", is_dir = True)
+    _check_ok(env, "x/.", "x/", "x/", is_dir = True)
+    _check_ok(env, "a b/.", "a b/", "a%20b/", is_dir = True)
+    _check_ok(env, "ca" + "f%C3%A9/.", "ca" + "f" + "\303\251" + "/", "ca" + "f%C3%A9/", is_dir = True)
+
+    norm_map = normalize_asset_uri("%2E/.", is_map = True)
+    asserts.true(env, norm_map.ok, "%2E/.")
+    asserts.equals(env, "%2E/", norm_map.decoded)
+    asserts.equals(env, "%252E/", norm_map.key)
+    asserts.equals(env, True, norm_map.is_dir)
+
+    for refused in [".", "./", "assets/..", "%2E", "%2E/."]:
+        norm = normalize_asset_uri(refused)
+        asserts.false(env, norm.ok, refused)
+        asserts.true(env, "names no file" in norm.reason, refused + " -> " + norm.reason)
+
+    for escaped in ["..", "../", "assets/../.."]:
+        norm = normalize_asset_uri(escaped)
+        asserts.false(env, norm.ok, escaped)
+        asserts.true(env, "escapes the package" in norm.reason, escaped + " -> " + norm.reason)
+
+    return unittest.end(env)
+
+def _reserved_characters_pkg_key_test_impl(ctx):
+    """Reserved characters stay encoded in norm.key but decode in norm.pkg_key."""
+    env = unittest.begin(ctx)
+    norm_at = normalize_asset_uri("assets/%40")
+    asserts.true(env, norm_at.ok)
+    asserts.equals(env, "assets/@", norm_at.decoded)
+    asserts.equals(env, "assets/%40", norm_at.key)
+    asserts.equals(env, "assets/@", norm_at.pkg_key)
+    asserts.equals(env, "assets/%40", pub_bundle_key("", "assets/%40"))
+    asserts.equals(env, "packages/p/assets/@", pub_bundle_key("packages/p/", "assets/%40"))
+
+    norm_comma = normalize_asset_uri("a%2Cb.png")
+    asserts.true(env, norm_comma.ok)
+    asserts.equals(env, "a,b.png", norm_comma.decoded)
+    asserts.equals(env, "a%2Cb.png", norm_comma.key)
+    asserts.equals(env, "a,b.png", norm_comma.pkg_key)
+    asserts.equals(env, "a%2Cb.png", pub_bundle_key("", "a%2Cb.png"))
+    asserts.equals(env, "packages/p/a,b.png", pub_bundle_key("packages/p/", "a%2Cb.png"))
+
+    norm_lit = normalize_asset_uri("assets/@")
+    asserts.true(env, norm_lit.ok)
+    asserts.equals(env, "assets/@", norm_lit.decoded)
+    asserts.equals(env, "assets/@", norm_lit.key)
+    asserts.equals(env, "assets/@", norm_lit.pkg_key)
+
+    norm_map = normalize_asset_uri("assets/%40", is_map = True)
+    asserts.true(env, norm_map.ok)
+    asserts.equals(env, "assets/%40", norm_map.decoded)
+    asserts.equals(env, "assets/%2540", norm_map.key)
+    asserts.equals(env, "assets/%2540", norm_map.pkg_key)
+
+    assets_pkg = normalize_spoke_assets("my_pkg", [struct(path = "assets/%40", is_map = False, flavors = [], platforms = [])])
+    asserts.equals(env, "assets/@", assets_pkg[0].key)
+    assets_root = normalize_spoke_assets("", [struct(path = "assets/%40", is_map = False, flavors = [], platforms = [])])
+    asserts.equals(env, "assets/%40", assets_root[0].key)
+
+    fonts_pkg = normalize_spoke_fonts("my_pkg", [struct(family = "F", fonts = [struct(asset = "fonts/%40.ttf", weight = 400, style = "normal")])])
+    asserts.equals(env, "fonts/@.ttf", fonts_pkg[0].fonts[0].key)
+
+    shaders_pkg = normalize_spoke_shaders("my_pkg", [struct(path = "shaders/%40.frag", is_map = False)])
+    asserts.equals(env, "shaders/@.frag", shaders_pkg[0].key)
+
+    return unittest.end(env)
+
 _t0_test = unittest.make(_plain_entry_passes_through_test_impl)
 _t1_test = unittest.make(_spaced_entry_encodes_test_impl)
 _t2_test = unittest.make(_dot_entries_resolve_test_impl)
@@ -1002,6 +1077,8 @@ _t22_test = unittest.make(_empty_segment_forms_bundle_raw_test_impl)
 _t23_test = unittest.make(_overlap_plain_raw_refuses_test_impl)
 _t24_test = unittest.make(_overlap_variant_raw_refuses_test_impl)
 _t25_test = unittest.make(_mixed_without_overlap_bundles_test_impl)
+_t26_test = unittest.make(_trailing_dot_directories_test_impl)
+_t27_test = unittest.make(_reserved_characters_pkg_key_test_impl)
 
 def asset_uri_test_suite(name):
     """Defines the asset-URI normalization unit and through tests.
@@ -1037,4 +1114,6 @@ def asset_uri_test_suite(name):
         _t23_test,
         _t24_test,
         _t25_test,
+        _t26_test,
+        _t27_test,
     )

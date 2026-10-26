@@ -266,6 +266,147 @@ def _unknown_keys_ignored_test_impl(ctx):
     asserts.equals(env, ["ios"], result.assets[0].platforms)
     return unittest.end(env)
 
+_EMPTY_TRANSFORMERS_PUBSPEC = """\
+name: empty_transformers
+flutter:
+  assets:
+    - path: assets/a.png
+      transformers: []
+    - path: assets/b.png
+      transformers: null
+  shaders:
+    - path: shaders/a.frag
+      transformers: []
+    - path: shaders/b.frag
+      transformers: null
+  deferred-components:
+    - name: c1
+      assets:
+        - path: assets/c1.png
+          transformers: []
+    - name: c2
+      assets:
+        - path: assets/c2.png
+          transformers: null
+"""
+
+def _empty_transformers_accepted_test_impl(ctx):
+    """Empty list or null `transformers` are valid no-ops across assets, shaders, deferred."""
+    env = unittest.begin(ctx)
+    result = parse_flutter_assets_block(_EMPTY_TRANSFORMERS_PUBSPEC)
+    asserts.equals(env, [], result.asset_errors)
+    asserts.equals(env, 2, len(result.assets))
+    asserts.equals(env, 2, len(result.shaders))
+    return unittest.end(env)
+
+_MALFORMED_TRANSFORMERS_ASSETS_SCALAR = """\
+name: bad_assets_trans_scalar
+flutter:
+  assets:
+    - path: assets/a.png
+      transformers: 42
+"""
+
+_MALFORMED_TRANSFORMERS_ASSETS_ITEMS = """\
+name: bad_assets_trans_items
+flutter:
+  assets:
+    - path: assets/a.png
+      transformers:
+        - bad
+        - 123
+"""
+
+_MALFORMED_TRANSFORMERS_SHADERS_SCALAR = """\
+name: bad_shaders_trans_scalar
+flutter:
+  shaders:
+    - path: shaders/s.frag
+      transformers: bad
+"""
+
+_MALFORMED_TRANSFORMERS_SHADERS_ITEMS = """\
+name: bad_shaders_trans_items
+flutter:
+  shaders:
+    - path: shaders/s.frag
+      transformers:
+        - 123
+"""
+
+_MALFORMED_TRANSFORMERS_DEFERRED_SCALAR = """\
+name: bad_deferred_trans_scalar
+flutter:
+  deferred-components:
+    - name: c
+      assets:
+        - path: assets/d.png
+          transformers: 42
+"""
+
+_MALFORMED_TRANSFORMERS_DEFERRED_ITEMS = """\
+name: bad_deferred_trans_items
+flutter:
+  deferred-components:
+    - name: c
+      assets:
+        - path: assets/d.png
+          transformers:
+            - bad
+"""
+
+def _malformed_transformers_refused_test_impl(ctx):
+    """Non-list or non-map transformers refuse with flutter_tools error."""
+    env = unittest.begin(ctx)
+    cases = [
+        (_MALFORMED_TRANSFORMERS_ASSETS_SCALAR, "Expected transformers list to be a list of Map, but got 42 (int)."),
+        (_MALFORMED_TRANSFORMERS_ASSETS_ITEMS, "Expected transformers list to be a list of Map, but element at index 0 was a String.\nExpected transformers list to be a list of Map, but element at index 1 was a int."),
+        (_MALFORMED_TRANSFORMERS_SHADERS_SCALAR, "Expected transformers list to be a list of Map, but got bad (String)."),
+        (_MALFORMED_TRANSFORMERS_SHADERS_ITEMS, "Expected transformers list to be a list of Map, but element at index 0 was a int."),
+        (_MALFORMED_TRANSFORMERS_DEFERRED_SCALAR, "Expected transformers list to be a list of Map, but got 42 (int)."),
+        (_MALFORMED_TRANSFORMERS_DEFERRED_ITEMS, "Expected transformers list to be a list of Map, but element at index 0 was a String."),
+    ]
+    for pubspec, expected_error in cases:
+        r = parse_flutter_assets_block(pubspec)
+        asserts.equals(env, 1, len(r.asset_errors))
+        asserts.equals(env, "transformers", r.asset_errors[0].key)
+        asserts.true(env, expected_error in r.asset_errors[0].detail, r.asset_errors[0].detail)
+    return unittest.end(env)
+
+_NONEMPTY_TRANSFORMERS_SHADERS_PUBSPEC = """\
+name: bad_shaders_trans_nonempty
+flutter:
+  shaders:
+    - path: shaders/s.frag
+      transformers:
+        - package: weave
+"""
+
+_NONEMPTY_TRANSFORMERS_DEFERRED_PUBSPEC = """\
+name: bad_deferred_trans_nonempty
+flutter:
+  deferred-components:
+    - name: c
+      assets:
+        - path: assets/d.png
+          transformers:
+            - package: weave
+"""
+
+def _shader_and_deferred_transformers_refused_test_impl(ctx):
+    """Non-empty transformers on shaders or deferred-components refuse."""
+    env = unittest.begin(ctx)
+    for pubspec in [_NONEMPTY_TRANSFORMERS_SHADERS_PUBSPEC, _NONEMPTY_TRANSFORMERS_DEFERRED_PUBSPEC]:
+        r = parse_flutter_assets_block(pubspec)
+        asserts.equals(env, 1, len(r.asset_errors))
+        asserts.equals(env, "transformers", r.asset_errors[0].key)
+        asserts.true(
+            env,
+            "asset transformers are not supported by rules_flutter." in r.asset_errors[0].detail,
+            r.asset_errors[0].detail,
+        )
+    return unittest.end(env)
+
 # -- refused pubspec shapes (COV-75) ------------------------------------------------------
 #
 # Every shape below is one flutter_tools 3.47.7 refuses
@@ -669,6 +810,9 @@ _t26_test = unittest.make(_big_directory_and_file_entries_expand_test_impl)
 _t27_test = unittest.make(_shallow_lister_reads_once_and_skips_deep_test_impl)
 _t28_test = unittest.make(_shallow_lister_bound_fails_loudly_test_impl)
 _t29_test = unittest.make(_covering_entries_resolve_at_scale_test_impl)
+_t30_test = unittest.make(_empty_transformers_accepted_test_impl)
+_t31_test = unittest.make(_malformed_transformers_refused_test_impl)
+_t32_test = unittest.make(_shader_and_deferred_transformers_refused_test_impl)
 
 def pub_assets_test_suite(name):
     unittest.suite(
@@ -703,4 +847,7 @@ def pub_assets_test_suite(name):
         _t27_test,
         _t28_test,
         _t29_test,
+        _t30_test,
+        _t31_test,
+        _t32_test,
     )
