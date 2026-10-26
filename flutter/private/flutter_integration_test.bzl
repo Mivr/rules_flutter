@@ -195,7 +195,9 @@ def make_web_integration_bootstrap_content(test_import, has_integration_test = F
 
     The generated file is wrapped by `make_web_wrapper_main_content` so
     `ui_web.bootstrapEngine` initializes the Flutter web engine and implicit
-    view before calling `main()` here.
+    view before calling `main()` here. The bootstrap dials the harness back
+    over a WebSocket carrying the run's token (from the page URL the launcher
+    opens), so the harness adopts only this run's app.
 
     Args:
         test_import: Import URI for the user's integration test entrypoint.
@@ -293,6 +295,7 @@ extension type _JSWindow._(JSObject _) implements JSObject {{
 extension type _JSLocation._(JSObject _) implements JSObject {{
   external String get host;
   external String get protocol;
+  external String get search;
 }}
 
 @JS('WebSocket')
@@ -344,7 +347,11 @@ Future<void> _runTestMain() async {{
 
 Future<void> main() async {{
   final wsScheme = _window.location.protocol == 'https:' ? 'wss' : 'ws';
-  final wsUrl = '$wsScheme://${{_window.location.host}}/__flutter_integration_ws__';
+  // The launcher opens the page with `?token=<run token>`; it travels here
+  // so the harness adopts only this run's dial-back and refuses any other
+  // app dialling the same server.
+  final wsQuery = _window.location.search;
+  final wsUrl = '$wsScheme://${{_window.location.host}}/__flutter_integration_ws__$wsQuery';
   final ws = _JSWebSocket(wsUrl);
 
   final openCompleter = Completer<void>();
@@ -2551,8 +2558,12 @@ def flutter_integration_test(
             `@<pub_hub_name>//android:all_android_plugin_libs` aggregator should
             be linked when `platform = "android"`.
         ios_bundle_id: Optional iOS bundle ID when `platform = "ios"`.
-            Defaults to `"com.example.<package_name>.<name>"`, so two tests
-            never share an id.
+            Used verbatim when set. Defaults to
+            `"com.example.<package path>.<name>.<label hash>"`, where the
+            hash covers the test target's full label, so two tests never
+            share an id; pass `ios_bundle_id` to keep a fixed id. The test
+            runs with the `exclusive` tag (merged with `tags`), so Bazel
+            never runs two simulator tests at once.
         ios_runner_srcs: Optional Runner Swift sources when `platform = "ios"`.
             Defaults to `None`, which discovers the package's
             `ios/Runner/*.swift`.

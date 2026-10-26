@@ -3,7 +3,8 @@
 The `platform = "ios"` leg of `flutter_integration_test` assembles its
 simulator app from Apple-toolchain targets, so the full macro cannot analyze
 on Linux. These tests pin everything around that seam: the bundle-id
-default, the simulator-debug transition settings, the macOS-only constraint
+default (readable name plus full-label hash), the `exclusive` tag merge,
+the simulator-debug transition settings, the macOS-only constraint
 the macro applies, the bootstrap content (notably that the iOS bootstrap
 reads the harness URL from the environment with the data-container file as
 fallback and no fixed-port fallback, while the Linux bootstrap it derives
@@ -25,13 +26,18 @@ load(
     "make_linux_integration_bootstrap_content",
 )
 load(
+    "//flutter/private:flutter_integration_test_bundle_id.bzl",
+    "default_ios_bundle_id",
+    "resolve_ios_bundle_id",
+    "sanitize_ios_bundle_id_segment",
+)
+load(
     "//flutter/private:flutter_integration_test_ios.bzl",
     "IOS_APP_KWARG_KEYS",
-    "default_ios_bundle_id",
     "flutter_ios_integration_test",
     "ios_integration_bootstrap_content",
     "ios_integration_test_env",
-    "sanitize_ios_bundle_id_segment",
+    "ios_integration_test_tags",
 )
 load("//flutter/private:ios_sim_debug.bzl", "ios_sim_debug_transition_impl")
 
@@ -50,18 +56,90 @@ _DBG = {
 
 def _bundle_id_default_test_impl(ctx):
     env = unittest.begin(ctx)
-    asserts.equals(
-        env,
-        "com.example.my-app.app-test",
-        default_ios_bundle_id("my_app", "app_test"),
-    )
     asserts.equals(env, "my-app", sanitize_ios_bundle_id_segment("My App!"))
     asserts.equals(env, "id-9lives", sanitize_ios_bundle_id_segment("9lives"))
     asserts.equals(env, "app", sanitize_ios_bundle_id_segment(""))
+
+    # The default names the test readably, then pins it with the full label's
+    # hash: `com.example.<package path>.<target>.h<digits>`.
+    bid = default_ios_bundle_id("my_app", "app_test", "@//my/pkg:app_test")
+    asserts.true(
+        env,
+        bid.startswith("com.example.my-app.app-test.h"),
+        "the default id names the test, got %r" % bid,
+    )
+    asserts.true(
+        env,
+        bid[len("com.example.my-app.app-test.h"):].isdigit(),
+        "the hash segment is `h` plus decimal digits, got %r" % bid,
+    )
     asserts.false(
         env,
-        default_ios_bundle_id("pkg", "one") == default_ios_bundle_id("pkg", "two"),
+        bid == "com.example.my-app.app-test",
+        "the old hash-less format must not come back: two tests in one " +
+        "package would share it",
+    )
+    asserts.false(
+        env,
+        default_ios_bundle_id("pkg", "one", "@//pkg:one") ==
+        default_ios_bundle_id("pkg", "two", "@//pkg:two"),
         "two tests in one package must never share a bundle id",
+    )
+
+    # Same target name in different packages: distinct labels, distinct ids.
+    asserts.false(
+        env,
+        default_ios_bundle_id("one", "app_test", "@//one:app_test") ==
+        default_ios_bundle_id("two", "app_test", "@//two:app_test"),
+        "the same target name in different packages must differ",
+    )
+
+    # Readable parts collide but labels differ: the hash still separates them.
+    asserts.false(
+        env,
+        default_ios_bundle_id("a/b", "t", "@//a/b:t") ==
+        default_ios_bundle_id("a:b", "t", "@//a:b:t"),
+        "packages that sanitize identically must still differ by label hash",
+    )
+    readable_clash = [
+        default_ios_bundle_id("pkg", name, "@//pkg:" + name)
+        for name in ("my_test", "My_Test", "my__test")
+    ]
+    asserts.equals(
+        env,
+        3,
+        len({b: True for b in readable_clash}),
+        "names that differ only by case and separators must still differ, " +
+        "got %r" % readable_clash,
+    )
+
+    # A very long package path shortens the readable part (never the hash) so
+    # the id stays a valid bundle id of at most 155 characters.
+    long_bid = default_ios_bundle_id(
+        "pkg/" + "sub/" * 60,
+        "app_test",
+        "@//pkg/sub/sub/sub:app_test",
+    )
+    asserts.true(
+        env,
+        len(long_bid) <= 155,
+        "a long package path must stay within 155 characters, got %d" % len(long_bid),
+    )
+    for segment in long_bid.split("."):
+        asserts.true(
+            env,
+            segment != "" and not segment[0].isdigit(),
+            "every segment stays non-empty and never digit-led, got %r" % long_bid,
+        )
+    asserts.true(
+        env,
+        long_bid.rsplit(".", 1)[1].startswith("h"),
+        "the trimmed id keeps its label-hash segment, got %r" % long_bid,
+    )
+    asserts.false(
+        env,
+        long_bid == default_ios_bundle_id("pkg", "t", "@//pkg:t"),
+        "a trimmed id must still differ from other tests' ids",
     )
     return unittest.end(env)
 
@@ -90,6 +168,29 @@ def _app_kwarg_keys_test_impl(ctx):
         env,
         "ios_bundle_id" in IOS_APP_KWARG_KEYS,
         "ios_bundle_id belongs to the test target, not the app",
+    )
+    return unittest.end(env)
+
+def _test_tags_test_impl(ctx):
+    env = unittest.begin(ctx)
+    asserts.equals(env, ["exclusive"], ios_integration_test_tags([]))
+    asserts.equals(
+        env,
+        ["exclusive", "manual"],
+        ios_integration_test_tags(["manual"]),
+        "the caller's tags are kept after `exclusive`",
+    )
+    asserts.equals(
+        env,
+        ["exclusive", "manual"],
+        ios_integration_test_tags(["exclusive", "manual"]),
+        "a caller-passed `exclusive` is deduplicated, not doubled",
+    )
+    asserts.equals(
+        env,
+        ["exclusive", "manual"],
+        ios_integration_test_tags(["manual", "exclusive"]),
+        "deduplication keeps the leading `exclusive` wherever it was passed",
     )
     return unittest.end(env)
 
@@ -268,11 +369,19 @@ def _macro_wiring_test_impl(ctx):
     asserts.equals(env, "ios_integration_fixture", ctx.attr.package_name)
     asserts.equals(
         env,
-        "com.example.ios-integration-fixture.ios-macro-test",
+        ctx.attr.expected_bundle_id,
         ctx.attr.ios_bundle_id,
-        "the macro must default the bundle id from package and target",
+        "the macro must resolve the default bundle id from the test target's " +
+        "label, so no two tests share one",
     )
     asserts.equals(env, "flutter_ios_integration_bootstrap", ctx.attr.bootstrap_kind)
+    asserts.equals(
+        env,
+        ["exclusive", "manual"],
+        ctx.attr.expected_tags,
+        "the generated test runs `exclusive`ly (the simulator is shared), " +
+        "merged with the caller's tags",
+    )
     asserts.equals(
         env,
         [
@@ -292,6 +401,12 @@ def _direct_test_rule_test_impl(ctx):
         env,
         tut[DefaultInfo].files_to_run.executable != None,
         "the test rule must expose the runner executable",
+    )
+    asserts.equals(
+        env,
+        "com.example.ios_fixture.app_test",
+        ctx.attr.ios_bundle_id,
+        "an explicit `ios_bundle_id` reaches the test target verbatim",
     )
     files = tut[DefaultInfo].default_runfiles.files.to_list()
     asserts.true(
@@ -323,6 +438,7 @@ _t3_test = unittest.make(_ios_bootstrap_with_integration_test_pkg_test_impl)
 _t4_test = unittest.make(_ios_bootstrap_without_integration_test_pkg_test_impl)
 _t5_test = unittest.make(_ios_env_test_impl)
 _t6_test = unittest.make(_linux_bootstrap_has_no_file_fallback_test_impl)
+_t7_test = unittest.make(_test_tags_test_impl)
 
 _bootstrap_file_test = analysistest.make(_bootstrap_file_test_impl, config_settings = _DBG)
 _application_info_test = analysistest.make(_application_info_test_impl, config_settings = _DBG)
@@ -336,7 +452,11 @@ _bootstrap_resolves_main_test = analysistest.make(
     expect_failure = True,
     config_settings = _DBG,
 )
-_direct_test_rule_test = analysistest.make(_direct_test_rule_test_impl, config_settings = _DBG)
+_direct_test_rule_test = analysistest.make(
+    _direct_test_rule_test_impl,
+    attrs = {"ios_bundle_id": attr.string()},
+    config_settings = _DBG,
+)
 _macro_wiring_test = analysistest.make(
     _macro_wiring_test_impl,
     attrs = {
@@ -344,8 +464,10 @@ _macro_wiring_test = analysistest.make(
         "platform": attr.string(),
         "package_name": attr.string(),
         "ios_bundle_id": attr.string(),
+        "expected_bundle_id": attr.string(),
         "bootstrap_kind": attr.string(),
         "runner_srcs": attr.string_list(),
+        "expected_tags": attr.string_list(),
     },
     config_settings = _DBG,
 )
@@ -434,10 +556,6 @@ def ios_integration_test_test_suite(name):
         name = name + "_bootstrap_resolves_main",
         target_under_test = ":_ios_direct_bootstrap_ambiguous",
     )
-    _direct_test_rule_test(
-        name = name + "_direct_test_rule",
-        target_under_test = ":_ios_direct_test",
-    )
 
     # The macro-created test target is Apple-toolchain-bound (see the
     # macOS-gated test below); its wiring is pinned here instead, by reading
@@ -445,6 +563,12 @@ def ios_integration_test_test_suite(name):
     # asserting them in analysis.
     created = native.existing_rules()
     macro_test_rule = created["_ios_macro_test"]
+
+    _direct_test_rule_test(
+        name = name + "_direct_test_rule",
+        target_under_test = ":_ios_direct_test",
+        ios_bundle_id = created["_ios_direct_test"]["ios_bundle_id"],
+    )
 
     # Internal `flutter_ios_app` target names derive from the app name, as in
     # ios_test's expectations.
@@ -456,11 +580,15 @@ def ios_integration_test_test_suite(name):
         platform = macro_test_rule["platform"],
         package_name = macro_test_rule["package_name"],
         ios_bundle_id = macro_test_rule["ios_bundle_id"],
+        # Resolved here in the same package the macro ran in, so this is
+        # exactly the default the macro must have computed.
+        expected_bundle_id = resolve_ios_bundle_id("_ios_macro_test", ""),
         bootstrap_kind = created["___ios_macro_test_bootstrap"]["kind"],
         runner_srcs = [
             str(s)
             for s in created[runner_name]["srcs"]
         ],
+        expected_tags = macro_test_rule["tags"],
     )
     _env_collision_test(
         name = name + "_env_collision",
@@ -480,6 +608,7 @@ def ios_integration_test_test_suite(name):
         _t4_test,
         _t5_test,
         _t6_test,
+        _t7_test,
     )
     native.test_suite(
         name = name,

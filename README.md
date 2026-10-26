@@ -1460,7 +1460,7 @@ flutter_integration_test(
 )
 ```
 
-The bundle id defaults to `com.example.<package>.<target>` so two tests never share one; pass `ios_bundle_id` to take control. Pass `ios_runner_srcs` / `ios_info_plist` to override the conventional `ios/Runner/*.swift` discovery and `ios/Runner/Info.plist`. The app, debug-app, and test targets carry `target_compatible_with = ["@platforms//os:macos"]`, so `bazel test //...` skips them on Linux; the bootstrap and kernel-compile targets stay portable. See `e2e/integration_ios` for the full workspace: a counter + asset app with a Swift method-channel plugin, a green suite, and a `manual` red twin proving failures are loud. The red twin (`//:app_test_red`) carries one deliberately wrong expectation; its run fails with `RED_TWIN_MUST_FAIL` in the output, which the CI red-twin step asserts — if that string is missing, the harness swallowed a failure.
+The bundle id defaults to `com.example.<package path>.<name>.<label hash>` — the readable test name plus a short deterministic hash of the test target's full label — so two tests never share one (the simulator refuses a second install under a known id); pass `ios_bundle_id` to take control with a fixed id, used verbatim. The per-launch harness URL carries a random per-run token the harness checks, so a stray dial-back from another run is refused, never adopted. The generated test carries the `exclusive` tag (merged with your `tags`), so Bazel never runs two simulator tests at once. Pass `ios_runner_srcs` / `ios_info_plist` to override the conventional `ios/Runner/*.swift` discovery and `ios/Runner/Info.plist`. The app, debug-app, and test targets carry `target_compatible_with = ["@platforms//os:macos"]`, so `bazel test //...` skips them on Linux; the bootstrap and kernel-compile targets stay portable. See `e2e/integration_ios` for the full workspace: a counter + asset app with a Swift method-channel plugin, a green suite, and a `manual` red twin proving failures are loud. The red twin (`//:app_test_red`) carries one deliberately wrong expectation; its run fails with `RED_TWIN_MUST_FAIL` in the output, which the CI red-twin step asserts — if that string is missing, the harness swallowed a failure.
 
 | Attribute | Description |
 |---|---|
@@ -1477,7 +1477,7 @@ The bundle id defaults to `com.example.<package>.<target>` so two tests never sh
 | `window_title` | Linux GTK window title (`platform = "linux"`). Defaults to the target name. |
 | `android_package_name` | Android application package name (`platform = "android"`). Defaults to `"com.example.flutter_integration_test"`. |
 | `android_abi` | Android ABI (`"x64"` or `"arm64"`, `platform = "android"`). Defaults to `"x64"`. |
-| `ios_bundle_id` | iOS CFBundleIdentifier (`platform = "ios"`). Defaults to `"com.example.<package_name>.<name>"`, so two tests never share an id. |
+| `ios_bundle_id` | iOS CFBundleIdentifier (`platform = "ios"`). Defaults to `"com.example.<package path>.<name>.<label hash>"` (label hash keeps distinct targets distinct), used verbatim when set. |
 | `ios_runner_srcs` | Runner Swift sources (`platform = "ios"`). Defaults to `None`, which discovers the package's `ios/Runner/*.swift`. |
 | `ios_info_plist` | `Info.plist` override (`platform = "ios"`). Defaults to `None`, which preprocesses the package's `ios/Runner/Info.plist`. |
 | `include_tags` | Run only tests matching every one of these `package:test` tag selectors, as `flutter test --tags` intersects them. An attribute selection that matches no test fails the target. |
