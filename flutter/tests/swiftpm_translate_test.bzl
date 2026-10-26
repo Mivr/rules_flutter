@@ -288,8 +288,30 @@ def swiftpm_translate_test_suite(name):
         _product_naming_test_target_fails_test,
         _same_dep_onto_test_target_fails_test,
         _executable_target_refusal_test,
+        _conditioned_dep_refusal_test,
     )
     native.test_suite(
         name = name,
         tests = [":" + name + "_unit"],
     )
+
+def _conditioned_dep_refusal_test_impl(ctx):
+    env = unittest.begin(ctx)
+    manifest = """// swift-tools-version:5.9
+import PackageDescription
+let package = Package(
+    name: "Cond",
+    products: [.library(name: "Cond", targets: ["Cond"])],
+    dependencies: [.package(url: "https://example.com/Dep.git", from: "1.0.0")],
+    targets: [.target(name: "Cond", dependencies: [.product(name: "Dp", package: "Dep", condition: .when(platforms: [.iOS]))])],
+)
+"""
+    parsed = parse_swiftpm_package("cond", manifest)
+    asserts.true(env, parsed.ok)
+    translated = translate_swiftpm_package("cond", "deps", parsed.model, ["cond", "dep"], {"Cond": struct(dir = "d", srcs = ["d/a.swift"])})
+    asserts.true(env, not translated.ok)
+    asserts.true(env, "with a `condition:`" in translated.error)
+    asserts.true(env, "\"Cond\"" in translated.error)
+    return unittest.end(env)
+
+_conditioned_dep_refusal_test = unittest.make(_conditioned_dep_refusal_test_impl)

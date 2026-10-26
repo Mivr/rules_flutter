@@ -7,6 +7,8 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
+  spm_bigint_plugin:
+    path: spm_bigint_plugin/
 
 dev_dependencies:
   flutter_test:

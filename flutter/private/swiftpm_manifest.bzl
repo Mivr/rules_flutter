@@ -303,17 +303,20 @@ def _swiftpm_parse_target_dep(element):
 
     Accepts a string, `.target(name:)` and `.byName(name:)` (a target of
     the same package) and `.product(name:package:)` (a product of a
-    declared `.package(...)` dependency).
+    declared `.package(...)` dependency). Each form accepts an optional
+    `condition: .when(platforms: [...])` limiting the dependency to the
+    listed platforms (`.iOS`, `.macOS`).
 
     Args:
         element: The element's token list.
 
     Returns:
-        `struct(ok, detail, dep)`: `dep` is `struct(kind, name, package)`
-        with `kind` `"same"` or `"product"`.
+        `struct(ok, detail, dep)`: `dep` is `struct(kind, name, package,
+        condition)` with `kind` `"same"` or `"product"` and `condition`
+        None or `struct(platforms)`.
     """
     if len(element) == 1 and element[0].kind == "str":
-        return struct(ok = True, detail = "", dep = struct(kind = "same", name = element[0].text, package = ""))
+        return struct(ok = True, detail = "", dep = struct(kind = "same", name = element[0].text, package = "", condition = None))
     head = _swiftpm_call_head(element)
     if not head.ok or not head.dotted or head.name not in ["target", "byName", "product"]:
         return struct(ok = False, detail = "expected a target dependency (a string, `.target(name:)`, `.byName(name:)` or `.product(name:package:)`)", dep = None)
@@ -324,6 +327,44 @@ def _swiftpm_parse_target_dep(element):
         return _swiftpm_parse_product_dep(kwargs.kwargs)
     return _swiftpm_parse_same_dep(kwargs.kwargs)
 
+_SWIFTPM_CONDITION_PLATFORMS = {"iOS": "ios", "macOS": "macos"}
+
+def _swiftpm_parse_dep_condition(kwarg):
+    """Read a `condition:` target-dependency argument.
+
+    Only `.when(platforms: [...])` translates: the hub builds one
+    library for every Apple platform, so any other shape (traits,
+    configurations, other platforms) has no Bazel meaning and fails.
+
+    Args:
+        kwarg: The `condition:` kwarg struct, or None when absent.
+
+    Returns:
+        `struct(ok, detail, value)`: `value` is None when the argument
+        is absent, else `struct(platforms)` with `"ios"`/`"macos"`
+        entries in manifest order.
+    """
+    if kwarg == None:
+        return struct(ok = True, detail = "", value = None)
+    head = _swiftpm_call_head(kwarg.value)
+    if not head.ok or not head.dotted or head.name != "when":
+        return struct(ok = False, detail = "expected a build condition (`.when(platforms: [...])`)", value = None)
+    kwargs = _swiftpm_split_kwargs(head.args)
+    if not kwargs.ok:
+        return struct(ok = False, detail = kwargs.detail, value = None)
+    if len(kwargs.kwargs) != 1 or kwargs.kwargs[0].key != "platforms":
+        return struct(ok = False, detail = "only `.when(platforms: [...])` conditions are supported", value = None)
+    array = _swiftpm_array_parts(kwargs.kwargs[0].value)
+    if not array.ok:
+        return struct(ok = False, detail = array.detail, value = None)
+    platforms = []
+    for element in array.elements:
+        if len(element) == 2 and element[0].kind == "punct" and element[0].text == "." and element[1].kind == "word" and element[1].text in _SWIFTPM_CONDITION_PLATFORMS:
+            platforms.append(_SWIFTPM_CONDITION_PLATFORMS[element[1].text])
+        else:
+            return struct(ok = False, detail = "unsupported condition platform (only `.iOS` and `.macOS` translate)", value = None)
+    return struct(ok = True, detail = "", value = struct(platforms = platforms))
+
 def _swiftpm_parse_same_dep(kwargs):
     """Read a `.target(name:)` / `.byName(name:)` dependency.
 
@@ -333,15 +374,19 @@ def _swiftpm_parse_same_dep(kwargs):
     Returns:
         `struct(ok, detail, dep)`.
     """
+    by_key = {kwarg.key: kwarg for kwarg in kwargs}
     for kwarg in kwargs:
-        if kwarg.key != "name":
+        if kwarg.key != "name" and kwarg.key != "condition":
             return struct(ok = False, detail = "unknown dependency argument `{key}`".format(key = kwarg.key), dep = None)
-    if len(kwargs) != 1:
+    if "name" not in by_key or (len(kwargs) != 1 and not (len(kwargs) == 2 and "condition" in by_key)):
         return struct(ok = False, detail = "expected exactly `name:`", dep = None)
-    one = _swiftpm_single_string(kwargs[0].value)
+    one = _swiftpm_single_string(by_key["name"].value)
     if not one.ok:
         return struct(ok = False, detail = one.detail, dep = None)
-    return struct(ok = True, detail = "", dep = struct(kind = "same", name = one.text, package = ""))
+    condition = _swiftpm_parse_dep_condition(by_key.get("condition", None))
+    if not condition.ok:
+        return struct(ok = False, detail = condition.detail, dep = None)
+    return struct(ok = True, detail = "", dep = struct(kind = "same", name = one.text, package = "", condition = condition.value))
 
 def _swiftpm_parse_product_dep(kwargs):
     """Read a `.product(name:package:)` dependency.
@@ -354,7 +399,7 @@ def _swiftpm_parse_product_dep(kwargs):
     """
     by_key = {kwarg.key: kwarg for kwarg in kwargs}
     for kwarg in kwargs:
-        if kwarg.key != "name" and kwarg.key != "package":
+        if kwarg.key != "name" and kwarg.key != "package" and kwarg.key != "condition":
             return struct(ok = False, detail = "unknown `.product(...)` argument `{key}`".format(key = kwarg.key), dep = None)
     if "name" not in by_key or "package" not in by_key:
         return struct(ok = False, detail = "expected `name:` and `package:`", dep = None)
@@ -362,7 +407,10 @@ def _swiftpm_parse_product_dep(kwargs):
     package = _swiftpm_single_string(by_key["package"].value)
     if not name.ok or not package.ok:
         return struct(ok = False, detail = "expected string literals for `name:` and `package:`", dep = None)
-    return struct(ok = True, detail = "", dep = struct(kind = "product", name = name.text, package = package.text))
+    condition = _swiftpm_parse_dep_condition(by_key.get("condition", None))
+    if not condition.ok:
+        return struct(ok = False, detail = condition.detail, dep = None)
+    return struct(ok = True, detail = "", dep = struct(kind = "product", name = name.text, package = package.text, condition = condition.value))
 
 _SWIFTPM_REFUSED_TARGET_KEYS = ["resources", "swiftSettings", "cSettings", "cxxSettings", "linkerSettings", "plugins"]
 

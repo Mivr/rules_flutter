@@ -112,7 +112,7 @@ def _swiftpm_special_kind_error(identity, kind, name):
         hint = _swiftpm_build_files_hint(identity),
     )
 
-def _swiftpm_locate_package_dep(identity, package, pkg_deps):
+def swiftpm_locate_package_dep(identity, package, pkg_deps):
     """Resolve a `.product(name:package:)` reference to a pin identity.
 
     Matches `package:` against a `name:` of a `.package(...)` of the same
@@ -120,6 +120,8 @@ def _swiftpm_locate_package_dep(identity, package, pkg_deps):
     segment minus an optional `.git`); `id:` declarations match through
     their `name:` only. Every comparison is case-insensitive: manifests
     keep their own case while `Package.resolved` lowercases the identity.
+    The pub plugin spoke reuses this matcher so its products resolve
+    exactly as the hub's do.
 
     Args:
         identity: The SwiftPM package identity.
@@ -217,7 +219,7 @@ def _swiftpm_product_dep_label(identity, hub_name, dep, pkg_deps, pin_identities
     Returns:
         `struct(ok, error, label)`.
     """
-    located = _swiftpm_locate_package_dep(identity, dep.package, pkg_deps)
+    located = swiftpm_locate_package_dep(identity, dep.package, pkg_deps)
     if not located.ok:
         return struct(ok = False, error = located.error, label = "")
     canonical = None
@@ -231,6 +233,11 @@ def _swiftpm_product_dep_label(identity, hub_name, dep, pkg_deps, pin_identities
 
 def _swiftpm_target_edge(identity, model, target, by_name, pin_identities, hub_name):
     """Resolve one target's dependencies to Bazel labels.
+
+    A dependency carrying a `condition:` fails the fetch: the hub builds
+    one library for every Apple platform, so a platform-gated dependency
+    has no Bazel meaning here. The pub plugin spoke filters conditions
+    per platform instead (see `select_apple_swiftpm_deps`).
 
     Args:
         identity: The SwiftPM package identity.
@@ -247,6 +254,8 @@ def _swiftpm_target_edge(identity, model, target, by_name, pin_identities, hub_n
     labels = []
     followed = []
     for dep in target.deps:
+        if getattr(dep, "condition", None) != None:
+            return struct(ok = False, error = "SwiftPM package {identity}: target {target} depends on {name} with a `condition:`, which has no Bazel translation.".format(identity = repr(identity), target = repr(target.name), name = repr(dep.name)), labels = [], followed = [])
         if dep.kind == "same":
             resolved = _swiftpm_resolve_same_dep(identity, model.targets, by_name, target.name, dep)
             if not resolved.ok:

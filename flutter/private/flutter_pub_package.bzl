@@ -34,11 +34,13 @@ load("//flutter/private:flutter_pubspec.bzl", "asset_flavor_error", "parse_flutt
 load(":asset_uri.bzl", "normalize_spoke_asset_block", "normalize_spoke_assets", "normalize_spoke_fonts", "normalize_spoke_shaders")
 load(
     ":flutter_pub_apple.bzl",
-    _apple_plugin_targets = "apple_plugin_targets",
+    "detect_apple_swiftpm_deps",
+    "with_apple_swiftpm_deps",
     _detect_apple_plugin_sources = "detect_apple_plugin_sources",
-    _glob_block = "glob_block",
     _has_files_under = "has_files_under",
     _plugin_apple_libs_arg = "plugin_apple_libs_arg",
+    _plugin_extra_loads = "plugin_extra_loads",
+    _plugin_extra_targets = "plugin_extra_targets",
     _plugin_privacy_files_arg = "plugin_privacy_files_arg",
 )
 load(
@@ -202,19 +204,6 @@ def _make_android_native_build_unsupported_content(package_name, version):
     # The message names a classified package name and a lock version; the
     # whole text still renders as one escaped literal, never spliced raw.
     return "fail(" + starlark_string_literal(message) + ")\n"
-
-def _split_glob_block(srcs_dirs, src_exts, hdr_exts):
-    """Format separate srcs/hdrs glob expressions for desktop plugins.
-
-    Returns (srcs_glob, hdrs_glob) so the spoke can pass the lists to
-    flutter_linux_plugin_library / flutter_windows_plugin_library
-    separately — those rules require .h/.hh/.hpp on `hdrs` and the
-    compilable extensions on `srcs`.
-    """
-    return _glob_block(srcs_dirs, src_exts), _glob_block(srcs_dirs, hdr_exts)
-
-_DESKTOP_HDR_EXTS = ("h", "hh", "hpp")
-_DESKTOP_C_EXTS = ("cc", "cpp", "c")
 
 def encode_spoke_fonts(parsed_fonts):
     """The spoke's font attrs from normalized `flutter.fonts` entries.
@@ -579,72 +568,6 @@ def _spoke_deps_block(deps):
     # through the escaping helper, so a hostile label lands inert.
     dep_lines = ["        " + starlark_string_literal(dep) + "," for dep in deps]
     return "    deps = [\n{}\n    ],\n".format("\n".join(dep_lines))
-
-def _desktop_plugin_target(name, src_dir, platform):
-    """The `flutter_<platform>_plugin_library` target for one desktop platform."""
-
-    # Same shape as above: `name` is a classified lock package name and
-    # `platform` is `"linux"` or `"windows"` at every call site.
-    srcs, hdrs = _split_glob_block([src_dir], _DESKTOP_C_EXTS, _DESKTOP_HDR_EXTS)
-    return """
-flutter_{platform}_plugin_library(
-    name = "{name}_{platform}",
-    srcs = {srcs},
-    hdrs = {hdrs},
-    includes = ["{platform}/include"],
-    visibility = ["//visibility:public"],
-)""".format(
-        name = name,
-        platform = platform,
-        srcs = srcs,
-        hdrs = hdrs,
-    )
-
-def _plugin_extra_loads(apple_macos_srcs_dirs, apple_ios_srcs_dirs, linux_src_dir, windows_src_dir):
-    """The extra `load` lines a plugin spoke needs, joined for the template."""
-    extra_loads = []
-    if apple_macos_srcs_dirs or apple_ios_srcs_dirs:
-        extra_loads.append('load("@rules_flutter//flutter:macos.bzl", "flutter_apple_plugin_library")')
-    if linux_src_dir:
-        extra_loads.append('load("@rules_flutter//flutter:linux.bzl", "flutter_linux_plugin_library")')
-    if windows_src_dir:
-        extra_loads.append('load("@rules_flutter//flutter:windows.bzl", "flutter_windows_plugin_library")')
-    return "\n".join(extra_loads)
-
-def _plugin_extra_targets(name, apple_macos_srcs_dirs, apple_ios_srcs_dirs, apple_macos_include_dirs, apple_ios_include_dirs, linux_src_dir, windows_src_dir):
-    """The per-platform plugin library targets, joined for the template.
-
-    NOTE: Android Kotlin/Java sources are NOT compiled in the top-level
-    spoke BUILD. Instead, they're exposed via a sibling `android/`
-    sub-package (see make_android_subpackage_build_content) which loads
-    @rules_android + @rules_kotlin lazily — only when something queries
-    `@<spoke>//android:lib`. Mac-only / web-only workspaces never trigger
-    the parse and don't pay the @rules_android / @rules_kotlin cost.
-    The application-side `flutter_android_app` macro depends on the hub's
-    `android/all_android_plugin_libs` aggregator, which deps on every
-    spoke's `android:lib` — so Android-targeted builds pick up all
-    plugin libraries automatically.
-    """
-    extra_targets = []
-    if apple_macos_srcs_dirs:
-        extra_targets.append(_apple_plugin_targets(
-            name,
-            apple_macos_srcs_dirs,
-            apple_macos_include_dirs,
-            "macos",
-        ))
-    if apple_ios_srcs_dirs:
-        extra_targets.append(_apple_plugin_targets(
-            name,
-            apple_ios_srcs_dirs,
-            apple_ios_include_dirs,
-            "ios",
-        ))
-    if linux_src_dir:
-        extra_targets.append(_desktop_plugin_target(name, linux_src_dir, "linux"))
-    if windows_src_dir:
-        extra_targets.append(_desktop_plugin_target(name, windows_src_dir, "windows"))
-    return "\n".join(extra_targets)
 
 def make_flutter_plugin_build_content(
         name,
@@ -1940,6 +1863,8 @@ def _build_plugin_spoke_content(ctx, pubspec, dep_labels, assets, unreplaced_hoo
         pkg_asset_flavors = assets.pkg_asset_flavors,
         pkg_shaders = assets.pkg_shaders,
     )
+    apple_swiftpm = detect_apple_swiftpm_deps(ctx, package_name, apple, ctx.attr.swift_resolved_label, ctx.attr.swift_pinned_identities, ctx.attr.swift_unpinned_errors, ctx.attr.hub_name)
+    build_content = with_apple_swiftpm_deps(build_content, package_name, apple_swiftpm.macos, apple_swiftpm.ios)
     return struct(build_content = build_content, android = android)
 
 def _build_library_spoke_content(ctx, pubspec, dep_labels, assets, unreplaced_hook):
@@ -2445,6 +2370,18 @@ flutter_pub_package = repository_rule(
                   "make deliberately; it is never a default.",
             default = [],
         ),
+        "swift_resolved_label": attr.string(
+            doc = "Label of the hub's `swift_package_resolved` file, or empty when the hub sets none.",
+            default = "",
+        ),
+        "swift_pinned_identities": attr.string_list(
+            doc = "SwiftPM package identities pinned in the hub's resolved file.",
+            default = [],
+        ),
+        "swift_unpinned_errors": attr.string_dict(
+            doc = "Identity to fetch refusal for pins the hub cannot fetch.",
+            default = {},
+        ),
         "overlay_roots": attr.label_list(
             doc = "BUILD.bazel anchors for overlay trees. Each label points at " +
                   "an `ext/BUILD.bazel` (or equivalent) that anchors a directory " +
@@ -2492,6 +2429,18 @@ flutter_pub_path_package = repository_rule(
             doc = "Treat this package's build hook as irrelevant, same as " +
                   "`flutter_pub_package`.",
             default = False,
+        ),
+        "swift_resolved_label": attr.string(
+            doc = "Label of the hub's `swift_package_resolved` file, or empty when the hub sets none.",
+            default = "",
+        ),
+        "swift_pinned_identities": attr.string_list(
+            doc = "SwiftPM package identities pinned in the hub's resolved file.",
+            default = [],
+        ),
+        "swift_unpinned_errors": attr.string_dict(
+            doc = "Identity to fetch refusal for pins the hub cannot fetch.",
+            default = {},
         ),
         "overlay_roots": attr.label_list(
             doc = "BUILD.bazel anchors for overlay trees, same as " +

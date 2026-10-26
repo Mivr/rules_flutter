@@ -22,6 +22,7 @@ load(":flutter_integration_test_test.bzl", "flutter_integration_test_test_suite"
 load(":flutter_library_test.bzl", "flutter_library_test_suite")
 load(":flutter_plugin_test.bzl", "flutter_plugin_test_suite")
 load(":flutter_prebuilt_test.bzl", "flutter_prebuilt_test_suite")
+load(":flutter_pub_apple_test.bzl", "flutter_pub_apple_test_suite")
 load(":flutter_pub_overlays_test.bzl", "flutter_pub_overlays_test_suite")
 load(":flutter_pub_package_test.bzl", "flutter_pub_package_test_suite")
 load(":flutter_pub_scan_test.bzl", "flutter_pub_scan_test_suite")
@@ -196,6 +197,8 @@ flutter_library_test_suite(name = "flutter_library_test")
 flutter_plugin_test_suite(name = "flutter_plugin_test")
 
 flutter_prebuilt_test_suite(name = "flutter_prebuilt_test")
+
+flutter_pub_apple_test_suite(name = "flutter_pub_apple_test")
 
 flutter_pub_package_test_suite(name = "flutter_pub_package_test")
 

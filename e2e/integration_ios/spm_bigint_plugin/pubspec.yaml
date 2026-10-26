@@ -1,0 +1,17 @@
+name: spm_bigint_plugin
+description: E2e fixture proving a pub plugin's SwiftPM product links into its Apple library.
+version: 0.0.1
+publish_to: none
+
+environment:
+  sdk: ^3.13.0
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+flutter:
+  plugin:
+    platforms:
+      ios:
+        pluginClass: SpmBigintPlugin

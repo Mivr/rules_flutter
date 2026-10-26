@@ -22,6 +22,28 @@ flutter_integration_test(
     ],
 )
 
+# The SwiftPM plugin suite: proves a pub path plugin's `Package.swift`
+# product (BigInt, from the hub's pinned `<hub>__swiftpm-bigint` spoke)
+# links into the plugin's Apple library. The native method computes
+# 2^100 with BigInt at run time, so the assertion below only passes
+# when the product made it into the link.
+flutter_integration_test(
+    name = "plugin_spm_test",
+    package_name = "integration_ios",
+    srcs = ["integration_test/plugin_spm_test.dart"],
+    app_srcs = ["lib/main.dart"],
+    assets = ["assets/logo.png"],
+    platform = "ios",
+    deps = [
+        "//ios_greeting_plugin",
+        "@deps//:flutter",
+        "@deps//:flutter_test",
+        "@deps//:integration_test",
+        "@deps//:spm_bigint_plugin",
+        "@rules_flutter//flutter:material_icons",
+    ],
+)
+
 # Red twin of `:app_test`: its expectation is wrong on purpose (see
 # integration_test/red_test.dart). `manual` so `bazel test //...` stays green;
 # the full-matrix workflow runs it by name and asserts the run FAILS, proving
@@ -52,6 +74,8 @@ build_test(
     targets = [
         ":__app_test_bootstrap",
         ":__app_test_app",
+        ":__plugin_spm_test_bootstrap",
+        ":__plugin_spm_test_app",
     ],
 )
 
@@ -93,6 +117,25 @@ flutter_test(
     ],
 )
 
+# Host-side lint twin of `:plugin_spm_test`: same portable split (the
+# app's `lib/main.dart` plus the test file as `main`) so the analysis
+# test below lints the SwiftPM plugin's Dart on every OS.
+flutter_test(
+    name = "plugin_spm_test_lint",
+    package_name = "integration_ios",
+    srcs = ["lib/main.dart"],
+    main = "integration_test/plugin_spm_test.dart",
+    tags = ["manual"],
+    deps = [
+        "//ios_greeting_plugin",
+        "@deps//:flutter",
+        "@deps//:flutter_test",
+        "@deps//:integration_test",
+        "@deps//:spm_bigint_plugin",
+        "@rules_flutter//flutter:material_icons",
+    ],
+)
+
 # The macOS-only Dart (lib/, integration_test/) cannot be named by
 # `bazel test //...` on Linux: the app, debug-app and test targets skip off
 # macOS via `target_compatible_with`, so the `.bazelrc` analysis aspect never
@@ -104,6 +147,7 @@ dart_analysis_test(
     targets = [
         ":app_test_lint",
         ":app_test_red_lint",
+        ":plugin_spm_test_lint",
         "//ios_greeting_plugin",
     ],
 )

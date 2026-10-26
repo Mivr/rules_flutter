@@ -227,6 +227,8 @@ def swiftpm_manifest_test_suite(name):
         _parses_the_bigint_manifest_test,
         _parses_every_supported_shape_test,
         _parses_a_plugin_template_manifest_test,
+        _parses_condition_arguments_test,
+        _condition_refusals_test,
         _refusal_names_identity_file_and_line_test,
         _tools_line_refusals_test,
         _statement_refusals_test,
@@ -235,3 +237,42 @@ def swiftpm_manifest_test_suite(name):
         name = name,
         tests = [":" + name + "_unit"],
     )
+
+_CONDITIONED = """// swift-tools-version: 5.9
+import PackageDescription
+let package = Package(
+    name: "Cond",
+    products: [.library(name: "Cond", targets: ["Cond"])],
+    dependencies: [.package(url: "https://example.com/Dep.git", from: "1.0.0")],
+    targets: [.target(name: "Cond", dependencies: [.product(name: "Dp", package: "Dep", condition: .when(platforms: [.iOS, .macOS])), .target(name: "Help", condition: .when(platforms: [.iOS])), "Plain"])],
+)
+"""
+
+def _parses_condition_arguments_test_impl(ctx):
+    env = unittest.begin(ctx)
+    parsed = parse_swiftpm_package("cond", _CONDITIONED)
+    asserts.true(env, parsed.ok)
+    deps = parsed.model.targets[0].deps
+    asserts.equals(env, 3, len(deps))
+    asserts.equals(env, ["ios", "macos"], deps[0].condition.platforms)
+    asserts.equals(env, ["ios"], deps[1].condition.platforms)
+    asserts.equals(env, None, deps[2].condition)
+    return unittest.end(env)
+
+def _condition_refusals_test_impl(ctx):
+    env = unittest.begin(ctx)
+    cases = [
+        (".target(name: \"C\", dependencies: [.product(name: \"Dp\", package: \"Dep\", condition: .when(platforms: [.watchOS]))])", "unsupported condition platform"),
+        (".target(name: \"C\", dependencies: [.product(name: \"Dp\", package: \"Dep\", condition: .when(traits: [\"Trait\"]))])", "only `.when(platforms: [...])`"),
+        (".target(name: \"C\", dependencies: [.product(name: \"Dp\", package: \"Dep\", condition: \"ios\")])", "expected a build condition"),
+        (".target(name: \"C\", dependencies: [.product(name: \"Dp\", package: \"Dep\", extra: 1)])", "unknown `.product(...)` argument"),
+    ]
+    for target_decl, detail in cases:
+        manifest = "// swift-tools-version: 5.9\nimport PackageDescription\nlet package = Package(name: \"Cond\", products: [.library(name: \"Cond\", targets: [\"C\"])], dependencies: [.package(url: \"https://example.com/Dep.git\", from: \"1.0.0\")], targets: [" + target_decl + "])\n"
+        parsed = parse_swiftpm_package("cond", manifest)
+        asserts.true(env, not parsed.ok)
+        asserts.true(env, detail in parsed.error)
+    return unittest.end(env)
+
+_parses_condition_arguments_test = unittest.make(_parses_condition_arguments_test_impl)
+_condition_refusals_test = unittest.make(_condition_refusals_test_impl)

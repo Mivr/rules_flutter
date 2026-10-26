@@ -185,21 +185,26 @@ jobs:
           grep -F '<failure' "$xml"
       # The SwiftPM red path behind the pinned download: `deps_unpinned`
       # uses the same lock and `Package.resolved` but no
-      # `swift_package_sha256`, so querying its BigInt spoke fails before
-      # any download. The output goes to a file: the step requires a
-      # non-zero exit, then greps the refusal text the README documents.
-      # No `continue-on-error`: a passing query fails the job.
+      # `swift_package_sha256`, so querying the path plugin's spoke fails
+      # before any download: the plugin's `Package.swift` needs BigInt,
+      # whose pin cannot be fetched, and the refusal names the plugin,
+      # its manifest, and the checksum fix. The output goes to a file:
+      # the step requires a non-zero exit, then greps the refusal text
+      # the README documents. No `continue-on-error`: a passing query
+      # fails the job.
       - name: SwiftPM unpinned red path (e2e/integration_ios)
         if: matrix.workspace == 'integration_ios'
         working-directory: e2e/integration_ios
         run: |
           status=0
-          bazel query @deps_unpinned__swiftpm-bigint//:all >swiftpm_unpinned_output.log 2>&1 || status=$?
+          bazel query @deps_unpinned__spm_bigint_plugin//:all >swiftpm_unpinned_output.log 2>&1 || status=$?
           cat swiftpm_unpinned_output.log
           if [ "$status" -eq 0 ]; then
             echo "expected the unpinned SwiftPM query to fail, but it passed"
             exit 1
           fi
+          grep -F 'Flutter plugin "spm_bigint_plugin"' swiftpm_unpinned_output.log
+          grep -F 'ios/spm_bigint_plugin/Package.swift' swiftpm_unpinned_output.log
           grep -F 'has no `swift_package_sha256["bigint"]` entry' swiftpm_unpinned_output.log
       - name: Report cache sizes
         if: always()
