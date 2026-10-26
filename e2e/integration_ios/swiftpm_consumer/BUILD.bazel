@@ -6,7 +6,10 @@ load("@rules_swift//swift:swift.bzl", "swift_library")
 # //:swiftpm_consumer_app.
 swift_library(
     name = "swiftpm_consumer",
-    srcs = ["Consumer.swift"],
+    srcs = [
+        "AppDelegate.swift",
+        "Consumer.swift",
+    ],
     # No OS constraint: the simulator build test below builds this for the
     # iOS simulator platform (whose OS is ios, not macos). `manual` keeps
     # Linux's `bazel test //...` from building it on the host.
