@@ -14,7 +14,7 @@ public class SpmBigintPlugin: NSObject, FlutterPlugin {
     // Computed with the linked BigInt product at run time, so the test
     // proves the product made it into this library's link.
     case "computeBig":
-      result("\(BigUInt(2).power(100)) \(BigInt("-0")!)")
+      result("\(BigUInt(2).power(100)) \(BigInt("-0", radix: 10)!)")
     default:
       result(FlutterMethodNotImplemented)
     }
