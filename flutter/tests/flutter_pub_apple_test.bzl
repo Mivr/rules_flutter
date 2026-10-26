@@ -172,6 +172,30 @@ def _template_manifest_builds_without_link_test_impl(ctx):
     asserts.equals(env, [], without_resolved.labels)
     return unittest.end(env)
 
+def _real_world_manifest_settings_still_link_test_impl(ctx):
+    env = unittest.begin(ctx)
+    manifest = _BIGINT_MANIFEST.replace(
+        'let package = Package(\n    name: "spm_bigint_plugin",',
+        'let package = Package(\n    name: "spm_bigint_plugin",\n    defaultLocalization: "en",',
+    ).replace(
+        '.package(url: "https://github.com/attaswift/BigInt.git", exact: "6.0.1")',
+        '.package(url: "https://github.com/attaswift/BigInt.git", "6.0.0"..<"7.0.0")',
+    ).replace(
+        '.target(name: "spm_bigint_plugin", dependencies:',
+        '.target(name: "spm_bigint_plugin", publicHeadersPath: "include", packageAccess: false, dependencies:',
+    )
+    selected = select_apple_swiftpm_deps(
+        "spm_bigint_plugin",
+        manifest,
+        "ios/spm_bigint_plugin",
+        ["ios/spm_bigint_plugin/Sources/spm_bigint_plugin"],
+        "ios",
+        _pins(),
+    )
+    asserts.true(env, selected.ok)
+    asserts.equals(env, ["@deps__swiftpm-bigint//:BigInt"], selected.labels)
+    return unittest.end(env)
+
 def _template_settings_leave_links_unchanged_test_impl(ctx):
     env = unittest.begin(ctx)
     with_settings = select_apple_swiftpm_deps(
@@ -410,6 +434,7 @@ _products_resolve_to_pinned_labels_test = unittest.make(_products_resolve_to_pin
 _conditions_filter_per_platform_test = unittest.make(_conditions_filter_per_platform_test_impl)
 _flutterframework_product_is_skipped_test = unittest.make(_flutterframework_product_is_skipped_test_impl)
 _template_manifest_builds_without_link_test = unittest.make(_template_manifest_builds_without_link_test_impl)
+_real_world_manifest_settings_still_link_test = unittest.make(_real_world_manifest_settings_still_link_test_impl)
 _template_settings_leave_links_unchanged_test = unittest.make(_template_settings_leave_links_unchanged_test_impl)
 _flutterframework_first_names_real_package_test = unittest.make(_flutterframework_first_names_real_package_test_impl)
 _conditional_dependencies_still_refused_test = unittest.make(_conditional_dependencies_still_refused_test_impl)
@@ -430,6 +455,7 @@ def flutter_pub_apple_test_suite(name):
         _conditions_filter_per_platform_test,
         _flutterframework_product_is_skipped_test,
         _template_manifest_builds_without_link_test,
+        _real_world_manifest_settings_still_link_test,
         _template_settings_leave_links_unchanged_test,
         _flutterframework_first_names_real_package_test,
         _conditional_dependencies_still_refused_test,

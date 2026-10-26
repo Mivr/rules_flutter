@@ -456,11 +456,12 @@ def _swiftpm_apply_target_kwarg(identity, kind, kwarg, acc, lenient):
         kind: The target head (`target`).
         kwarg: The parsed keyword argument.
         acc: The accumulator dict (mutated in place).
-        lenient: When True, skip target settings with no Bazel
-            translation (`resources`, `swiftSettings`, ...) instead of
-            refusing them. The pub plugin spoke reads only the
-            `.package(...)` declarations and the plugin target's
-            `dependencies`, so such settings never change its output.
+        lenient: When True, skip every setting that cannot change the
+            dependency list (`publicHeadersPath`, `packageAccess`,
+            `resources`, `swiftSettings`, ...) instead of refusing it.
+            The pub plugin spoke reads only the `.package(...)`
+            declarations and the plugin target's `dependencies`, so such
+            settings never change its output.
 
     Returns:
         `struct(ok, error)`.
@@ -478,9 +479,13 @@ def _swiftpm_apply_target_kwarg(identity, kind, kwarg, acc, lenient):
         if not listed.ok:
             return struct(ok = False, error = _swiftpm_fail(identity, kwarg.line, listed.detail))
         acc[key] = listed.items
+    elif lenient:
+        # The plugin spoke reads only the `.package(...)` declarations and
+        # the plugin target's `dependencies`, so any other target setting
+        # (`publicHeadersPath`, `packageAccess`, `resources`,
+        # `swiftSettings`, ...) never changes its output.
+        return struct(ok = True, error = "")
     elif key in _SWIFTPM_REFUSED_TARGET_KEYS:
-        if lenient:
-            return struct(ok = True, error = "")
         return struct(ok = False, error = _swiftpm_fail(identity, kwarg.line, _swiftpm_target_kwarg_error(acc["name"] if acc["name"] else kind, key)))
     else:
         return struct(ok = False, error = _swiftpm_fail(identity, kwarg.line, "unknown `.{kind}(...)` argument `{key}`".format(kind = kind, key = key)))
@@ -620,6 +625,15 @@ _SWIFTPM_PACKAGE_DEP_IGNORED = ["from", "exact", "branch", "revision"]
 def _swiftpm_parse_package_dep_element(identity, element):
     """Parse one `dependencies` array element (`.package(...)`).
 
+    The version requirement never matters to the rules (`Package.resolved`
+    pins the revision), so besides the `from:`/`exact:`/`branch:`/
+    `revision:` keyword forms any positional requirement form is accepted
+    and ignored: a version range (`"6.0.0"..<"7.0.0"`), a closed range
+    (`"1.0.0"..."1.9.0"`) or a requirement call (`.upToNextMajor(from:)`,
+    `.upToNextMinor(from:)`, `.exact(...)`, `.branch(...)`,
+    `.revision(...)`). A declaration with no `url:`, `id:`, `path:` or
+    `name:`, or with an unreadable locator, still fails.
+
     Args:
         identity: The SwiftPM package identity.
         element: The element's token list.
@@ -633,22 +647,29 @@ def _swiftpm_parse_package_dep_element(identity, element):
     head = _swiftpm_call_head(element)
     if not head.ok or not head.dotted or head.name != "package":
         return struct(ok = False, error = _swiftpm_fail(identity, line, "expected a package dependency (`.package(...)`)"), dep = None)
-    kwargs = _swiftpm_split_kwargs(head.args)
-    if not kwargs.ok:
-        return struct(ok = False, error = _swiftpm_fail(identity, line, kwargs.detail), dep = None)
+    split = _swiftpm_split_commas(head.args)
+    if not split.ok:
+        return struct(ok = False, error = _swiftpm_fail(identity, line, split.detail), dep = None)
     fields = {}
     kinds = {}
-    for kwarg in kwargs.kwargs:
-        if kwarg.key in _SWIFTPM_PACKAGE_DEP_IGNORED:
+    seen = {}
+    for part in split.parts:
+        if not (len(part) >= 3 and part[0].kind == "word" and part[1].kind == "punct" and part[1].text == ":"):
             continue
-        if kwarg.key not in _SWIFTPM_PACKAGE_DEP_STRINGS:
-            return struct(ok = False, error = _swiftpm_fail(identity, kwarg.line, "unknown `.package(...)` argument `{key}`".format(key = kwarg.key)), dep = None)
-        one = _swiftpm_single_string(kwarg.value)
+        key = part[0].text
+        if key in seen:
+            return struct(ok = False, error = _swiftpm_fail(identity, part[0].line, "duplicate argument `{key}`".format(key = key)), dep = None)
+        seen[key] = True
+        if key in _SWIFTPM_PACKAGE_DEP_IGNORED:
+            continue
+        if key not in _SWIFTPM_PACKAGE_DEP_STRINGS:
+            return struct(ok = False, error = _swiftpm_fail(identity, part[0].line, "unknown `.package(...)` argument `{key}`".format(key = key)), dep = None)
+        one = _swiftpm_single_string(part[2:])
         if not one.ok:
-            return struct(ok = False, error = _swiftpm_fail(identity, kwarg.line, one.detail), dep = None)
-        fields[kwarg.key] = one.text
-        if kwarg.key in ["url", "id", "path"]:
-            kinds[kwarg.key] = kwarg.key
+            return struct(ok = False, error = _swiftpm_fail(identity, part[0].line, one.detail), dep = None)
+        fields[key] = one.text
+        if key in ["url", "id", "path"]:
+            kinds[key] = key
     ref = fields.get("url", "")
     ref_kind = kinds.get("url", "")
     if not ref:
@@ -703,7 +724,10 @@ def _swiftpm_apply_package_kwarg(identity, kwarg, acc, lenient):
         identity: The SwiftPM package identity.
         kwarg: The parsed keyword argument.
         acc: The accumulator dict (mutated in place).
-        lenient: When True, skip untranslatable target settings.
+        lenient: When True, skip package settings outside the
+            `products:`/`dependencies:`/`targets:` the plugin spoke
+            reads (`defaultLocalization`, `pkgConfig`, `providers`,
+            ...).
 
     Returns:
         `struct(ok, error)`.
@@ -718,6 +742,11 @@ def _swiftpm_apply_package_kwarg(identity, kwarg, acc, lenient):
         if not parsed.ok:
             return struct(ok = False, error = _swiftpm_fail(identity, kwarg.line, parsed.detail))
         acc["modes"].extend(parsed.modes)
+        return struct(ok = True, error = "")
+    if lenient:
+        # The plugin spoke reads only `products:`, `dependencies:` and
+        # `targets:`, so any other package setting (`defaultLocalization`,
+        # `pkgConfig`, `providers`, ...) never changes its output.
         return struct(ok = True, error = "")
     return struct(ok = False, error = _swiftpm_fail(identity, kwarg.line, "unknown `Package(...)` argument `{key}`".format(key = key)))
 
@@ -877,9 +906,11 @@ def parse_swiftpm_plugin_package(identity, text):
     """Parse a plugin's `Package.swift` for the pub spoke's product links.
 
     The lenient entry point the pub plugin spoke uses: target settings
-    with no Bazel translation (`resources`, `swiftSettings`, ...) are
-    skipped, because the spoke keeps its own source, header and
-    privacy-manifest detection and reads only the manifest's
+    (`publicHeadersPath`, `packageAccess`, `resources`, `swiftSettings`,
+    ...) and package settings (`defaultLocalization`, `pkgConfig`,
+    `providers`, ...) outside the `products:`/`dependencies:`/`targets:`
+    the spoke reads are skipped, because the spoke keeps its own source,
+    header and privacy-manifest detection and reads only the manifest's
     `.package(...)` declarations and the plugin target's `dependencies`
     (with their `condition:`). Anything making the dependency list
     itself unknowable (an unreadable `dependencies:` entry, a variable

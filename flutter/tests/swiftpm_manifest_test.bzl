@@ -225,10 +225,82 @@ def _plugin_parser_skips_target_settings_test_impl(ctx):
     asserts.equals(env, "D", lenient.model.targets[0].deps[0].name)
     return unittest.end(env)
 
+_OBJC_PLUGIN_TARGET = "[.target(name: \"P\", publicHeadersPath: \"include\", packageAccess: false, dependencies: [.product(name: \"D\", package: \"Dep\")])]"
+
+def _plugin_parser_accepts_objc_target_settings_test_impl(ctx):
+    env = unittest.begin(ctx)
+    manifest = "// swift-tools-version: 5.9\nimport PackageDescription\nlet package = Package(name: \"P\", products: [.library(name: \"P\", targets: [\"P\"])], dependencies: [.package(url: \"https://example.com/Dep.git\", exact: \"1.0.0\")], targets: " + _OBJC_PLUGIN_TARGET + ")\n"
+    strict = parse_swiftpm_package("plugin", manifest)
+    asserts.true(env, not strict.ok)
+    asserts.true(env, "unknown `.target(...)` argument `publicHeadersPath`" in strict.error)
+    lenient = parse_swiftpm_plugin_package("plugin", manifest)
+    asserts.true(env, lenient.ok)
+    asserts.equals(env, 1, len(lenient.model.targets[0].deps))
+    asserts.equals(env, "D", lenient.model.targets[0].deps[0].name)
+    return unittest.end(env)
+
+_PLUGIN_PACKAGE_SETTINGS = ', defaultLocalization: "en", pkgConfig: "libfoo", providers: [.apt(["libfoo-dev"]), .brew(["libfoo"])]'
+
+def _plugin_parser_accepts_package_settings_test_impl(ctx):
+    env = unittest.begin(ctx)
+    manifest = "// swift-tools-version: 5.9\nimport PackageDescription\nlet package = Package(name: \"P\"" + _PLUGIN_PACKAGE_SETTINGS + ", products: [.library(name: \"P\", targets: [\"P\"])], targets: [.target(name: \"P\")])\n"
+    strict = parse_swiftpm_package("plugin", manifest)
+    asserts.true(env, not strict.ok)
+    asserts.true(env, "unknown `Package(...)` argument `defaultLocalization`" in strict.error)
+    lenient = parse_swiftpm_plugin_package("plugin", manifest)
+    asserts.true(env, lenient.ok)
+    asserts.equals(env, "", lenient.error)
+    asserts.equals(env, "P", lenient.model.targets[0].name)
+    return unittest.end(env)
+
+_REQUIREMENT_FORMS = [
+    '"6.0.0"..<"7.0.0"',
+    '"1.0.0"..."1.9.0"',
+    '.upToNextMajor(from: "6.0.0")',
+    '.upToNextMinor(from: "6.0.0")',
+    '.exact("6.0.1")',
+    '.branch("main")',
+    '.revision("abc123")',
+]
+
+def _package_dep_accepts_any_requirement_form_test_impl(ctx):
+    env = unittest.begin(ctx)
+    for requirement in _REQUIREMENT_FORMS:
+        manifest = "// swift-tools-version: 5.9\nimport PackageDescription\nlet package = Package(name: \"P\", products: [.library(name: \"P\", targets: [\"P\"])], dependencies: [.package(url: \"https://github.com/attaswift/BigInt.git\", " + requirement + ")], targets: [.target(name: \"P\", dependencies: [.product(name: \"BigInt\", package: \"BigInt\")])])\n"
+        strict = parse_swiftpm_package("pkg", manifest)
+        asserts.true(env, strict.ok)
+        asserts.equals(env, 1, len(strict.model.pkg_deps))
+        asserts.equals(env, "https://github.com/attaswift/BigInt.git", strict.model.pkg_deps[0].ref)
+        asserts.equals(env, "url", strict.model.pkg_deps[0].ref_kind)
+        lenient = parse_swiftpm_plugin_package("pkg", manifest)
+        asserts.true(env, lenient.ok)
+        asserts.equals(env, 1, len(lenient.model.pkg_deps))
+    return unittest.end(env)
+
+def _package_dep_still_refuses_unlocatable_test_impl(ctx):
+    env = unittest.begin(ctx)
+    cases = [
+        ("// swift-tools-version: 5.9\nimport PackageDescription\nlet package = Package(name: \"P\", products: [.library(name: \"P\", targets: [\"P\"])], dependencies: [.package(from: \"1.0.0\")], targets: [.target(name: \"P\")])\n", "needs one of `url:`, `id:` or `path:`"),
+        ("// swift-tools-version: 5.9\nimport PackageDescription\nlet package = Package(name: \"P\", products: [.library(name: \"P\", targets: [\"P\"])], dependencies: [.package(url: bigIntUrl, from: \"1.0.0\")], targets: [.target(name: \"P\")])\n", "expected one string literal"),
+        ("// swift-tools-version: 5.9\nimport PackageDescription\nlet package = Package(name: \"P\", products: [.library(name: \"P\", targets: [\"P\"])], dependencies: [.package(url: \"https://example.com/Dep.git\", bogus: 1)], targets: [.target(name: \"P\")])\n", "unknown `.package(...)` argument `bogus`"),
+    ]
+    for case in cases:
+        strict = parse_swiftpm_package("pkg", case[0])
+        asserts.true(env, not strict.ok)
+        asserts.true(env, case[1] in strict.error)
+        lenient = parse_swiftpm_plugin_package("pkg", case[0])
+        asserts.true(env, not lenient.ok)
+        asserts.true(env, case[1] in lenient.error)
+    return unittest.end(env)
+
 _parses_the_bigint_manifest_test = unittest.make(_parses_the_bigint_manifest_test_impl)
 _parses_every_supported_shape_test = unittest.make(_parses_every_supported_shape_test_impl)
 _parses_a_plugin_template_manifest_test = unittest.make(_parses_a_plugin_template_manifest_test_impl)
 _plugin_parser_skips_target_settings_test = unittest.make(_plugin_parser_skips_target_settings_test_impl)
+_plugin_parser_accepts_objc_target_settings_test = unittest.make(_plugin_parser_accepts_objc_target_settings_test_impl)
+_plugin_parser_accepts_package_settings_test = unittest.make(_plugin_parser_accepts_package_settings_test_impl)
+_package_dep_accepts_any_requirement_form_test = unittest.make(_package_dep_accepts_any_requirement_form_test_impl)
+_package_dep_still_refuses_unlocatable_test = unittest.make(_package_dep_still_refuses_unlocatable_test_impl)
 _refusal_names_identity_file_and_line_test = unittest.make(_refusal_names_identity_file_and_line_test_impl)
 _tools_line_refusals_test = unittest.make(_tools_line_refusals_test_impl)
 _statement_refusals_test = unittest.make(_statement_refusals_test_impl)
@@ -241,6 +313,10 @@ def swiftpm_manifest_test_suite(name):
         _parses_every_supported_shape_test,
         _parses_a_plugin_template_manifest_test,
         _plugin_parser_skips_target_settings_test,
+        _plugin_parser_accepts_objc_target_settings_test,
+        _plugin_parser_accepts_package_settings_test,
+        _package_dep_accepts_any_requirement_form_test,
+        _package_dep_still_refuses_unlocatable_test,
         _parses_condition_arguments_test,
         _condition_refusals_test,
         _refusal_names_identity_file_and_line_test,
