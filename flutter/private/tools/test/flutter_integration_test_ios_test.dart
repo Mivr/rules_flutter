@@ -185,6 +185,11 @@ Map<String, CannedSimctl> bootStubs(String udid, {bool skipBoot = false}) => {
   'xcrun simctl bootstatus $udid -b': const CannedSimctl(),
 };
 
+/// A canned `simctl get_app_container` answer resolving [bundleId] on [udid]
+/// to [containerDir].
+CannedSimctl containerStub(String containerDir) =>
+    CannedSimctl(stdoutText: '$containerDir\n');
+
 void main() {
   late Directory tmp;
   late Runfiles runfiles;
@@ -244,9 +249,12 @@ void main() {
       () async {
         final ipa = File('${tmp.path}/TestApp.ipa')
           ..writeAsBytesSync(fixtureIpaBytes());
+        final containerDir = '${tmp.path}/container-happy';
         final spawner = FakeSimctlSpawner(
           {
             ...bootStubs('udid-happy'),
+            'xcrun simctl get_app_container udid-happy com.example.testapp data':
+                containerStub(containerDir),
             'xcrun simctl terminate udid-happy com.example.testapp':
                 const CannedSimctl(),
             'xcrun simctl uninstall udid-happy com.example.testapp':
@@ -269,8 +277,8 @@ void main() {
         await underTest.startTarget(4242);
 
         // The calls happen in order: listing, boot, bootstatus, install of the
-        // extracted app, then the launch (which goes through the starter, not
-        // the spawner).
+        // extracted app, get_app_container resolving the data container, then
+        // the launch (which goes through the starter, not the spawner).
         expect(spawner.started[0], 'xcrun simctl list -j');
         expect(spawner.started[1], 'xcrun simctl boot udid-happy');
         expect(spawner.started[2], 'xcrun simctl bootstatus udid-happy -b');
@@ -281,6 +289,10 @@ void main() {
         final extractedApp = install.split(' ').last;
         expect(extractedApp, endsWith('TestApp.app'));
         expect(Directory(extractedApp).existsSync(), isTrue);
+        expect(
+          spawner.started[4],
+          'xcrun simctl get_app_container udid-happy com.example.testapp data',
+        );
 
         expect(launch['executable'], 'xcrun');
         expect(
@@ -294,8 +306,15 @@ void main() {
             'com.example.testapp',
           ],
         );
-        // The harness URL reaches the launched process only, on 127.0.0.1 with
-        // the harness port.
+        // On iOS `Platform.environment` is always empty, so the app reads the
+        // harness URL from the data-container file the launcher wrote; the
+        // launch environment carries it too, on 127.0.0.1 with the harness
+        // port.
+        expect(
+          File('$containerDir/tmp/flutter_integration_test_harness_url')
+              .readAsStringSync(),
+          'ws://127.0.0.1:4242${launcher.integrationWebSocketPath}',
+        );
         expect(launch['environment'], {
           'SIMCTL_CHILD_FLUTTER_INTEGRATION_TEST_HARNESS_URL':
               'ws://127.0.0.1:4242${launcher.integrationWebSocketPath}',
@@ -317,6 +336,159 @@ void main() {
           spawner.started.any((s) => s.contains('shutdown')),
           isFalse,
           reason: 'dispose leaves the simulator booted',
+        );
+      },
+    );
+
+    test(
+      'writes the harness URL under the returned container path before launch',
+      () async {
+        final appDir = Directory('${tmp.path}/TestApp.app')..createSync();
+        final containerDir = '${tmp.path}/container-write';
+        final spawner = FakeSimctlSpawner(
+          {
+            ...bootStubs('udid-container'),
+            'xcrun simctl get_app_container udid-container com.example.testapp data':
+                containerStub(containerDir),
+            'xcrun simctl terminate udid-container com.example.testapp':
+                const CannedSimctl(),
+            'xcrun simctl uninstall udid-container com.example.testapp':
+                const CannedSimctl(),
+          },
+          prefixAnswers: {
+            'xcrun simctl install udid-container ': const CannedSimctl(),
+          },
+        );
+        var fileExistedAtLaunch = false;
+        final launch = <String, Object?>{};
+        final underTest = ios.IosPlatformLauncher(
+          appPath: appDir.path,
+          bundleId: 'com.example.testapp',
+          baseTempDir: tmp.path,
+          spawner: spawner,
+          launchProcess: (exe, args, env) async {
+            fileExistedAtLaunch = File(
+              '$containerDir/tmp/flutter_integration_test_harness_url',
+            ).existsSync();
+            return captureLaunch(launch, exe, args, env);
+          },
+        );
+
+        await underTest.startTarget(4242);
+
+        expect(
+          fileExistedAtLaunch,
+          isTrue,
+          reason: 'the URL file is written before the launch call',
+        );
+        expect(
+          File('$containerDir/tmp/flutter_integration_test_harness_url')
+              .readAsStringSync(),
+          'ws://127.0.0.1:4242${launcher.integrationWebSocketPath}',
+        );
+        final installIndex = spawner.started.indexWhere(
+          (s) => s.startsWith('xcrun simctl install '),
+        );
+        final containerIndex = spawner.started.indexOf(
+          'xcrun simctl get_app_container udid-container com.example.testapp data',
+        );
+        expect(containerIndex, greaterThan(installIndex));
+
+        await underTest.dispose();
+      },
+    );
+
+    test(
+      'a failing get_app_container names the step and never launches',
+      () async {
+        final appDir = Directory('${tmp.path}/TestApp.app')..createSync();
+        final spawner = FakeSimctlSpawner(
+          {
+            ...bootStubs('udid-nocontainer'),
+            'xcrun simctl get_app_container udid-nocontainer com.example.testapp data':
+                const CannedSimctl(
+                  exitCode: 1,
+                  stderrText: 'no such app\n',
+                ),
+          },
+          prefixAnswers: {
+            'xcrun simctl install udid-nocontainer ': const CannedSimctl(),
+          },
+        );
+        final underTest = ios.IosPlatformLauncher(
+          appPath: appDir.path,
+          bundleId: 'com.example.testapp',
+          baseTempDir: tmp.path,
+          spawner: spawner,
+          launchProcess: (_, _, _) =>
+              fail('must not launch without the harness URL file'),
+        );
+
+        await expectLater(
+          underTest.startTarget(4242),
+          throwsA(
+            isA<StateError>().having(
+              (e) => e.message,
+              'message',
+              allOf(
+                contains('iOS'),
+                contains('get_app_container'),
+                contains('exit 1'),
+              ),
+            ),
+          ),
+        );
+      },
+    );
+
+    test(
+      'a hanging get_app_container fails after its bound naming the step',
+      () async {
+        final appDir = Directory('${tmp.path}/TestApp.app')..createSync();
+        final spawner = FakeSimctlSpawner(
+          {
+            ...bootStubs('udid-stuck'),
+            'xcrun simctl get_app_container udid-stuck com.example.testapp data':
+                const CannedSimctl(hang: true),
+          },
+          prefixAnswers: {
+            'xcrun simctl install udid-stuck ': const CannedSimctl(),
+          },
+        );
+        final underTest = ios.IosPlatformLauncher(
+          appPath: appDir.path,
+          bundleId: 'com.example.testapp',
+          baseTempDir: tmp.path,
+          spawner: spawner,
+          launchProcess: (_, _, _) =>
+              fail('must not launch without the harness URL file'),
+          bounds: const ios.IosLauncherBounds(
+            appContainerTimeout: Duration(seconds: 2),
+          ),
+        );
+
+        await expectLater(
+          underTest.startTarget(4242),
+          throwsA(
+            isA<StateError>().having(
+              (e) => e.message,
+              'message',
+              allOf(
+                contains('iOS'),
+                contains('get_app_container'),
+                contains('timed out'),
+              ),
+            ),
+          ),
+        );
+        expect(
+          spawner.killed,
+          hasLength(1),
+          reason: 'the hung get_app_container child is killed past its bound',
+        );
+        expect(
+          spawner.killed.single,
+          startsWith('xcrun simctl get_app_container '),
         );
       },
     );
@@ -430,7 +602,11 @@ void main() {
     test('a launch that cannot start fails naming iOS', () async {
       final appDir = Directory('${tmp.path}/TestApp.app')..createSync();
       final spawner = FakeSimctlSpawner(
-        bootStubs('udid-grounded'),
+        {
+          ...bootStubs('udid-grounded'),
+          'xcrun simctl get_app_container udid-grounded com.example.testapp data':
+              containerStub('${tmp.path}/container-grounded'),
+        },
         prefixAnswers: {
           'xcrun simctl install udid-grounded ': const CannedSimctl(),
         },
@@ -465,7 +641,11 @@ void main() {
       final code = await dead.exitCode;
       expect(code, isNot(0));
       final spawner = FakeSimctlSpawner(
-        bootStubs('udid-dead'),
+        {
+          ...bootStubs('udid-dead'),
+          'xcrun simctl get_app_container udid-dead com.example.testapp data':
+              containerStub('${tmp.path}/container-dead'),
+        },
         prefixAnswers: {
           'xcrun simctl install udid-dead ': const CannedSimctl(),
         },
@@ -688,6 +868,8 @@ void main() {
       final spawner = FakeSimctlSpawner({
         ...bootStubs('udid-flaky'),
         'xcrun simctl install udid-flaky ${appDir.path}': const CannedSimctl(),
+        'xcrun simctl get_app_container udid-flaky com.example.testapp data':
+            containerStub('${tmp.path}/container-flaky'),
         'xcrun simctl terminate udid-flaky com.example.testapp':
             const CannedSimctl(
               exitCode: 1,

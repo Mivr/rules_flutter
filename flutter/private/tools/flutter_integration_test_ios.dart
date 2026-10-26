@@ -16,6 +16,19 @@ import 'zip_writer.dart' show ZipEntry;
 
 export 'ios_simulator_boot.dart';
 
+/// Name of the file, under the app data container's `tmp/`, through which the
+/// launcher delivers the per-launch harness URL to the iOS app.
+///
+/// `Platform.environment` is always empty on iOS (the Dart SDK's
+/// runtime/bin/platform_macos.cc returns no entries under DART_HOST_OS_IOS;
+/// flutter/flutter#114849), so the `SIMCTL_CHILD_` launch environment never
+/// reaches Dart. After install and before launch the launcher instead resolves
+/// the app's data container with `simctl get_app_container` and writes the URL
+/// to `<container>/tmp/<this name>`; the iOS bootstrap reads that path as
+/// `Directory.systemTemp`, falling back from the environment variable. The
+/// Linux bootstrap never reads it.
+const iosHarnessUrlFileName = 'flutter_integration_test_harness_url';
+
 /// How long the harness waits for an iOS simulator app to dial back before
 /// failing the run.
 ///
@@ -70,6 +83,7 @@ class IosLauncherBounds {
     this.bootBounds = defaultBootBounds,
     this.bootstatusTimeout = const Duration(seconds: 600),
     this.installTimeout = const Duration(seconds: 180),
+    this.appContainerTimeout = const Duration(seconds: 60),
     this.terminateTimeout = const Duration(seconds: 60),
     this.uninstallTimeout = const Duration(seconds: 60),
   });
@@ -85,6 +99,9 @@ class IosLauncherBounds {
 
   /// How long `simctl install` may take before the child is killed.
   final Duration installTimeout;
+
+  /// How long `simctl get_app_container` may take before the child is killed.
+  final Duration appContainerTimeout;
 
   /// How long `simctl terminate` may take before the child is killed.
   final Duration terminateTimeout;
@@ -215,7 +232,10 @@ String _firstOutputLine(String output) {
 /// app on it and launches it against the harness.
 ///
 /// The simulator shares the host's loopback, so the app reaches the harness
-/// at 127.0.0.1 with no port forward. Every failure throws (never skips) with
+/// at 127.0.0.1 with no port forward. The harness URL reaches the app through
+/// a file in its data container's `tmp/` (see [iosHarnessUrlFileName]): on iOS
+/// `Platform.environment` is always empty, so no launch-environment variable
+/// can carry it. Every failure throws (never skips) with
 /// a one-line reason naming iOS.
 class IosPlatformLauncher implements PlatformLauncher {
   IosPlatformLauncher({
@@ -268,7 +288,9 @@ class IosPlatformLauncher implements PlatformLauncher {
     final udid = await _bootDevice();
     final appDir = _resolveAppDir();
     await _installApp(udid, appDir);
-    return _launchApp(udid, harnessPort);
+    final harnessUrl = 'ws://127.0.0.1:$harnessPort$integrationWebSocketPath';
+    await _writeHarnessUrlFile(udid, harnessUrl);
+    return _launchApp(udid, harnessUrl);
   }
 
   /// Boots or reuses a simulator with the boot module's selection rules.
@@ -337,10 +359,65 @@ class IosPlatformLauncher implements PlatformLauncher {
     _installed = true;
   }
 
-  /// Launches the app with the harness URL in that process's environment only,
-  /// and returns the process whose output is the app's console.
-  Future<Process> _launchApp(String udid, int harnessPort) async {
-    final harnessUrl = 'ws://127.0.0.1:$harnessPort$integrationWebSocketPath';
+  /// Delivers the harness URL through the app's data container.
+  ///
+  /// `Platform.environment` is always empty on iOS, so the `SIMCTL_CHILD_`
+  /// launch environment never reaches Dart. After install and before launch
+  /// the launcher instead resolves the app's data container with
+  /// `simctl get_app_container` and writes the URL into a file under its
+  /// `tmp/` (which the app reads as `Directory.systemTemp`). Either step
+  /// failing fails the run naming that step, before any launch.
+  Future<void> _writeHarnessUrlFile(String udid, String harnessUrl) async {
+    final CommandResult result;
+    try {
+      result = await runSimctl(
+        spawner,
+        ['simctl', 'get_app_container', udid, bundleId, 'data'],
+        timeout: bounds.appContainerTimeout,
+      );
+    } on BootFailure catch (e) {
+      throw StateError('iOS simulator get_app_container failed: ${e.reason}');
+    }
+    if (result.exitCode != 0) {
+      throw StateError(
+        'iOS simulator get_app_container of "$bundleId" on $udid failed '
+        '(exit ${result.exitCode}): ${_firstOutputLine(result.stderrText)}',
+      );
+    }
+    var container = '';
+    for (final line in const LineSplitter().convert(result.stdoutText)) {
+      if (line.trim().isNotEmpty) {
+        container = line.trim();
+        break;
+      }
+    }
+    if (container.isEmpty) {
+      throw StateError(
+        'iOS simulator get_app_container of "$bundleId" on $udid failed: '
+        'no container path in its output.',
+      );
+    }
+    try {
+      final file = File('$container/tmp/$iosHarnessUrlFileName');
+      file.parent.createSync(recursive: true);
+      file.writeAsStringSync(harnessUrl);
+    } on Exception catch (e) {
+      throw StateError(
+        'iOS simulator failed to write the harness URL for "$bundleId" '
+        'on $udid: $e',
+      );
+    }
+  }
+
+  /// Launches the app carrying the harness URL, and returns the process whose
+  /// output is the app's console.
+  ///
+  /// The URL travels in the data-container file [_writeHarnessUrlFile] wrote
+  /// (on iOS `Platform.environment` is always empty, so the launched
+  /// process's environment cannot carry it); it is also overlaid on the
+  /// `simctl launch` child environment, which documents the launch and keeps
+  /// working wherever the environment does reach Dart.
+  Future<Process> _launchApp(String udid, String harnessUrl) async {
     final Process launched;
     try {
       launched = await launchProcess(

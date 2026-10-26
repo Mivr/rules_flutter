@@ -4,8 +4,10 @@ The `platform = "ios"` leg of `flutter_integration_test` assembles its
 simulator app from Apple-toolchain targets, so the full macro cannot analyze
 on Linux. These tests pin everything around that seam: the bundle-id
 default, the simulator-debug transition settings, the macOS-only constraint
-the macro applies, the bootstrap content (notably that it reads the harness
-URL with no fixed-port fallback), and — through directly instantiated
+the macro applies, the bootstrap content (notably that the iOS bootstrap
+reads the harness URL from the environment with the data-container file as
+fallback and no fixed-port fallback, while the Linux bootstrap it derives
+from has no file fallback), and — through directly instantiated
 fixtures — the bootstrap rule's entrypoint resolution and guards plus the
 test rule's env and runfiles. The macro-created portable targets (the
 bootstrap and the kernel application) analyze on Linux; the
@@ -27,6 +29,7 @@ load(
     "IOS_APP_KWARG_KEYS",
     "default_ios_bundle_id",
     "flutter_ios_integration_test",
+    "ios_integration_bootstrap_content",
     "ios_integration_test_env",
     "sanitize_ios_bundle_id_segment",
 )
@@ -92,9 +95,11 @@ def _app_kwarg_keys_test_impl(ctx):
 
 def _ios_bootstrap_with_integration_test_pkg_test_impl(ctx):
     env = unittest.begin(ctx)
-    src = make_linux_integration_bootstrap_content(
-        _TEST_IMPORT,
-        has_integration_test = True,
+    src = ios_integration_bootstrap_content(
+        make_linux_integration_bootstrap_content(
+            _TEST_IMPORT,
+            has_integration_test = True,
+        ),
     )
     asserts.true(env, "import 'package:integration_test/integration_test.dart';" in src)
     asserts.true(env, "IntegrationTestWidgetsFlutterBinding.ensureInitialized();" in src)
@@ -111,13 +116,31 @@ def _ios_bootstrap_with_integration_test_pkg_test_impl(ctx):
         "38427" in src,
         "the iOS bootstrap takes the runner's per-launch URL; no fixed port",
     )
+    asserts.true(
+        env,
+        "Directory.systemTemp" in src,
+        "on iOS the environment is always empty, so the bootstrap falls " +
+        "back to the launcher-written file under the container's tmp/",
+    )
+    asserts.true(
+        env,
+        "flutter_integration_test_harness_url" in src,
+        "the bootstrap reads the file the launcher writes",
+    )
+    asserts.true(
+        env,
+        "stderr.flush()" in src,
+        "the missing-URL failure flushes before exit",
+    )
     return unittest.end(env)
 
 def _ios_bootstrap_without_integration_test_pkg_test_impl(ctx):
     env = unittest.begin(ctx)
-    src = make_linux_integration_bootstrap_content(
-        _TEST_IMPORT,
-        has_integration_test = False,
+    src = ios_integration_bootstrap_content(
+        make_linux_integration_bootstrap_content(
+            _TEST_IMPORT,
+            has_integration_test = False,
+        ),
     )
     asserts.false(env, "package:integration_test/integration_test.dart" in src)
     asserts.true(env, "class _IntegrationTestBinding extends LiveTestWidgetsFlutterBinding" in src)
@@ -129,6 +152,46 @@ def _ios_bootstrap_without_integration_test_pkg_test_impl(ctx):
         "ws://127.0.0.1" in src,
         "the iOS bootstrap takes the runner's per-launch URL; no fixed port",
     )
+    asserts.true(
+        env,
+        "Directory.systemTemp" in src,
+        "on iOS the environment is always empty, so the bootstrap falls " +
+        "back to the launcher-written file under the container's tmp/",
+    )
+    asserts.true(
+        env,
+        "flutter_integration_test_harness_url" in src,
+        "the bootstrap reads the file the launcher writes",
+    )
+    asserts.true(
+        env,
+        "stderr.flush()" in src,
+        "the missing-URL failure flushes before exit",
+    )
+    return unittest.end(env)
+
+def _linux_bootstrap_has_no_file_fallback_test_impl(ctx):
+    env = unittest.begin(ctx)
+    for has_integration_test in (True, False):
+        src = make_linux_integration_bootstrap_content(
+            _TEST_IMPORT,
+            has_integration_test = has_integration_test,
+        )
+        asserts.false(
+            env,
+            "Directory.systemTemp" in src,
+            "the file fallback is iOS-only; the Linux bootstrap is unchanged",
+        )
+        asserts.false(
+            env,
+            "flutter_integration_test_harness_url" in src,
+            "the file fallback is iOS-only; the Linux bootstrap is unchanged",
+        )
+        asserts.false(
+            env,
+            "stderr.flush()" in src,
+            "the file fallback is iOS-only; the Linux bootstrap is unchanged",
+        )
     return unittest.end(env)
 
 def _bootstrap_file_test_impl(ctx):
@@ -259,6 +322,7 @@ _t2_test = unittest.make(_app_kwarg_keys_test_impl)
 _t3_test = unittest.make(_ios_bootstrap_with_integration_test_pkg_test_impl)
 _t4_test = unittest.make(_ios_bootstrap_without_integration_test_pkg_test_impl)
 _t5_test = unittest.make(_ios_env_test_impl)
+_t6_test = unittest.make(_linux_bootstrap_has_no_file_fallback_test_impl)
 
 _bootstrap_file_test = analysistest.make(_bootstrap_file_test_impl, config_settings = _DBG)
 _application_info_test = analysistest.make(_application_info_test_impl, config_settings = _DBG)
@@ -415,6 +479,7 @@ def ios_integration_test_test_suite(name):
         _t3_test,
         _t4_test,
         _t5_test,
+        _t6_test,
     )
     native.test_suite(
         name = name,

@@ -219,6 +219,91 @@ def build_analyzable_and_coverage_infos(ctx, package_name, lib_root, main_file, 
     )
     return instrumented_files_info, analyzable_info
 
+# Name of the harness-URL file the launcher writes under the app data
+# container's `tmp/`. Must match `iosHarnessUrlFileName` in
+# `flutter/private/tools/flutter_integration_test_ios.dart`.
+IOS_HARNESS_URL_FILE_NAME = "flutter_integration_test_harness_url"
+
+# The harness-URL prologue of the shared Linux bootstrap
+# (`make_linux_integration_bootstrap_content` in
+# `flutter_integration_test.bzl`), verbatim: the block
+# `ios_integration_bootstrap_content` replaces with the iOS fallback below.
+_LINUX_HARNESS_URL_PROLOGUE = """  final wsUrl = Platform.environment['FLUTTER_INTEGRATION_TEST_HARNESS_URL'];
+  if (wsUrl == null || wsUrl.isEmpty) {
+    stderr.writeln(
+      'flutter_integration_test bootstrap: '
+      'FLUTTER_INTEGRATION_TEST_HARNESS_URL not set',
+    );
+    exit(64);
+  }
+"""
+
+# The iOS replacement: the environment first, then the launcher-written file.
+# `Platform.environment` is always empty on iOS (the Dart SDK returns no
+# entries under DART_HOST_OS_IOS; flutter/flutter#114849), so the
+# `SIMCTL_CHILD_` launch environment never reaches Dart; the launcher instead
+# writes the per-launch URL into a file under the app data container's `tmp/`
+# after install, which the app reads here as `Directory.systemTemp`. Missing
+# both still fails with the shared message, flushed before exit (without the
+# flush the message can be lost). No fixed-port fallback: the URL is always
+# the runner's per-launch one.
+_IOS_HARNESS_URL_PROLOGUE = """  var wsUrl = Platform.environment['FLUTTER_INTEGRATION_TEST_HARNESS_URL'];
+  if (wsUrl == null || wsUrl.isEmpty) {
+    // `Platform.environment` is always empty on iOS (the Dart SDK returns no
+    // entries under DART_HOST_OS_IOS; flutter/flutter#114849), so the
+    // `SIMCTL_CHILD_` launch environment never reaches Dart. The launcher
+    // writes the per-launch URL into a file under the app data container's
+    // `tmp/` after install, which the app reads here as `Directory.systemTemp`.
+    try {
+      final String fileUrl = await File(
+        '${Directory.systemTemp.path}/""" + IOS_HARNESS_URL_FILE_NAME + """',
+      ).readAsString();
+      if (fileUrl.trim().isNotEmpty) {
+        wsUrl = fileUrl.trim();
+      }
+    } on Exception catch (_) {
+      // A missing or unreadable file falls through to the failure below.
+    }
+  }
+  if (wsUrl == null || wsUrl.isEmpty) {
+    stderr.writeln(
+      'flutter_integration_test bootstrap: '
+      'FLUTTER_INTEGRATION_TEST_HARNESS_URL not set',
+    );
+    await stderr.flush();
+    exit(64);
+  }
+"""
+
+def ios_integration_bootstrap_content(linux_src):
+    """Derives the iOS bootstrap source from the shared Linux bootstrap source.
+
+    The iOS app is a JIT build with `dart:io` available, so the Linux
+    generator's output is the iOS bootstrap except for how it learns the
+    harness URL: the environment read cannot work on iOS, and the file
+    fallback must stay iOS-only, so the Linux generator itself is unchanged
+    and this helper swaps just its URL prologue (failing loudly when that
+    prologue no longer matches, instead of silently shipping the Linux
+    behaviour).
+
+    Args:
+        linux_src: The `make_linux_integration_bootstrap_content` output.
+
+    Returns:
+        The iOS bootstrap source.
+    """
+    ios_src = linux_src.replace(
+        _LINUX_HARNESS_URL_PROLOGUE,
+        _IOS_HARNESS_URL_PROLOGUE,
+    )
+    if ios_src == linux_src:
+        fail(
+            "`ios_integration_bootstrap_content`: the shared bootstrap " +
+            "prologue changed; update `_LINUX_HARNESS_URL_PROLOGUE` to match " +
+            "`make_linux_integration_bootstrap_content`.",
+        )
+    return ios_src
+
 def sanitize_ios_bundle_id_segment(raw):
     """Sanitizes a string into a valid iOS bundle ID segment.
 

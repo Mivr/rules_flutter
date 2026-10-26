@@ -133,6 +133,7 @@ load(
     "assemble_ios_integration_test",
     "build_analyzable_and_coverage_infos",
     "exposes_package",
+    "ios_integration_bootstrap_content",
     "resolve_main_and_srcs",
     "test_tag_env",
 )
@@ -2440,10 +2441,13 @@ _flutter_android_integration_app = rule(
     doc = "Compiles a Flutter Android application with an in-app integration test bootstrap.",
 )
 
-# The iOS bootstrap reuses the Linux generator verbatim: the test app is a
-# JIT build with dart:io available, and the runner injects a per-launch
-# harness URL, so the Linux bootstrap's `FLUTTER_INTEGRATION_TEST_HARNESS_URL`
-# read with no fixed-port fallback is exactly the iOS contract too.
+# The iOS bootstrap shares the Linux bootstrap's shape (a JIT build with
+# dart:io available, driven via `RemoteListener`), but not its harness-URL
+# read: on iOS `Platform.environment` is always empty, so the iOS content is
+# derived by `ios_integration_bootstrap_content`
+# (`flutter_integration_test_ios.bzl`, where iOS-only code lives), which swaps
+# in the data-container file fallback and the flushed failure. The Linux
+# generator itself is unchanged.
 def _flutter_ios_integration_bootstrap_impl(ctx):
     if not exposes_package(ctx.attr.deps, ["flutter_test"]):
         fail((
@@ -2459,9 +2463,11 @@ def _flutter_ios_integration_bootstrap_impl(ctx):
     bootstrap = ctx.actions.declare_file(ctx.label.name + ".dart")
     ctx.actions.write(
         bootstrap,
-        make_linux_integration_bootstrap_content(
-            test_import = main_location.uri,
-            has_integration_test = has_integration_test,
+        ios_integration_bootstrap_content(
+            make_linux_integration_bootstrap_content(
+                test_import = main_location.uri,
+                has_integration_test = has_integration_test,
+            ),
         ),
     )
     return [DefaultInfo(files = depset([bootstrap]))]
