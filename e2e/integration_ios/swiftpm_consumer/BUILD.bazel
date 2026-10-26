@@ -7,9 +7,10 @@ load("@rules_swift//swift:swift.bzl", "swift_library")
 swift_library(
     name = "swiftpm_consumer",
     srcs = ["Consumer.swift"],
-    # macOS-only like the simulator app embedding it: there is no Swift
-    # toolchain on Linux, so `bazel test //...` must skip this there.
-    target_compatible_with = ["@platforms//os:macos"],
+    # No OS constraint: the simulator build test below builds this for the
+    # iOS simulator platform (whose OS is ios, not macos). `manual` keeps
+    # Linux's `bazel test //...` from building it on the host.
+    tags = ["manual"],
     visibility = ["//visibility:public"],
     deps = ["@deps__swiftpm-bigint//:BigInt"],
 )

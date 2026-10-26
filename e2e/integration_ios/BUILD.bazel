@@ -126,7 +126,10 @@ dart_analysis_config(
 # The SwiftPM consumer app: a bare `ios_application` embedding the
 # `//swiftpm_consumer` module (which imports the translated BigInt product),
 # so the simulator build test below compiles BigInt for the iOS simulator.
-# It is never launched; the build is the test.
+# It is never launched; the build is the test. It carries no OS constraint
+# (the simulator platform's OS is ios, not macos); `manual` keeps Linux's
+# `bazel test //...` from building it on the host, and only the build test
+# below carries the macOS constraint (it runs on a macOS host).
 ios_application(
     name = "swiftpm_consumer_app",
     bundle_id = "com.example.integrationios.swiftpmconsumer",
@@ -134,14 +137,14 @@ ios_application(
     infoplists = ["//swiftpm_consumer:Info.plist"],
     minimum_os_version = "15.0",
     tags = ["manual"],
-    target_compatible_with = ["@platforms//os:macos"],
     deps = ["//swiftpm_consumer"],
 )
 
 # macOS-only: needs Xcode and the iOS SDK. `bazel test //...` skips it off
 # macOS via `target_compatible_with`; the integration_ios leg runs it on the
 # macOS runner, building the `Package.resolved` BigInt pin for the
-# simulator.
+# simulator. Only this test (which runs on the macOS host) carries the macOS
+# constraint; the app and library it builds carry none.
 flutter_ios_simulator_build_test(
     name = "swiftpm_consumer_build_test",
     target_compatible_with = ["@platforms//os:macos"],
