@@ -240,6 +240,36 @@ A pub package's `flutter.assets` entries may carry `platforms` and `flavors` lis
 
 An entry naming a platform Flutter does not know fails the package fetch, naming the package, the asset entry, and every valid name (`android`, `ios`, `linux`, `macos`, `web`, `windows` — the `_kValidPluginPlatforms` set `flutter_manifest.dart` validates against, lines 20 and 909). A misspelled platform would otherwise bundle nowhere on every target, silently. Directory entries (a trailing-slash `path`) expand to every file underneath at fetch time, each file inheriting the entry's conditions. When several entries expand to the same file, the file bundles on the union of the entries' platforms: any entry without `platforms` makes the file unconditional, otherwise the file ships wherever any of its entries ships. Entries for one file whose `flavors` sets differ fail the package fetch, naming the package, the file and both flavor lists (equal sets in a different order agree). Packages without conditions emit no extra attributes, so their spokes are byte-identical to before.
 
+### Font families
+
+Declare a font family with `flutter_font_family`, then list it in an application's `fonts` (the root pubspec's fonts) or a library's `fonts` (a package's fonts). Each font names the file it ships, so a font and its bytes pair by asset path:
+
+```starlark
+load("@rules_flutter//flutter:defs.bzl", "flutter_application", "flutter_font_family")
+
+flutter_font_family(
+    name = "hello_sans",
+    family = "HelloSans",
+    fonts = [
+        {"asset": "fonts/HelloSans-Regular.ttf"},
+        {"asset": "fonts/HelloSans-Bold.ttf", "weight": 700},
+    ],
+)
+
+flutter_application(
+    name = "my_app",
+    package_name = "my_app",
+    main = "lib/main.dart",
+    fonts = [":hello_sans"],
+)
+```
+
+`family` is the name the app passes to `TextStyle(fontFamily:)`. `fonts` is a non-empty list of maps in `FontManifest.json` order; each map names `asset`, the path of a file in the calling package, and optionally `weight` (100, 200, ..., 900) and `style` (`"normal"` or `"italic"`). The `FontManifest` entry lists `weight` and `style` only when you give them. An empty family or list, an entry without `asset`, a file that is not there, and a weight or style `flutter_tools` refuses all fail analysis naming the target, the family and the path.
+
+An application's families and assets are bare — `HelloSans` and `fonts/HelloSans-Bold.ttf` — exactly as `flutter build` writes the root pubspec's. A `flutter_library`'s are prefixed with `packages/<package_name>/`, like every other package asset, so an app that depends on the library sees `packages/my_lib/HelloSans`. One family name declared twice with different font lists fails analysis, naming both declarations.
+
+`fonts_json` and `font_files` on `flutter_library` and `flutter_plugin` are deprecated and kept for one release. They now fail closed too: every declared asset must name a `font_files` entry, every entry must be named by a family, and weights and styles are checked with `flutter_tools`' own wording. Move each family to a `flutter_font_family` target and list it in `fonts`; `flutter_plugin` has no `fonts` attribute yet, so a plugin keeps `fonts_json` for this release.
+
 ### Android native (Gradle) dependencies
 
 A plugin's `android/build.gradle` (`build.gradle.kts`) runtime dependencies (`implementation`, `api`, `runtimeOnly`) are translated to `@rules_android_maven` labels automatically. Gradle evaluates exactly one build file per project directory, so when both files are present the rule reads `build.gradle` for everything — dependencies, namespace, native-build and ProGuard detection alike. Common AndroidX artifacts are built in; anything else must be mapped in `MODULE.bazel`:
@@ -1271,6 +1301,7 @@ flutter_library(
 | `srcs` | Dart source files. Required. |
 | `deps` | `dart_library` or `flutter_library` targets. |
 | `assets` | Asset files: images, fonts, and so on. Each file must sit under the target's package directory; it is bundled at `packages/<package_name>/<path relative to that directory>`. See [Asset keys](#asset-keys). |
+| `fonts` | The package's font families, as `flutter_font_family` targets. Families and assets are bundled at `packages/<package_name>/...`, in declaration order. See [Font families](#font-families). |
 | `pkg_shaders` | The package's fragment shaders, as `{file: path}` mirroring `flutter: shaders:` in `pubspec.yaml`. Bundled at `packages/<package_name>/<path>`, where `FragmentProgram.fromAsset` looks for them. |
 | `shader_includes` | Files the `pkg_shaders` may `#include`, such as `glob(["shaders/**/*.glsl"])`. A shader compiles with only its declared inputs, so an include not listed here is not found. |
 | `shaders` | Shaders bundled at `shaders/<file name>`, as Flutter's own are. A package's own shaders go in `pkg_shaders`. |
@@ -1303,6 +1334,7 @@ flutter_application(
 | `srcs` | Other Dart sources in the app package, including generated ones. List here any file a `main` outside `lib/` imports by relative path. |
 | `deps` | `dart_library` or `flutter_library` targets. Add `@rules_flutter//flutter:material_icons` to bundle the Material icon font. |
 | `assets` | Asset files for the bundle. Each file must sit under the target's package directory; it is bundled at its path relative to that directory. See [Asset keys](#asset-keys). |
+| `fonts` | The app's font families, as `flutter_font_family` targets. Families and assets are bundled bare (`HelloSans`, `fonts/...`), in declaration order. See [Font families](#font-families). |
 | `native_deps` | Shared libraries to bundle for `dart:ffi`. |
 | `defines` | Dart environment defines, the `-D` flags. |
 | `language_version` | The Dart language version, matching `pubspec.yaml`. |

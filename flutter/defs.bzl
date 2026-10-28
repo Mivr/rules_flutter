@@ -10,6 +10,9 @@ rules that compile Dart code, bundle assets, and run tests.
     that platform-specific packaging rules consume.
 - `flutter_library`: Collects Flutter Dart sources and assets into a reusable
     dependency. Wire into `flutter_application` via `deps`.
+- `flutter_font_family`: Declares one font family, mirrors a pubspec
+    `flutter: fonts:` entry. List it in `flutter_application.fonts` or
+    `flutter_library.fonts`.
 - `flutter_plugin`: Declares a Flutter plugin with optional Dart registration
     class and/or native shared library dependencies.
 - `flutter_test`: Runs Flutter widget tests using the flutter_tester runtime.
@@ -46,6 +49,7 @@ artifacts:
 load("//flutter/private:flutter_aot_target.bzl", _flutter_aot_target = "flutter_aot_target")
 load("//flutter/private:flutter_application.bzl", _flutter_application = "flutter_application")
 load("//flutter/private:flutter_asset_bundle.bzl", _flutter_asset_bundle = "flutter_asset_bundle")
+load("//flutter/private:flutter_font_family.bzl", _flutter_font_family = "flutter_font_family")
 load("//flutter/private:flutter_gen_l10n.bzl", _flutter_gen_l10n = "flutter_gen_l10n")
 load("//flutter/private:flutter_integration_test.bzl", _flutter_integration_test = "flutter_integration_test")
 load("//flutter/private:flutter_kernel_target.bzl", _flutter_kernel_target = "flutter_kernel_target")
@@ -77,6 +81,7 @@ def flutter_application(name, package_name = "", **kwargs):
     )
 
 flutter_asset_bundle = _flutter_asset_bundle
+flutter_font_family = _flutter_font_family
 flutter_gen_l10n = _flutter_gen_l10n
 flutter_integration_test = _flutter_integration_test
 flutter_kernel_target = _flutter_kernel_target

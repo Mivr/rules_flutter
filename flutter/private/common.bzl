@@ -1448,7 +1448,9 @@ def flutter_build_assets(ctx, flutter_sdk_info, output_dir, bundle):
 
     Walks `FlutterInfo.pub_fonts` / `pub_assets` from deps to bundle
     pub-package contributions (fonts/assets — shaders are pre-compiled by
-    `flutter_compile_shaders` and arrive via `compiled_shaders`).
+    `flutter_compile_shaders` and arrive via `compiled_shaders`). The rule's
+    own `fonts` attribute, when it has one, contributes its families bare
+    ahead of the deps' as the root pubspec's fonts do.
 
     Args:
         ctx: Rule context (must have assets, deps, license_files, tree_shake_icons attrs and _asset_bundle_tool).
@@ -1474,9 +1476,9 @@ def flutter_build_assets(ctx, flutter_sdk_info, output_dir, bundle):
         ctx.attr.deps,
         bundle.target_platform,
         extra_claims,
+        getattr(ctx.attr, "fonts", []),
     )
-    extra_asset_copies = dict(bundle.compiled_shaders)
-    extra_asset_copies.update(pub_extra_asset_copies)
+    extra_asset_copies = dict(bundle.compiled_shaders.items() + pub_extra_asset_copies.items())
 
     # Drop each DataAsset at flutter_assets/packages/<pkg>/<name>, the key
     # flutter_tools gives a hook's data asset and the one `rootBundle` loads

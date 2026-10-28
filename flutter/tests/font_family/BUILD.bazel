@@ -1,0 +1,202 @@
+"""Fixtures for the COV-29 font-family analysis tests.
+
+The `manual` tag keeps the intentionally failing targets out of `//...`
+builds; only the analysistest suite names them.
+"""
+
+load("//flutter:defs.bzl", "flutter_application", "flutter_asset_bundle", "flutter_font_family", "flutter_library", "flutter_plugin")
+load(":font_family_test.bzl", "font_family_test_suite")
+
+package(
+    default_visibility = ["//flutter/tests:__pkg__"],
+)
+
+exports_files([
+    "fonts/HelloSans-Bold.ttf",
+    "fonts/HelloSans-Regular.ttf",
+    "lib.dart",
+])
+
+# A regular face and one bold face, in the order FontManifest must list them.
+flutter_font_family(
+    name = "hello_sans",
+    family = "HelloSans",
+    fonts = [
+        {"asset": "fonts/HelloSans-Regular.ttf"},
+        {
+            "asset": "fonts/HelloSans-Bold.ttf",
+            "weight": 700,
+        },
+    ],
+)
+
+# A library prefixes the family and its assets with packages/<package_name>/.
+flutter_library(
+    name = "lib_with_fonts",
+    package_name = "fontpkg",
+    srcs = ["lib.dart"],
+    fonts = [":hello_sans"],
+)
+
+flutter_asset_bundle(
+    name = "lib_fonts_bundle",
+    deps = [":lib_with_fonts"],
+)
+
+# An application keeps the family and its assets bare, as the root pubspec's.
+flutter_application(
+    name = "app_with_fonts",
+    package_name = "fontfixture",
+    srcs = ["lib.dart"],
+    fonts = [":hello_sans"],
+    main = "app_main.dart",
+)
+
+# -- fonts_json / font_files refusals -----------------------------------------
+
+# fonts/a.ttf has no font_files entry: the misbinding COV-29 fixes. Before the
+# fix this built and bundled b.ttf's bytes at fonts/a.ttf.
+flutter_library(
+    name = "missing_file_lib",
+    srcs = ["lib.dart"],
+    font_files = {
+        ":fonts/HelloSans-Bold.ttf": "fonts/HelloSans-Bold.ttf",
+    },
+    fonts_json = '[{"family":"HelloSans","fonts":[{"asset":"fonts/HelloSans-Regular.ttf"},{"asset":"fonts/HelloSans-Bold.ttf","weight":700}]}]',
+    tags = ["manual"],
+)
+
+# fonts/HelloSans-Bold.ttf is named by no family.
+flutter_library(
+    name = "unclaimed_file_lib",
+    srcs = ["lib.dart"],
+    font_files = {
+        ":fonts/HelloSans-Bold.ttf": "fonts/HelloSans-Bold.ttf",
+        ":fonts/HelloSans-Regular.ttf": "fonts/HelloSans-Regular.ttf",
+    },
+    fonts_json = '[{"family":"HelloSans","fonts":[{"asset":"fonts/HelloSans-Regular.ttf"}]}]',
+    tags = ["manual"],
+)
+
+flutter_library(
+    name = "bad_weight_lib",
+    srcs = ["lib.dart"],
+    font_files = {
+        ":fonts/HelloSans-Regular.ttf": "fonts/HelloSans-Regular.ttf",
+    },
+    fonts_json = '[{"family":"HelloSans","fonts":[{"asset":"fonts/HelloSans-Regular.ttf","weight":750}]}]',
+    tags = ["manual"],
+)
+
+flutter_library(
+    name = "bad_style_lib",
+    srcs = ["lib.dart"],
+    font_files = {
+        ":fonts/HelloSans-Regular.ttf": "fonts/HelloSans-Regular.ttf",
+    },
+    fonts_json = '[{"family":"HelloSans","fonts":[{"asset":"fonts/HelloSans-Regular.ttf","style":"oblique"}]}]',
+    tags = ["manual"],
+)
+
+# flutter_plugin shares build_pub_contributions, so it gets the same refusals.
+flutter_plugin(
+    name = "bad_weight_plugin",
+    package_name = "bad_weight_plugin",
+    srcs = [],
+    font_files = {
+        ":fonts/HelloSans-Regular.ttf": "fonts/HelloSans-Regular.ttf",
+    },
+    fonts_json = '[{"family":"HelloSans","fonts":[{"asset":"fonts/HelloSans-Regular.ttf","weight":750}]}]',
+    platforms = [],
+    tags = ["manual"],
+)
+
+# -- flutter_font_family refusals ---------------------------------------------
+
+flutter_font_family(
+    name = "empty_family",
+    family = "",
+    fonts = [{"asset": "fonts/HelloSans-Regular.ttf"}],
+    tags = ["manual"],
+)
+
+flutter_font_family(
+    name = "empty_fonts",
+    family = "EmptySans",
+    fonts = [],
+    tags = ["manual"],
+)
+
+flutter_font_family(
+    name = "missing_asset_family",
+    family = "NoAssetSans",
+    fonts = [{"weight": 700}],
+    tags = ["manual"],
+)
+
+flutter_font_family(
+    name = "bad_weight_family",
+    family = "HeavySans",
+    fonts = [{
+        "asset": "fonts/HelloSans-Regular.ttf",
+        "weight": 750,
+    }],
+    tags = ["manual"],
+)
+
+flutter_font_family(
+    name = "bad_style_family",
+    family = "SlantedSans",
+    fonts = [{
+        "asset": "fonts/HelloSans-Regular.ttf",
+        "style": "oblique",
+    }],
+    tags = ["manual"],
+)
+
+# -- one family name, two different font lists --------------------------------
+
+flutter_font_family(
+    name = "conflict_a",
+    family = "ConflictSans",
+    fonts = [{"asset": "fonts/HelloSans-Regular.ttf"}],
+)
+
+flutter_font_family(
+    name = "conflict_b",
+    family = "ConflictSans",
+    fonts = [{"asset": "fonts/HelloSans-Bold.ttf"}],
+)
+
+flutter_application(
+    name = "conflict_app",
+    package_name = "fontfixture",
+    srcs = ["lib.dart"],
+    fonts = [
+        ":conflict_a",
+        ":conflict_b",
+    ],
+    main = "lib.dart",
+    tags = ["manual"],
+)
+
+# A library's own family and its fonts_json family with one name also conflict.
+flutter_library(
+    name = "conflict_lib",
+    package_name = "conflictpkg",
+    srcs = ["lib.dart"],
+    font_files = {
+        ":fonts/HelloSans-Bold.ttf": "fonts/HelloSans-Bold.ttf",
+    },
+    fonts = [":conflict_a"],
+    fonts_json = '[{"family":"ConflictSans","fonts":[{"asset":"fonts/HelloSans-Bold.ttf"}]}]',
+    tags = ["manual"],
+)
+
+flutter_asset_bundle(
+    name = "conflict_lib_bundle",
+    tags = ["manual"],
+    deps = [":conflict_lib"],
+)
+
+font_family_test_suite(name = "font_family_tests")

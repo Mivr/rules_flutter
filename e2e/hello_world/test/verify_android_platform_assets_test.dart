@@ -15,6 +15,11 @@
 /// The archive is parsed by hand (central directory walk, raw inflate via
 /// `dart:io`'s `ZLibCodec` when the manifest entry is deflated): no `unzip`
 /// runs here.
+///
+/// It also asserts `FontManifest.json` carries the app's own `HelloSans`
+/// entry exactly as declared (regular face, then the bold face with `weight`
+/// 700), both bundled files byte-identical to the committed ones, and the
+/// pub `packages/cupertino_icons/CupertinoIcons` family with its font file.
 library;
 
 // This script's diagnostics are its product: it reports what it found in
@@ -25,6 +30,25 @@ library;
 import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
+
+/// Records one expectation: [description] names what the APK should hold,
+/// [ok] whether it does, and [found] what is there instead.
+typedef _Check = void Function(String description, bool ok, String found);
+
+/// The app's own family, declared through `flutter_font_family`.
+const _helloFamily = 'HelloSans';
+const _regularFont = 'fonts/HelloSans-Regular.ttf';
+const _boldFont = 'fonts/HelloSans-Bold.ttf';
+
+/// The `HelloSans` entry `FontManifest.json` must carry, in order.
+const _helloFonts = [
+  {'asset': _regularFont},
+  {'asset': _boldFont, 'weight': 700},
+];
+
+/// The pub icon family whose font ships with the app.
+const _cupertinoFamily = 'packages/cupertino_icons/CupertinoIcons';
+const _cupertinoFont = 'packages/cupertino_icons/assets/CupertinoIcons.ttf';
 
 /// One zip entry: its name plus where its data lives.
 class _Entry {
@@ -128,6 +152,16 @@ void main() {
     }
   }
 
+  _checkPlatformAssets(names, prefix, check);
+  _checkAssetManifest(bytes, entries, check);
+  _checkFonts(bytes, entries, '$testSrcDir/$testWorkspace', check);
+
+  if (failed) exit(1);
+  print('PASS');
+}
+
+/// The platform-conditional pub assets the APK keeps and drops.
+void _checkPlatformAssets(Set<String> names, String prefix, _Check check) {
   check(
     'unconditional any.txt is in the APK',
     names.contains('any.txt'),
@@ -160,58 +194,219 @@ void main() {
     'assets/flutter_assets/$prefix/paid_only.txt needs a flavor that '
         'does not exist yet',
   );
+}
 
-  // AssetManifest.bin must agree with the tree: the manifest is
-  // StandardMessageCodec bytes, which embed each key as UTF-8 inline, so a
-  // substring search over the (possibly inflated) entry decides it.
-  final manifestEntry = [for (final e in entries) e].firstWhere(
-    (e) => e.name == 'assets/flutter_assets/AssetManifest.bin',
-    orElse: () => _Entry('', -1, 0, 0),
+/// `AssetManifest.bin` agrees with the tree: the manifest is
+/// StandardMessageCodec bytes, which embed each key as UTF-8 inline, so a
+/// substring search over the (possibly inflated) entry decides it.
+void _checkAssetManifest(Uint8List bytes, List<_Entry> entries, _Check check) {
+  final manifestEntry = _entryNamed(
+    entries,
+    'assets/flutter_assets/AssetManifest.bin',
   );
   check(
     'AssetManifest.bin is in the APK',
     manifestEntry.method != -1,
     'no assets/flutter_assets/AssetManifest.bin entry',
   );
-  if (manifestEntry.method != -1) {
-    final manifestText = utf8.decode(
-      _entryData(bytes, manifestEntry),
-      allowMalformed: true,
-    );
+  if (manifestEntry.method == -1) return;
+  final manifestText = utf8.decode(
+    _entryData(bytes, manifestEntry),
+    allowMalformed: true,
+  );
+  check(
+    'AssetManifest lists any.txt',
+    manifestText.contains('packages/platform_assets/assets/any.txt'),
+    'manifest is missing the unconditional asset',
+  );
+  check(
+    'AssetManifest lists android_only.txt',
+    manifestText.contains('packages/platform_assets/assets/android_only.txt'),
+    'manifest is missing the android-only asset',
+  );
+  check(
+    'AssetManifest lists union_android.txt',
+    manifestText.contains('packages/platform_assets/assets/union_android.txt'),
+    'manifest is missing the unioned android/linux asset',
+  );
+  check(
+    'AssetManifest omits web_only.txt',
+    !manifestText.contains('packages/platform_assets/assets/web_only.txt'),
+    'manifest lists an asset the bundle must not carry',
+  );
+  check(
+    'AssetManifest omits ios_only.txt',
+    !manifestText.contains('packages/platform_assets/assets/ios_only.txt'),
+    'manifest lists an asset the bundle must not carry',
+  );
+  check(
+    'AssetManifest omits paid_only.txt',
+    !manifestText.contains('packages/platform_assets/assets/paid_only.txt'),
+    'manifest lists an asset the bundle must not carry',
+  );
+}
+
+/// The APK's `FontManifest.json` carries the app's family and the pub icon
+/// family, with each declared asset present.
+void _checkFonts(
+  Uint8List bytes,
+  List<_Entry> entries,
+  String testRoot,
+  _Check check,
+) {
+  final manifestEntry = _entryNamed(
+    entries,
+    'assets/flutter_assets/FontManifest.json',
+  );
+  if (manifestEntry.method == -1) {
     check(
-      'AssetManifest lists any.txt',
-      manifestText.contains('packages/platform_assets/assets/any.txt'),
-      'manifest is missing the unconditional asset',
+      'a FontManifest.json in the APK',
+      false,
+      'no assets/flutter_assets/FontManifest.json entry',
     );
+    return;
+  }
+  final List<dynamic> families;
+  try {
+    final decoded = jsonDecode(utf8.decode(_entryData(bytes, manifestEntry)));
+    if (decoded is! List) {
+      check(
+        'a FontManifest.json shaped as a family list',
+        false,
+        'a ${decoded.runtimeType}: $decoded',
+      );
+      return;
+    }
+    families = decoded;
+  } on FormatException catch (e) {
     check(
-      'AssetManifest lists android_only.txt',
-      manifestText.contains('packages/platform_assets/assets/android_only.txt'),
-      'manifest is missing the android-only asset',
+      'a FontManifest.json that parses as JSON',
+      false,
+      'a decode failure: $e',
     );
+    return;
+  }
+  _checkHelloSans(families, bytes, entries, testRoot, check);
+  _checkCupertinoFamily(families, entries, check);
+}
+
+/// The app's `HelloSans` entry is exactly the declaration, and each asset
+/// carries the committed file's bytes.
+void _checkHelloSans(
+  List<dynamic> families,
+  Uint8List bytes,
+  List<_Entry> entries,
+  String testRoot,
+  _Check check,
+) {
+  final entry = _fontFamily(families, _helloFamily);
+  if (entry == null) {
     check(
-      'AssetManifest lists union_android.txt',
-      manifestText.contains(
-        'packages/platform_assets/assets/union_android.txt',
-      ),
-      'manifest is missing the unioned android/linux asset',
+      'a FontManifest.json family $_helloFamily',
+      false,
+      'families ${_familyNames(families)}',
     );
+    return;
+  }
+  check(
+    'the $_helloFamily entry ${jsonEncode(_helloFonts)}',
+    jsonEncode(entry['fonts']) == jsonEncode(_helloFonts),
+    'fonts ${jsonEncode(entry['fonts'])}',
+  );
+  for (final asset in [_regularFont, _boldFont]) {
+    final bundled = _entryNamed(entries, 'assets/flutter_assets/$asset');
+    final committed = File('$testRoot/$asset');
+    if (!committed.existsSync()) {
+      check(
+        'the committed $asset',
+        false,
+        'no file at ${committed.path} (staged through `data`)',
+      );
+      continue;
+    }
+    final committedBytes = committed.readAsBytesSync();
+    final bundledBytes = bundled.method == -1
+        ? null
+        : _entryData(bytes, bundled);
     check(
-      'AssetManifest omits web_only.txt',
-      !manifestText.contains('packages/platform_assets/assets/web_only.txt'),
-      'manifest lists an asset the bundle must not carry',
-    );
-    check(
-      'AssetManifest omits ios_only.txt',
-      !manifestText.contains('packages/platform_assets/assets/ios_only.txt'),
-      'manifest lists an asset the bundle must not carry',
-    );
-    check(
-      'AssetManifest omits paid_only.txt',
-      !manifestText.contains('packages/platform_assets/assets/paid_only.txt'),
-      'manifest lists an asset the bundle must not carry',
+      'bundled $asset byte-identical to the committed file '
+      '(${committedBytes.length} bytes)',
+      bundledBytes != null && _bytesEqual(bundledBytes, committedBytes),
+      bundledBytes == null
+          ? 'no assets/flutter_assets/$asset entry'
+          : '${bundledBytes.length} bytes instead of '
+                '${committedBytes.length}',
     );
   }
+}
 
-  if (failed) exit(1);
-  print('PASS');
+/// The pub icon family is listed with its font file present in the APK.
+void _checkCupertinoFamily(
+  List<dynamic> families,
+  List<_Entry> entries,
+  _Check check,
+) {
+  final entry = _fontFamily(families, _cupertinoFamily);
+  check(
+    'a FontManifest.json family $_cupertinoFamily',
+    entry != null,
+    'families ${_familyNames(families)}',
+  );
+  if (entry == null) return;
+  final fonts = entry['fonts'];
+  check(
+    'fonts listed under the $_cupertinoFamily family',
+    fonts is List && fonts.isNotEmpty,
+    'fonts: $fonts',
+  );
+  if (fonts is! List) return;
+  for (final font in fonts) {
+    final asset = font is Map ? font['asset'] : null;
+    check(
+      'the bundled $_cupertinoFamily font asset $asset',
+      asset is String &&
+          _entryNamed(entries, 'assets/flutter_assets/$asset').method != -1,
+      asset is String
+          ? 'no assets/flutter_assets/$asset entry'
+          : 'a font entry with no asset path: $font',
+    );
+  }
+  check(
+    'the bundled $_cupertinoFont',
+    _entryNamed(entries, 'assets/flutter_assets/$_cupertinoFont').method != -1,
+    'no assets/flutter_assets/$_cupertinoFont entry',
+  );
+}
+
+/// The FontManifest entry for [family], or null.
+Map<dynamic, dynamic>? _fontFamily(List<dynamic> families, String family) {
+  for (final item in families) {
+    if (item is Map && item['family'] == family) return item;
+  }
+  return null;
+}
+
+/// The family names a FontManifest lists, for a failure detail.
+List<dynamic> _familyNames(List<dynamic> families) {
+  return [
+    for (final entry in families)
+      if (entry is Map) entry['family'] else entry,
+  ];
+}
+
+/// The entry named [name], or a sentinel with method -1.
+_Entry _entryNamed(List<_Entry> entries, String name) {
+  return entries.firstWhere(
+    (e) => e.name == name,
+    orElse: () => _Entry('', -1, 0, 0),
+  );
+}
+
+/// Whether [a] and [b] hold the same bytes in the same order.
+bool _bytesEqual(List<int> a, List<int> b) {
+  if (a.length != b.length) return false;
+  for (var i = 0; i < a.length; i++) {
+    if (a[i] != b[i]) return false;
+  }
+  return true;
 }

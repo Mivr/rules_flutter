@@ -10,7 +10,7 @@ load(
     "FLUTTER_APK_AAPT_NO_COMPRESS_EXTENSIONS",
     "flutter_android_app",
 )
-load("@rules_flutter//flutter:defs.bzl", "flutter_aot_target", "flutter_application", "flutter_asset_bundle", "flutter_kernel_target", "flutter_library", "flutter_prebuilt_test", "flutter_test")
+load("@rules_flutter//flutter:defs.bzl", "flutter_aot_target", "flutter_application", "flutter_asset_bundle", "flutter_font_family", "flutter_kernel_target", "flutter_library", "flutter_prebuilt_test", "flutter_test")
 load(
     "@rules_flutter//flutter:ios.bzl",
     "IOS_DEFAULT_LAUNCH_STORYBOARD",
@@ -69,10 +69,26 @@ flutter_asset_bundle(
 
 # -- Recommended: flutter_application with local sources ----------------------
 
+# A first-party font family: the regular and bold faces of HelloSans. The
+# bytes are generated fixtures (see fonts/README.md), and the committed files
+# are the ones the iOS bundle and Android APK tests compare against.
+flutter_font_family(
+    name = "hello_sans",
+    family = "HelloSans",
+    fonts = [
+        {"asset": "fonts/HelloSans-Regular.ttf"},
+        {
+            "asset": "fonts/HelloSans-Bold.ttf",
+            "weight": 700,
+        },
+    ],
+)
+
 flutter_application(
     name = "hello_world_app",
     package_name = "hello_world",
     srcs = ["lib/common_widgets.dart"],
+    fonts = [":hello_sans"],
     main = "lib/main.dart",
     deps = [
         "@deps//:cupertino_icons",
@@ -869,6 +885,8 @@ flutter_ios_simulator_build_test(
 dart_test(
     name = "verify_ios_bundle_contents_test",
     data = [
+        "fonts/HelloSans-Bold.ttf",
+        "fonts/HelloSans-Regular.ttf",
         "platform_assets/assets/any.txt",
         ":hello_world_ios_simulator",
     ],
@@ -938,7 +956,11 @@ dart_test(
 # central directory and inflates the manifest by hand; no unzip runs here.
 dart_test(
     name = "verify_android_platform_assets_test",
-    data = [":hello_world_android"],
+    data = [
+        "fonts/HelloSans-Bold.ttf",
+        "fonts/HelloSans-Regular.ttf",
+        ":hello_world_android",
+    ],
     main = "test/verify_android_platform_assets_test.dart",
     # See hello_world_android: skipped on the Windows CI runner (pagefile OOM)
     # via --build_tag_filters/--test_tag_filters. Builds normally everywhere else.

@@ -5,6 +5,7 @@ load("@rules_dart//dart:utils.bzl", "dart_analyzable_info_with_package", "dart_i
 load("//flutter:providers.bzl", "FlutterInfo")
 load("//flutter/private:asset_keys.bzl", "library_asset_entries")
 load("//flutter/private:asset_uri.bzl", "normalize_asset_uri")
+load("//flutter/private:flutter_font_family.bzl", "FONTS_ATTR", "check_unclaimed_font_files", "font_family_contributions", "font_file_table", "font_json_contribution")
 load("//flutter/private:flutter_info.bzl", "LINK_HOOK_ATTR", "flutter_asset_channels", "flutter_info", "flutter_pub_channels")
 
 def pub_asset_matches_target(flavors, platforms, target_platform, flavor = None):
@@ -54,12 +55,14 @@ def _entry_conditions(decoded_path, pkg_asset_platforms, pkg_asset_flavors):
     )
 
 def _normalize_attr_value(package_name, attr_name, value):
-    """Normalize one `pkg_assets` / `pkg_shaders` / `font_files` / `fonts_json` value.
+    """Normalize one `pkg_assets` / `pkg_shaders` value.
 
     Values arrive as raw entry text (handwritten attrs) or decoded labels
     (spoke attrs); normalization is idempotent, so both land on the same
     decoded path and encoded bundle key. The decoded path joins the
-    conditions dicts and the font file table; the key is what bundles.
+    conditions dicts and the key is what bundles. Fonts go through
+    `font_file_table` and `font_json_contribution`, which normalize their
+    own asset values the same way.
 
     Args:
         package_name: The contribution's package name, for the failure.
@@ -75,6 +78,34 @@ def _normalize_attr_value(package_name, attr_name, value):
         fail("package \"%s\": %s value %s uses a spelling that is not supported: %s" % (package_name, attr_name, repr(value), norm.reason))
     return norm
 
+def _contribution_context(package_name, font_files_dict):
+    """The package name and target label a contribution's failures name.
+
+    A rule passes a `struct(package_name, label)` so a failure names its own
+    label. A caller that passes only a package name (the shader aspect, or a
+    pub spoke) gets the first font file's label, which names the package the
+    declarations live in.
+
+    Args:
+        package_name: The first argument `build_pub_contributions` received:
+            a `struct(package_name, label)` or a bare package name string.
+        font_files_dict: The rule's `font_files`, read for a fallback label.
+
+    Returns:
+        A struct(package_name, label).
+    """
+    if type(package_name) == "struct":
+        return package_name
+    label = package_name
+    if not label:
+        for target in font_files_dict:
+            label = str(target.label)
+            break
+    return struct(
+        package_name = package_name,
+        label = label or "the target declaring fonts_json",
+    )
+
 def build_pub_contributions(package_name, fonts_json, font_files_dict, pkg_assets_dict, pkg_shaders_dict, shader_includes = [], pkg_asset_platforms = {}, pkg_asset_flavors = {}):
     """Build pub_fonts/pub_assets/pub_shaders contribution structs from rule attrs.
 
@@ -82,15 +113,22 @@ def build_pub_contributions(package_name, fonts_json, font_files_dict, pkg_asset
     producing the contribution structs that `build_flutter_providers` accepts
     as `extra_pub_fonts` / `extra_pub_assets` / `extra_pub_shaders`.
 
+    Fonts pair with files by asset path, never by position. Every
+    `fonts_json` asset must name a `font_files` entry, every `font_files`
+    entry must be named by a family, and a weight or style flutter_tools
+    refuses fails analysis, naming the target, the family and the path.
+
     Args:
-        package_name: str — empty string for non-package contributions
-            (no `packages/<pkg>/` prefix at bundle time), else the pub package
-            name (or first-party package name) used as the prefix.
+        package_name: A `struct(package_name, label)` carrying the
+            contribution's package name and the declaring target's label, or
+            a bare string (the label then falls back to the first font file).
+            The empty package name is the sentinel for non-package
+            contributions (no `packages/<pkg>/` prefix at bundle time);
+            any other value prefixes family and asset paths.
         fonts_json: str — JSON-encoded list of
             `{family: str, fonts: [{asset: str, weight: int?, style: str?}]}`.
             Empty string when the rule declares no fonts. Each `asset` is
-            normalized (`_normalize_attr_value`); the contribution keeps the
-            encoded bundle key.
+            normalized; the contribution keeps the encoded bundle key.
         font_files_dict: dict[Target, str] — `ctx.attr.font_files`. Each
             target must resolve to exactly one File. The string value is the
             package-relative asset path matching an entry in fonts_json;
@@ -111,48 +149,38 @@ def build_pub_contributions(package_name, fonts_json, font_files_dict, pkg_asset
     Returns:
         Tuple of (extra_pub_fonts, extra_pub_assets, extra_pub_shaders) lists.
     """
-    extra_pub_fonts = []
-    if fonts_json:
-        decoded = json.decode(fonts_json)
-        path_to_file = {}
-        for target, asset_path in font_files_dict.items():
-            files = target.files.to_list()
-            if len(files) != 1:
-                fail("font_files entry %s must resolve to exactly one File; got %d" % (target.label, len(files)))
-            path_to_file[_normalize_attr_value(package_name, "font_files", asset_path).decoded] = files[0]
+    context = _contribution_context(package_name, font_files_dict)
+    path_to_file = font_file_table(context.label, font_files_dict)
 
-        # Tuples (not lists) inside the struct because depset elements must
-        # be fully immutable — mutable fields propagate to the struct's
-        # mutability check.
-        for family_entry in decoded:
-            family = family_entry.get("family", "")
-            fonts_list = []
-            file_list = []
-            for font in family_entry.get("fonts", []):
-                norm = _normalize_attr_value(package_name, "fonts_json", font.get("asset", ""))
-                fonts_list.append(struct(
-                    asset_path = norm.key,
-                    weight = font.get("weight"),
-                    style = font.get("style"),
-                ))
-                if norm.decoded in path_to_file:
-                    file_list.append(path_to_file[norm.decoded])
-            extra_pub_fonts.append(struct(
-                package_name = package_name,
-                family = family,
-                fonts = tuple(fonts_list),
-                files = tuple(file_list),
-            ))
+    # Tuples (not lists) inside the struct because depset elements must
+    # be fully immutable — mutable fields propagate to the struct's
+    # mutability check.
+    extra_pub_fonts = []
+    decoded = json.decode(fonts_json) if fonts_json else []
+    if type(decoded) != "list":
+        fail("%s: fonts_json must decode to a list of font-family maps." % context.label)
+    for family_entry in decoded:
+        if type(family_entry) != "dict":
+            fail("%s: fonts_json must hold font-family maps; got %s." % (context.label, type(family_entry)))
+        extra_pub_fonts.append(font_json_contribution(
+            context.label,
+            context.package_name,
+            family_entry.get("family", ""),
+            family_entry.get("fonts", []),
+            path_to_file,
+        ))
+    if font_files_dict:
+        check_unclaimed_font_files(context.label, decoded, path_to_file)
 
     extra_pub_assets = []
     for target, asset_path in pkg_assets_dict.items():
         files = target.files.to_list()
         if len(files) != 1:
             fail("pkg_assets entry %s must resolve to exactly one File; got %d" % (target.label, len(files)))
-        norm = _normalize_attr_value(package_name, "pkg_assets", asset_path)
+        norm = _normalize_attr_value(context.package_name, "pkg_assets", asset_path)
         platforms, flavors = _entry_conditions(norm.decoded, pkg_asset_platforms, pkg_asset_flavors)
         extra_pub_assets.append(struct(
-            package_name = package_name,
+            package_name = context.package_name,
             asset_path = norm.key,
             file = files[0],
             platforms = tuple(platforms),
@@ -165,8 +193,8 @@ def build_pub_contributions(package_name, fonts_json, font_files_dict, pkg_asset
         if len(files) != 1:
             fail("pkg_shaders entry %s must resolve to exactly one File; got %d" % (target.label, len(files)))
         extra_pub_shaders.append(struct(
-            package_name = package_name,
-            shader_path = _normalize_attr_value(package_name, "pkg_shaders", shader_path).key,
+            package_name = context.package_name,
+            shader_path = _normalize_attr_value(context.package_name, "pkg_shaders", shader_path).key,
             file = files[0],
             includes = tuple(shader_includes),
         ))
@@ -174,20 +202,26 @@ def build_pub_contributions(package_name, fonts_json, font_files_dict, pkg_asset
     return (extra_pub_fonts, extra_pub_assets, extra_pub_shaders)
 
 def _pub_family_origin(deps, entry):
-    """The first direct dep whose `FlutterInfo.pub_fonts` carries a family entry.
+    """The contribution's own label, else the first direct dep that carries it.
 
     Only runs on the failure path: naming the two libraries that carry one
-    family name with two different font lists. Every flattened entry arrives
-    through at least one direct dep, so a miss below cannot happen; it still
-    returns None rather than guessing, and the caller names that honestly.
+    family name with two different font lists. A contribution built by
+    `build_pub_contributions` or `font_family_contribution` carries its
+    declaring target as `origin`, so an application's own families name
+    themselves. Older contributions without it are found through the deps;
+    a miss returns None rather than guessing, and the caller names that
+    honestly.
 
     Args:
         deps: The bundle's direct deps.
         entry: The pub_fonts contribution struct to find.
 
     Returns:
-        The dep's label string, or None.
+        The declaring target's label string, or None.
     """
+    origin = getattr(entry, "origin", "")
+    if origin:
+        return origin
     for dep in deps:
         if FlutterInfo in dep and entry in dep[FlutterInfo].pub_fonts.to_list():
             return str(dep.label)
@@ -215,8 +249,37 @@ def _pub_prefix(package_name):
     """
     return "packages/{}/".format(package_name) if package_name else ""
 
+def _font_entry_file(entry, font):
+    """The file a font struct carries, with a one-font legacy fallback.
+
+    New contributions carry `font.file`, so the pairing is by asset path and
+    every codepath sees the same answer. Contributions built before that
+    field (the toolchain MaterialIcons target) have only the parallel `files`
+    tuple; with exactly one font and one file, position and path agree. A
+    multi-font legacy contribution cannot be paired safely and fails.
+
+    Args:
+        entry: The pub_fonts contribution struct.
+        font: One font struct from `entry.fonts`.
+
+    Returns:
+        The File that font declares.
+    """
+    file = getattr(font, "file", None)
+    if file != None:
+        return file
+    if len(entry.fonts) == 1 and len(entry.files) == 1:
+        return entry.files[0]
+    fail("%s: font family '%s' has fonts with no paired files; declare it with flutter_font_family or a paired fonts_json/font_files." % (
+        getattr(entry, "origin", "") or "the target declaring the family",
+        entry.family,
+    ))
+
 def _font_descriptors(entry, prefix, extra_asset_copies, pub_claims):
     """One pub font entry's FontManifest descriptors, recording its copies.
+
+    Each font's own file comes from the font struct, so a descriptor's asset
+    path and the bytes bundled at it always name the same declaration.
 
     Args:
         entry: The pub_fonts contribution struct.
@@ -229,17 +292,17 @@ def _font_descriptors(entry, prefix, extra_asset_copies, pub_claims):
         The descriptors list for the family's FontManifest entry.
     """
     fonts_descriptors = []
-    for i, font in enumerate(entry.fonts):
+    for font in entry.fonts:
+        file = _font_entry_file(entry, font)
         descriptor = {"asset": prefix + font.asset_path}
         if font.weight != None:
             descriptor["weight"] = font.weight
         if font.style != None:
             descriptor["style"] = font.style
         fonts_descriptors.append(descriptor)
-        if i < len(entry.files):
-            extra_asset_copies[prefix + font.asset_path] = entry.files[i]
-            if pub_claims != None:
-                pub_claims.append(struct(key = prefix + font.asset_path, file = entry.files[i], channel = "pub"))
+        extra_asset_copies[prefix + font.asset_path] = file
+        if pub_claims != None:
+            pub_claims.append(struct(key = prefix + font.asset_path, file = file, channel = "pub"))
     return fonts_descriptors
 
 def _record_pub_family(deps, families, fonts, family_str, fonts_descriptors, entry):
@@ -316,7 +379,7 @@ def _collect_pub_assets(pub_assets, target_platform, extra_asset_copies, pub_cla
         if pub_claims != None:
             pub_claims.append(struct(key = prefix + entry.asset_path, file = entry.file, channel = "pub"))
 
-def aggregate_pub_contributions(deps, target_platform, pub_claims = None):
+def aggregate_pub_contributions(deps, target_platform, pub_claims = None, own_font_targets = []):
     """Walk transitive `FlutterInfo.pub_fonts` / `pub_assets` from deps.
 
     Each contribution carries `package_name` — the empty string sentinel
@@ -325,6 +388,11 @@ def aggregate_pub_contributions(deps, target_platform, pub_claims = None):
     every asset path. This matches Flutter's CLI behavior and the const
     finder's tree-shaking key shape (`packages/<pkg>/<family>` only when
     the IconData has a non-null `fontPackage`).
+
+    `own_font_targets` are the bundling rule's own `flutter_font_family`
+    targets — an application's `fonts`, whose bare names come before the
+    packages' as the root pubspec's do. They take part in the same dedupe and
+    conflict checks as the deps' contributions.
 
     Pub assets additionally carry `platforms` / `flavors` conditions from
     the `flutter.assets` entry that listed them. Only entries matching
@@ -352,6 +420,8 @@ def aggregate_pub_contributions(deps, target_platform, pub_claims = None):
             bundle order (font files first, then assets). The bundle's
             cross-channel key check reads these; callers that discard the
             copies (`flutter_web_application`'s font-only read) pass nothing.
+        own_font_targets: The bundling rule's own `flutter_font_family`
+            targets, in declaration order, ahead of the deps' families.
 
     Returns:
         Tuple of:
@@ -361,7 +431,8 @@ def aggregate_pub_contributions(deps, target_platform, pub_claims = None):
             File for both fonts and non-font pub-package assets.
     """
     infos = [dep[FlutterInfo] for dep in deps if FlutterInfo in dep]
-    pub_fonts = depset(transitive = [info.pub_fonts for info in infos]).to_list()
+    own_pub_fonts = font_family_contributions(own_font_targets, "")
+    pub_fonts = own_pub_fonts + depset(transitive = [info.pub_fonts for info in infos]).to_list()
     pub_assets = depset(transitive = [info.pub_assets for info in infos]).to_list()
 
     extra_asset_copies = {}
@@ -426,6 +497,34 @@ def flutter_analyzable_info(ctx, package_name, lib_root):
         code_assets = ctx.attr.code_assets,
     )
 
+def _library_pub_contributions(ctx, package_name):
+    """The library's pub_fonts/pub_assets/pub_shaders contributions.
+
+    Fonts arrive from the deprecated `fonts_json`/`font_files` pair and from
+    the `fonts` attribute's `flutter_font_family` targets; both share the
+    validation in `flutter_font_family.bzl`.
+
+    Args:
+        ctx: The `flutter_library` rule context.
+        package_name: The asset-prefix package name, verbatim from the rule's
+            `package_name` attribute (empty sentinel = bare paths).
+
+    Returns:
+        A `(pub_fonts, pub_assets, pub_shaders)` tuple of contribution lists.
+    """
+    extra_pub_fonts, extra_pub_assets, extra_pub_shaders = build_pub_contributions(
+        struct(package_name = package_name, label = ctx.label),
+        ctx.attr.fonts_json,
+        ctx.attr.font_files,
+        ctx.attr.pkg_assets,
+        ctx.attr.pkg_shaders,
+        ctx.files.shader_includes,
+        ctx.attr.pkg_asset_platforms,
+        ctx.attr.pkg_asset_flavors,
+    )
+    extra_pub_fonts.extend(font_family_contributions(ctx.attr.fonts, package_name))
+    return (extra_pub_fonts, extra_pub_assets, extra_pub_shaders)
+
 def _flutter_library_impl(ctx):
     package_name = derive_package_name(
         ctx.attr.package_name,
@@ -440,16 +539,7 @@ def _flutter_library_impl(ctx):
     # value via derive_package_name. Users opting out of asset prefixing leave
     # `package_name` unset.
     asset_pkg = ctx.attr.package_name
-    extra_pub_fonts, extra_pub_assets, extra_pub_shaders = build_pub_contributions(
-        asset_pkg,
-        ctx.attr.fonts_json,
-        ctx.attr.font_files,
-        ctx.attr.pkg_assets,
-        ctx.attr.pkg_shaders,
-        ctx.files.shader_includes,
-        ctx.attr.pkg_asset_platforms,
-        ctx.attr.pkg_asset_flavors,
-    )
+    extra_pub_fonts, extra_pub_assets, extra_pub_shaders = _library_pub_contributions(ctx, asset_pkg)
 
     # `resources` names the non-Dart remainder of `lib/`; a Dart source there
     # is a mis-filed `srcs` entry, and identical paths with identical
@@ -577,12 +667,13 @@ flutter_library = rule(
         "language_version": attr.string(
             doc = "Dart language version (`<major>.<minor>`) for this package's `package_config.json` entry. Mirrors `dart_library`'s attribute. Empty string means defer to the toolchain default.",
         ),
+        "fonts": FONTS_ATTR,
         "fonts_json": attr.string(
-            doc = "JSON-encoded list of font-family declarations (mirrors `flutter.fonts` in pubspec.yaml). Each entry: `{family: str, fonts: [{asset: str, weight: int?, style: str?}]}`. The `asset` paths are package-relative and must each match a key in `font_files`. The asset bundle aggregator prefixes family + asset paths with `packages/<package_name>/` when this rule's `package_name` is non-empty (empty = bare paths, used for non-package contributions like the toolchain MaterialIcons target).",
+            doc = "Deprecated; use `fonts` with `flutter_font_family` targets. JSON-encoded list of font-family declarations (mirrors `flutter.fonts` in pubspec.yaml). Each entry: `{family: str, fonts: [{asset: str, weight: int?, style: str?}]}`. Every `asset` must name a `font_files` entry, every `font_files` entry must be named by a family, and `weight`/`style` must be values flutter_tools accepts, or analysis fails naming the target, the family and the path. The asset bundle aggregator prefixes family + asset paths with `packages/<package_name>/` when this rule's `package_name` is non-empty (empty = bare paths, used for non-package contributions like the toolchain MaterialIcons target).",
             default = "",
         ),
         "font_files": attr.label_keyed_string_dict(
-            doc = "Map of font File label -> package-relative asset path. The string value must match an `asset` field in `fonts_json`. The file is bundled at `packages/<package_name>/<path>` (or bare `<path>` when `package_name` is empty).",
+            doc = "Deprecated with `fonts_json`; `flutter_font_family` names its own files. Map of font File label -> package-relative asset path. The string value must match an `asset` field in `fonts_json`; a value no family names fails analysis. The file is bundled at `packages/<package_name>/<path>` (or bare `<path>` when `package_name` is empty).",
             allow_files = True,
         ),
         "pkg_assets": attr.label_keyed_string_dict(
